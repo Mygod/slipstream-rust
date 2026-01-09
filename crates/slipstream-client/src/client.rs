@@ -230,8 +230,8 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         configure_quic(quic, cc_algo.as_ptr(), mtu);
     }
     if config.authoritative {
-        let max_data = stream_write_buffer_bytes()
-            .saturating_mul(AUTHORITATIVE_MAX_DATA_MULTIPLIER);
+        let max_data =
+            stream_write_buffer_bytes().saturating_mul(AUTHORITATIVE_MAX_DATA_MULTIPLIER);
         unsafe {
             picoquic_set_max_data_control(quic, max_data as u64);
         }
