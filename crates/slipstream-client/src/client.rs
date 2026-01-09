@@ -1,22 +1,23 @@
 use slipstream_core::{
     resolve_host_port,
-    tcp::{stream_read_limit_chunks, tcp_send_buffer_bytes},
+    tcp::{stream_read_limit_chunks, stream_write_buffer_bytes, tcp_send_buffer_bytes},
     HostPort,
 };
 use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
     configure_quic,
     picoquic::{
-        picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_close, picoquic_cnx_t,
-        picoquic_connection_id_t, picoquic_create, picoquic_create_client_cnx,
+        get_cwin, picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_close,
+        picoquic_cnx_t, picoquic_connection_id_t, picoquic_create, picoquic_create_client_cnx,
         picoquic_current_time, picoquic_disable_keep_alive, picoquic_enable_keep_alive,
         picoquic_get_next_local_stream_id, picoquic_get_next_wake_delay, picoquic_get_path_addr,
         picoquic_incoming_packet_ex, picoquic_mark_active_stream, picoquic_prepare_next_packet_ex,
         picoquic_prepare_packet_ex, picoquic_probe_new_path_ex,
         picoquic_provide_stream_data_buffer, picoquic_quic_t, picoquic_reset_stream,
-        picoquic_set_callback, picoquic_stream_data_consumed, slipstream_is_flow_blocked,
-        slipstream_request_poll, PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE,
-        PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
+        picoquic_set_callback, picoquic_set_max_data_control, picoquic_stream_data_consumed,
+        slipstream_disable_ack_delay, slipstream_is_flow_blocked, slipstream_request_poll,
+        PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
+        PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, ClientConfig, QuicGuard, SLIPSTREAM_FILE_CANCEL_ERROR,
     SLIPSTREAM_INTERNAL_ERROR,
@@ -45,6 +46,9 @@ const STREAM_READ_CHUNK_BYTES: usize = 4096;
 const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;
 const CLIENT_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
 const MAX_POLL_BURST: usize = PICOQUIC_PACKET_LOOP_RECV_MAX;
+const AUTHORITATIVE_LOOP_MULTIPLIER: usize = 4;
+const AUTHORITATIVE_MAX_DATA_MULTIPLIER: usize = 4;
+const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 1_000_000;
 
 #[derive(Debug)]
 pub struct ClientError {
@@ -82,6 +86,7 @@ struct ClientState {
     streams: HashMap<u64, ClientStream>,
     command_tx: mpsc::UnboundedSender<Command>,
     data_notify: Arc<Notify>,
+    authoritative: bool,
     debug_streams: bool,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
@@ -189,6 +194,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         streams: HashMap::new(),
         command_tx: command_tx.clone(),
         data_notify: data_notify.clone(),
+        authoritative: config.authoritative,
         debug_streams,
         debug_enqueued_bytes: 0,
         debug_last_enqueue_at: 0,
@@ -222,6 +228,13 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let _quic_guard = QuicGuard::new(quic);
     unsafe {
         configure_quic(quic, cc_algo.as_ptr(), mtu);
+    }
+    if config.authoritative {
+        let max_data = stream_write_buffer_bytes()
+            .saturating_mul(AUTHORITATIVE_MAX_DATA_MULTIPLIER);
+        unsafe {
+            picoquic_set_max_data_control(quic, max_data as u64);
+        }
     }
 
     let mut server_storage = resolvers[0].storage;
@@ -257,9 +270,20 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
     let mut dns_id = 1u16;
     let mut pending_polls: usize = 0;
+    let mut inflight_poll_ids: HashMap<u16, u64> = HashMap::new();
     let mut debug = DebugMetrics::new(config.debug_poll);
     let mut recv_buf = vec![0u8; 4096];
     let mut send_buf = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
+    let packet_loop_send_max = if config.authoritative {
+        PICOQUIC_PACKET_LOOP_SEND_MAX * AUTHORITATIVE_LOOP_MULTIPLIER
+    } else {
+        PICOQUIC_PACKET_LOOP_SEND_MAX
+    };
+    let packet_loop_recv_max = if config.authoritative {
+        PICOQUIC_PACKET_LOOP_RECV_MAX * AUTHORITATIVE_LOOP_MULTIPLIER
+    } else {
+        PICOQUIC_PACKET_LOOP_RECV_MAX
+    };
 
     loop {
         let current_time = unsafe { picoquic_current_time() };
@@ -275,11 +299,25 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             add_paths(cnx, &mut resolvers)?;
         }
 
+        if config.authoritative {
+            expire_inflight_polls(&mut inflight_poll_ids, current_time);
+        }
+
         let delay_us =
             unsafe { picoquic_get_next_wake_delay(quic, current_time, DNS_WAKE_DELAY_MAX_US) };
         let delay_us = if delay_us < 0 { 0 } else { delay_us as u64 };
         let streams_len_for_sleep = unsafe { (*state_ptr).streams.len() };
-        let has_work = pending_polls > 0 || streams_len_for_sleep > 0;
+        let inflight_polls = inflight_poll_ids.len();
+        let poll_deficit_for_sleep = if config.authoritative {
+            cwnd_target_polls(cnx, mtu).saturating_sub(inflight_polls)
+        } else {
+            pending_polls
+        };
+        let has_work = if config.authoritative {
+            poll_deficit_for_sleep > 0 || streams_len_for_sleep > 0 || inflight_polls > 0
+        } else {
+            poll_deficit_for_sleep > 0 || streams_len_for_sleep > 0
+        };
         // Avoid a tight poll loop when idle, but keep the short slice during active transfers.
         let timeout_us = if has_work {
             delay_us.clamp(1, DNS_POLL_SLICE_US)
@@ -304,9 +342,11 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                             quic,
                             &local_addr_storage,
                             &mut pending_polls,
+                            &mut inflight_poll_ids,
                             &mut debug,
+                            config.authoritative,
                         )?;
-                        for _ in 1..PICOQUIC_PACKET_LOOP_RECV_MAX {
+                        for _ in 1..packet_loop_recv_max {
                             match udp.try_recv_from(&mut recv_buf) {
                                 Ok((size, peer)) => {
                                     handle_dns_response(
@@ -315,7 +355,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                                         quic,
                                         &local_addr_storage,
                                         &mut pending_polls,
+                                        &mut inflight_poll_ids,
                                         &mut debug,
+                                        config.authoritative,
                                     )?;
                                 }
                                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -340,7 +382,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         drain_commands(cnx, state_ptr, &mut command_rx);
         drain_stream_data(cnx, state_ptr);
 
-        for _ in 0..PICOQUIC_PACKET_LOOP_SEND_MAX {
+        for _ in 0..packet_loop_send_max {
             let current_time = unsafe { picoquic_current_time() };
             let mut send_length: libc::size_t = 0;
             let mut addr_to: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -376,7 +418,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 if streams_len > 0 {
                     debug.zero_send_with_streams = debug.zero_send_with_streams.saturating_add(1);
                     let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) } != 0;
-                    if flow_blocked {
+                    if flow_blocked && !config.authoritative {
                         pending_polls = pending_polls.max(1);
                     }
                 }
@@ -409,7 +451,24 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             udp.send_to(&packet, dest).await.map_err(map_io)?;
         }
 
-        if pending_polls > 0 {
+        if config.authoritative {
+            let inflight_polls = inflight_poll_ids.len();
+            let mut poll_deficit = cwnd_target_polls(cnx, mtu).saturating_sub(inflight_polls);
+            if poll_deficit > 0 {
+                send_poll_queries(
+                    cnx,
+                    &udp,
+                    config,
+                    &mut local_addr_storage,
+                    &mut dns_id,
+                    &mut poll_deficit,
+                    &mut inflight_poll_ids,
+                    &mut send_buf,
+                    &mut debug,
+                )
+                .await?;
+            }
+        } else if pending_polls > 0 {
             send_poll_queries(
                 cnx,
                 &udp,
@@ -417,6 +476,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 &mut local_addr_storage,
                 &mut dns_id,
                 &mut pending_polls,
+                &mut inflight_poll_ids,
                 &mut send_buf,
                 &mut debug,
             )
@@ -431,7 +491,13 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         };
         debug.enqueued_bytes = enqueued_bytes;
         debug.last_enqueue_at = last_enqueue_at;
-        maybe_report_debug(&mut debug, report_time, streams_len, pending_polls);
+        let pending_for_debug = if config.authoritative {
+            let inflight_polls = inflight_poll_ids.len();
+            cwnd_target_polls(cnx, mtu).saturating_sub(inflight_polls)
+        } else {
+            pending_polls
+        };
+        maybe_report_debug(&mut debug, report_time, streams_len, pending_for_debug);
     }
 
     unsafe {
@@ -458,6 +524,11 @@ unsafe extern "C" fn client_callback(
     match fin_or_event {
         picoquic_call_back_event_t::picoquic_callback_ready => {
             state.ready = true;
+            if state.authoritative {
+                unsafe {
+                    slipstream_disable_ack_delay(cnx);
+                }
+            }
             eprintln!("Connection ready");
         }
         picoquic_call_back_event_t::picoquic_callback_stream_data
@@ -615,6 +686,44 @@ fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
         ));
     }
     Ok(mtu)
+}
+
+fn dns_response_id(packet: &[u8]) -> Option<u16> {
+    if packet.len() < 12 {
+        return None;
+    }
+    let id = u16::from_be_bytes([packet[0], packet[1]]);
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    if flags & 0x8000 == 0 {
+        return None;
+    }
+    Some(id)
+}
+
+fn expire_inflight_polls(inflight_poll_ids: &mut HashMap<u16, u64>, now: u64) {
+    if inflight_poll_ids.is_empty() {
+        return;
+    }
+    let expire_before = now.saturating_sub(AUTHORITATIVE_POLL_TIMEOUT_US);
+    let mut expired = Vec::new();
+    for (id, sent_at) in inflight_poll_ids.iter() {
+        if *sent_at <= expire_before {
+            expired.push(*id);
+        }
+    }
+    for id in expired {
+        inflight_poll_ids.remove(&id);
+    }
+}
+
+fn cwnd_target_polls(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
+    let mtu = mtu as u64;
+    if mtu == 0 {
+        return 0;
+    }
+    let cwnd = get_cwin(cnx);
+    let target = cwnd.saturating_add(mtu - 1) / mtu;
+    usize::try_from(target).unwrap_or(usize::MAX)
 }
 
 fn resolve_resolvers(resolvers: &[HostPort]) -> Result<Vec<ResolverAddr>, ClientError> {
@@ -928,8 +1037,17 @@ fn handle_dns_response(
     quic: *mut picoquic_quic_t,
     local_addr_storage: &libc::sockaddr_storage,
     pending_polls: &mut usize,
+    inflight_poll_ids: &mut HashMap<u16, u64>,
     debug: &mut DebugMetrics,
+    authoritative: bool,
 ) -> Result<(), ClientError> {
+    if let Some(response_id) = dns_response_id(buf) {
+        debug.dns_responses = debug.dns_responses.saturating_add(1);
+        if authoritative {
+            inflight_poll_ids.remove(&response_id);
+        }
+    }
+
     if let Some(payload) = decode_response(buf) {
         let mut peer_storage = socket_addr_to_storage(peer);
         let mut local_storage = unsafe { std::ptr::read(local_addr_storage) };
@@ -953,8 +1071,9 @@ fn handle_dns_response(
         if ret < 0 {
             return Err(ClientError::new("Failed processing inbound QUIC packet"));
         }
-        debug.dns_responses = debug.dns_responses.saturating_add(1);
-        *pending_polls = pending_polls.saturating_add(1).min(MAX_POLL_BURST);
+        if !authoritative {
+            *pending_polls = pending_polls.saturating_add(1).min(MAX_POLL_BURST);
+        }
     }
     Ok(())
 }
@@ -967,6 +1086,7 @@ async fn send_poll_queries(
     local_addr_storage: &mut libc::sockaddr_storage,
     dns_id: &mut u16,
     pending_polls: &mut usize,
+    inflight_poll_ids: &mut HashMap<u16, u64>,
     send_buf: &mut [u8],
     debug: &mut DebugMetrics,
 ) -> Result<(), ClientError> {
@@ -1011,10 +1131,11 @@ async fn send_poll_queries(
         debug.send_bytes = debug.send_bytes.saturating_add(send_length as u64);
         debug.polls_sent = debug.polls_sent.saturating_add(1);
 
+        let poll_id = *dns_id;
         let qname = build_qname(&send_buf[..send_length], config.domain)
             .map_err(|err| ClientError::new(err.to_string()))?;
         let params = QueryParams {
-            id: *dns_id,
+            id: poll_id,
             qname: &qname,
             qtype: RR_TXT,
             qclass: CLASS_IN,
@@ -1028,6 +1149,9 @@ async fn send_poll_queries(
 
         let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
         udp.send_to(&packet, dest).await.map_err(map_io)?;
+        if config.authoritative {
+            inflight_poll_ids.insert(poll_id, current_time);
+        }
     }
 
     Ok(())

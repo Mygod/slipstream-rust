@@ -213,6 +213,7 @@ extern "C" {
         current_time: u64,
         delay_max: i64,
     ) -> i64;
+    pub fn picoquic_get_cwin(cnx: *mut picoquic_cnx_t) -> u64;
 
     pub fn slipstream_request_poll(cnx: *mut picoquic_cnx_t);
     pub fn slipstream_is_flow_blocked(cnx: *mut picoquic_cnx_t) -> c_int;
@@ -319,4 +320,12 @@ extern "C" {
         local: c_int,
         addr: *mut sockaddr_storage,
     ) -> c_int;
+}
+
+pub fn get_cwin(cnx: *mut picoquic_cnx_t) -> u64 {
+    if cnx.is_null() {
+        0
+    } else {
+        unsafe { picoquic_get_cwin(cnx) }
+    }
 }

@@ -4,9 +4,9 @@ mod dots;
 
 pub use base32::{decode as base32_decode, encode as base32_encode, Base32Error};
 pub use dns::{
-    decode_query, decode_response, encode_query, encode_response, DecodeQueryError, DecodedQuery,
-    DnsError, QueryParams, Question, Rcode, ResponseParams, CLASS_IN, EDNS_UDP_PAYLOAD, RR_A,
-    RR_OPT, RR_TXT,
+    decode_query, decode_response, encode_query, encode_response, is_response, DecodeQueryError,
+    DecodedQuery, DnsError, QueryParams, Question, Rcode, ResponseParams, CLASS_IN,
+    EDNS_UDP_PAYLOAD, RR_A, RR_OPT, RR_TXT,
 };
 pub use dots::{dotify, undotify};
 

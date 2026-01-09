@@ -20,10 +20,11 @@ struct Args {
     #[arg(
         long = "congestion-control",
         short = 'c',
-        default_value = "dcubic",
         value_parser = ["bbr", "dcubic"]
     )]
-    congestion_control: String,
+    congestion_control: Option<String>,
+    #[arg(long = "authoritative")]
+    authoritative: bool,
     #[arg(
         short = 'g',
         long = "gso",
@@ -74,10 +75,19 @@ fn main() {
         }
     };
 
+    let congestion_control = args.congestion_control.unwrap_or_else(|| {
+        if args.authoritative {
+            "bbr".to_string()
+        } else {
+            "dcubic".to_string()
+        }
+    });
+
     let config = ClientConfig {
         tcp_listen_port: args.tcp_listen_port,
         resolvers: &resolver_addresses,
-        congestion_control: &args.congestion_control,
+        congestion_control: &congestion_control,
+        authoritative: args.authoritative,
         gso: args.gso,
         domain: &domain,
         keep_alive_interval: args.keep_alive_interval as usize,

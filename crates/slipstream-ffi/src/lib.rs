@@ -9,6 +9,7 @@ pub struct ClientConfig<'a> {
     pub resolvers: &'a [HostPort],
     pub domain: &'a str,
     pub congestion_control: &'a str,
+    pub authoritative: bool,
     pub gso: bool,
     pub keep_alive_interval: usize,
     pub debug_poll: bool,

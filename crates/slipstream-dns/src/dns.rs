@@ -361,6 +361,12 @@ pub fn decode_response(packet: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+pub fn is_response(packet: &[u8]) -> bool {
+    parse_header(packet)
+        .map(|header| header.is_response)
+        .unwrap_or(false)
+}
+
 fn encode_opt_record(out: &mut Vec<u8>) -> Result<(), DnsError> {
     out.push(0);
     write_u16(out, RR_OPT);

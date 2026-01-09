@@ -12,7 +12,8 @@ Required flags:
 Common flags:
 
 - --tcp-listen-port <PORT> (default: 5201)
-- --congestion-control <bbr|dcubic> (default: dcubic)
+- --congestion-control <bbr|dcubic> (default: dcubic; defaults to bbr when --authoritative is set and this flag is omitted)
+- --authoritative (assume direct server access; drives in-flight DNS queries by QUIC cwnd)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <SECONDS> (default: 400)
 
@@ -29,6 +30,9 @@ Notes:
 
 - Resolver addresses must all be IPv4 or all be IPv6; mixed families are rejected.
 - IPv6 resolvers must be bracketed, for example: [2001:db8::1]:53.
+- --authoritative keeps the DNS wire format unchanged and remains C interop safe.
+- Use --authoritative only when you control the resolver/server path and can absorb high QPS bursts.
+- Expect higher CPU usage and detectability risk; misusing it can overload resolvers/servers.
 
 ## slipstream-server
 
