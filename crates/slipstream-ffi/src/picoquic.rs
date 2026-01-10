@@ -213,6 +213,7 @@ extern "C" {
         current_time: u64,
         delay_max: i64,
     ) -> i64;
+    pub fn picoquic_get_rtt(cnx: *mut picoquic_cnx_t) -> u64;
     pub fn picoquic_get_cwin(cnx: *mut picoquic_cnx_t) -> u64;
     pub fn picoquic_get_pacing_rate(cnx: *mut picoquic_cnx_t) -> u64;
 
@@ -328,6 +329,14 @@ pub fn get_cwin(cnx: *mut picoquic_cnx_t) -> u64 {
         0
     } else {
         unsafe { picoquic_get_cwin(cnx) }
+    }
+}
+
+pub fn get_rtt(cnx: *mut picoquic_cnx_t) -> u64 {
+    if cnx.is_null() {
+        0
+    } else {
+        unsafe { picoquic_get_rtt(cnx) }
     }
 }
 

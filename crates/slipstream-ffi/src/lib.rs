@@ -4,6 +4,7 @@ pub mod picoquic;
 pub mod runtime;
 
 pub use picoquic::get_pacing_rate;
+pub use picoquic::get_rtt;
 
 #[derive(Debug)]
 pub struct ClientConfig<'a> {

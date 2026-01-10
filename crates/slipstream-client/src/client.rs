@@ -7,7 +7,7 @@ use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CL
 use slipstream_ffi::{
     configure_quic,
     picoquic::{
-        get_cwin, get_pacing_rate, picoquic_add_to_stream, picoquic_call_back_event_t,
+        get_cwin, get_pacing_rate, get_rtt, picoquic_add_to_stream, picoquic_call_back_event_t,
         picoquic_close, picoquic_cnx_t, picoquic_connection_id_t, picoquic_create,
         picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
         picoquic_enable_keep_alive, picoquic_get_next_local_stream_id,
@@ -167,6 +167,7 @@ struct PacingPollBudget {
     payload_bytes: f64,
     mtu: u32,
     last_pacing_rate: u64,
+    rtt_floor_us: u64,
 }
 
 impl PacingPollBudget {
@@ -175,6 +176,7 @@ impl PacingPollBudget {
             payload_bytes: mtu.max(1) as f64,
             mtu,
             last_pacing_rate: 0,
+            rtt_floor_us: 10_000,
         }
     }
 
@@ -184,7 +186,7 @@ impl PacingPollBudget {
         rtt_proxy_us: u64,
     ) -> PacingBudgetSnapshot {
         let pacing_rate = get_pacing_rate(cnx);
-        let rtt_seconds = (rtt_proxy_us.max(1) as f64) / 1_000_000.0;
+        let rtt_seconds = (self.derive_rtt_us(cnx, rtt_proxy_us) as f64) / 1_000_000.0;
         if pacing_rate == 0 {
             let target_inflight = cwnd_target_polls(cnx, self.mtu);
             let qps = target_inflight as f64 / rtt_seconds;
@@ -207,6 +209,12 @@ impl PacingPollBudget {
             gain,
             target_inflight,
         }
+    }
+
+    fn derive_rtt_us(&self, cnx: *mut picoquic_cnx_t, rtt_proxy_us: u64) -> u64 {
+        let smoothed = get_rtt(cnx);
+        let candidate = if smoothed > 0 { smoothed } else { rtt_proxy_us };
+        candidate.max(self.rtt_floor_us)
     }
 
     fn next_gain(&mut self, pacing_rate: u64) -> f64 {
