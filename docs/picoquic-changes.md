@@ -65,6 +65,13 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
   - Why: The server congestion algorithm is customized to effectively remove CC limits so
     DNS polling and application backpressure control throughput instead of packet-level CC.
 
+## Public picoquic APIs relied on by slipstream
+
+- `picoquic_get_pacing_rate`
+  - Wrapper: `get_pacing_rate` in `crates/slipstream-ffi/src/picoquic.rs`.
+  - Why: The authoritative client derives its DNS poll QPS budget from picoquic's pacing rate and
+    uses cwnd as a fallback when pacing is unavailable.
+
 ## Notes
 
 - Internal usage means the submodule version is coupled to slipstream. Any picoquic update

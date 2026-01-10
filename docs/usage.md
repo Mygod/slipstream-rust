@@ -13,7 +13,7 @@ Common flags:
 
 - --tcp-listen-port <PORT> (default: 5201)
 - --congestion-control <bbr|dcubic> (default: dcubic; defaults to bbr when --authoritative is set and this flag is omitted)
-- --authoritative (assume direct server access; drives in-flight DNS queries by QUIC cwnd)
+- --authoritative (assume direct server access; in-flight DNS polls follow the QUIC pacing rate with cwnd as a fallback)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <SECONDS> (default: 400)
 
@@ -32,6 +32,7 @@ Notes:
 - IPv6 resolvers must be bracketed, for example: [2001:db8::1]:53.
 - --authoritative keeps the DNS wire format unchanged and remains C interop safe.
 - Use --authoritative only when you control the resolver/server path and can absorb high QPS bursts.
+- Authoritative mode now derives its QPS budget from picoquic’s pacing rate (scaled by the DNS payload size and RTT proxy) and falls back to cwnd if pacing is unavailable; `--debug-poll` logs the pacing rate, target QPS, and inflight polls.
 - Expect higher CPU usage and detectability risk; misusing it can overload resolvers/servers.
 
 ## slipstream-server

@@ -7,17 +7,17 @@ use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CL
 use slipstream_ffi::{
     configure_quic,
     picoquic::{
-        get_cwin, picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_close,
-        picoquic_cnx_t, picoquic_connection_id_t, picoquic_create, picoquic_create_client_cnx,
-        picoquic_current_time, picoquic_disable_keep_alive, picoquic_enable_keep_alive,
-        picoquic_get_next_local_stream_id, picoquic_get_next_wake_delay, picoquic_get_path_addr,
-        picoquic_incoming_packet_ex, picoquic_mark_active_stream, picoquic_prepare_next_packet_ex,
-        picoquic_prepare_packet_ex, picoquic_probe_new_path_ex,
-        picoquic_provide_stream_data_buffer, picoquic_quic_t, picoquic_reset_stream,
-        picoquic_set_callback, picoquic_set_max_data_control, picoquic_stream_data_consumed,
-        slipstream_disable_ack_delay, slipstream_is_flow_blocked, slipstream_request_poll,
-        PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
-        PICOQUIC_PACKET_LOOP_SEND_MAX,
+        get_cwin, get_pacing_rate, picoquic_add_to_stream, picoquic_call_back_event_t,
+        picoquic_close, picoquic_cnx_t, picoquic_connection_id_t, picoquic_create,
+        picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
+        picoquic_enable_keep_alive, picoquic_get_next_local_stream_id,
+        picoquic_get_next_wake_delay, picoquic_get_path_addr, picoquic_incoming_packet_ex,
+        picoquic_mark_active_stream, picoquic_prepare_next_packet_ex, picoquic_prepare_packet_ex,
+        picoquic_probe_new_path_ex, picoquic_provide_stream_data_buffer, picoquic_quic_t,
+        picoquic_reset_stream, picoquic_set_callback, picoquic_set_max_data_control,
+        picoquic_stream_data_consumed, slipstream_disable_ack_delay, slipstream_is_flow_blocked,
+        slipstream_request_poll, PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE,
+        PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, ClientConfig, QuicGuard, SLIPSTREAM_FILE_CANCEL_ERROR,
     SLIPSTREAM_INTERNAL_ERROR,
@@ -49,6 +49,9 @@ const MAX_POLL_BURST: usize = PICOQUIC_PACKET_LOOP_RECV_MAX;
 const AUTHORITATIVE_LOOP_MULTIPLIER: usize = 4;
 const AUTHORITATIVE_MAX_DATA_MULTIPLIER: usize = 4;
 const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 1_000_000;
+const PACING_GAIN_BASE: f64 = 1.0;
+const PACING_GAIN_PROBE: f64 = 1.25;
+const PACING_GAIN_EPSILON: f64 = 0.05;
 
 #[derive(Debug)]
 pub struct ClientError {
@@ -152,6 +155,72 @@ impl DebugMetrics {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PacingBudgetSnapshot {
+    pacing_rate: u64,
+    qps: f64,
+    gain: f64,
+    target_inflight: usize,
+}
+
+struct PacingPollBudget {
+    payload_bytes: f64,
+    mtu: u32,
+    last_pacing_rate: u64,
+}
+
+impl PacingPollBudget {
+    fn new(mtu: u32) -> Self {
+        Self {
+            payload_bytes: mtu.max(1) as f64,
+            mtu,
+            last_pacing_rate: 0,
+        }
+    }
+
+    fn target_inflight(
+        &mut self,
+        cnx: *mut picoquic_cnx_t,
+        rtt_proxy_us: u64,
+    ) -> PacingBudgetSnapshot {
+        let pacing_rate = get_pacing_rate(cnx);
+        let rtt_seconds = (rtt_proxy_us.max(1) as f64) / 1_000_000.0;
+        if pacing_rate == 0 {
+            let target_inflight = cwnd_target_polls(cnx, self.mtu);
+            let qps = target_inflight as f64 / rtt_seconds;
+            self.last_pacing_rate = 0;
+            return PacingBudgetSnapshot {
+                pacing_rate,
+                qps,
+                gain: PACING_GAIN_BASE,
+                target_inflight,
+            };
+        }
+
+        let gain = self.next_gain(pacing_rate);
+        let qps = (pacing_rate as f64 / self.payload_bytes) * gain;
+        let target_inflight = (qps * rtt_seconds).ceil().min(usize::MAX as f64) as usize;
+
+        PacingBudgetSnapshot {
+            pacing_rate,
+            qps,
+            gain,
+            target_inflight,
+        }
+    }
+
+    fn next_gain(&mut self, pacing_rate: u64) -> f64 {
+        let gain =
+            if pacing_rate as f64 > (self.last_pacing_rate as f64) * (1.0 + PACING_GAIN_EPSILON) {
+                PACING_GAIN_PROBE
+            } else {
+                PACING_GAIN_BASE
+            };
+        self.last_pacing_rate = pacing_rate;
+        gain
+    }
+}
+
 enum Command {
     NewStream(TokioTcpStream),
     StreamData { stream_id: u64, data: Vec<u8> },
@@ -164,6 +233,7 @@ enum Command {
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let domain_len = config.domain.len();
     let mtu = compute_mtu(domain_len)?;
+    let mut pacing_budget = PacingPollBudget::new(mtu);
     let mut resolvers = resolve_resolvers(config.resolvers)?;
     if resolvers.is_empty() {
         return Err(ClientError::new("At least one resolver is required"));
@@ -306,15 +376,27 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let delay_us =
             unsafe { picoquic_get_next_wake_delay(quic, current_time, DNS_WAKE_DELAY_MAX_US) };
         let delay_us = if delay_us < 0 { 0 } else { delay_us as u64 };
+        let pacing_snapshot = if config.authoritative {
+            Some(pacing_budget.target_inflight(cnx, delay_us.max(1)))
+        } else {
+            None
+        };
         let streams_len_for_sleep = unsafe { (*state_ptr).streams.len() };
-        let inflight_polls = inflight_poll_ids.len();
+        let inflight_polls_for_sleep = inflight_poll_ids.len();
         let poll_deficit_for_sleep = if config.authoritative {
-            cwnd_target_polls(cnx, mtu).saturating_sub(inflight_polls)
+            pacing_snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    snapshot
+                        .target_inflight
+                        .saturating_sub(inflight_polls_for_sleep)
+                })
+                .unwrap_or(0)
         } else {
             pending_polls
         };
         let has_work = if config.authoritative {
-            poll_deficit_for_sleep > 0 || streams_len_for_sleep > 0 || inflight_polls > 0
+            poll_deficit_for_sleep > 0 || streams_len_for_sleep > 0 || inflight_polls_for_sleep > 0
         } else {
             poll_deficit_for_sleep > 0 || streams_len_for_sleep > 0
         };
@@ -451,9 +533,12 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             udp.send_to(&packet, dest).await.map_err(map_io)?;
         }
 
+        let inflight_polls = inflight_poll_ids.len();
         if config.authoritative {
-            let inflight_polls = inflight_poll_ids.len();
-            let mut poll_deficit = cwnd_target_polls(cnx, mtu).saturating_sub(inflight_polls);
+            let pacing_target = pacing_snapshot
+                .map(|snapshot| snapshot.target_inflight)
+                .unwrap_or_else(|| cwnd_target_polls(cnx, mtu));
+            let mut poll_deficit = pacing_target.saturating_sub(inflight_polls);
             if poll_deficit > 0 {
                 send_poll_queries(
                     cnx,
@@ -492,12 +577,20 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         debug.enqueued_bytes = enqueued_bytes;
         debug.last_enqueue_at = last_enqueue_at;
         let pending_for_debug = if config.authoritative {
-            let inflight_polls = inflight_poll_ids.len();
-            cwnd_target_polls(cnx, mtu).saturating_sub(inflight_polls)
+            pacing_snapshot
+                .map(|snapshot| snapshot.target_inflight.saturating_sub(inflight_polls))
+                .unwrap_or(0)
         } else {
             pending_polls
         };
-        maybe_report_debug(&mut debug, report_time, streams_len, pending_for_debug);
+        maybe_report_debug(
+            &mut debug,
+            report_time,
+            streams_len,
+            pending_for_debug,
+            inflight_polls,
+            pacing_snapshot,
+        );
     }
 
     unsafe {
@@ -1162,6 +1255,8 @@ fn maybe_report_debug(
     now: u64,
     streams_len: usize,
     pending_polls: usize,
+    inflight_polls: usize,
+    pacing_snapshot: Option<PacingBudgetSnapshot>,
 ) {
     if !debug.enabled {
         return;
@@ -1194,8 +1289,16 @@ fn maybe_report_debug(
     } else {
         now.saturating_sub(debug.last_enqueue_at) / 1_000
     };
+    let pacing_summary = if let Some(snapshot) = pacing_snapshot {
+        format!(
+            " pacing_rate={} qps_target={:.2} target_inflight={} gain={:.2}",
+            snapshot.pacing_rate, snapshot.qps, snapshot.target_inflight, snapshot.gain
+        )
+    } else {
+        String::new()
+    };
     eprintln!(
-        "debug: dns+={} send_pkts+={} send_bytes+={} polls+={} zero_send+={} zero_send_streams+={} streams={} enqueued+={} last_enqueue_ms={} pending_polls={}",
+        "debug: dns+={} send_pkts+={} send_bytes+={} polls+={} zero_send+={} zero_send_streams+={} streams={} enqueued+={} last_enqueue_ms={} pending_polls={} inflight_polls={}{}",
         dns_delta,
         send_pkt_delta,
         send_bytes_delta,
@@ -1205,7 +1308,9 @@ fn maybe_report_debug(
         streams_len,
         enq_delta,
         enqueue_ms,
-        pending_polls
+        pending_polls,
+        inflight_polls,
+        pacing_summary
     );
     debug.last_report_at = now;
     debug.last_report_dns = debug.dns_responses;

@@ -3,6 +3,8 @@ use slipstream_core::HostPort;
 pub mod picoquic;
 pub mod runtime;
 
+pub use picoquic::get_pacing_rate;
+
 #[derive(Debug)]
 pub struct ClientConfig<'a> {
     pub tcp_listen_port: u16,
