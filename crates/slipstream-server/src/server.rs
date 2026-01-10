@@ -360,15 +360,14 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 }
             }
 
-            if slot.rcode.is_none() && send_length == 0 {
-                continue;
-            }
-            let payload = if send_length > 0 {
-                Some(&send_buf[..send_length])
+            let (payload, rcode) = if send_length > 0 {
+                (Some(&send_buf[..send_length]), slot.rcode)
+            } else if slot.rcode.is_none() {
+                // No QUIC payload ready; still answer the poll with NOERROR and empty payload to clear it.
+                (None, Some(slipstream_dns::Rcode::Ok))
             } else {
-                None
+                (None, slot.rcode)
             };
-            let rcode = slot.rcode;
             let response = encode_response(&ResponseParams {
                 id: slot.id,
                 rd: slot.rd,
