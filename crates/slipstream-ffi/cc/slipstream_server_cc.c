@@ -20,6 +20,15 @@ static void slipstream_server_cc_init(picoquic_cnx_t * cnx, picoquic_path_t* pat
         state->state = slipstream_server_cc_alg_none;
     }
     path_x->congestion_alg_state = (void*)state;
+
+    /* Disable congestion control/pacing limits for authoritative server mode. */
+    path_x->cwin = UINT64_MAX;
+    path_x->pacing.rate = UINT64_MAX;
+    path_x->pacing.packet_time_nanosec = 1;
+    path_x->pacing.packet_time_microsec = 1;
+    path_x->pacing.bucket_max = UINT64_MAX / 4;
+    path_x->pacing.bucket_nanosec = UINT64_MAX / 4;
+    path_x->is_cc_data_updated = 1;
 }
 
 static void slipstream_server_cc_notify(
