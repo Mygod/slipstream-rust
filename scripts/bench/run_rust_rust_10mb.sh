@@ -29,6 +29,7 @@ PROXY_JITTER_MS="${PROXY_JITTER_MS:-}"
 PROXY_DIST="${PROXY_DIST:-normal}"
 PROXY_PORT="${PROXY_PORT:-}"
 PROXY_REORDER_PROB="${PROXY_REORDER_PROB:-}"
+PROXY_BURST_CORRELATION="${PROXY_BURST_CORRELATION:-}"
 CLIENT_ARGS="${CLIENT_ARGS:-}"
 
 client_extra_args=()
@@ -278,9 +279,14 @@ run_case() {
     if [[ -n "${PROXY_JITTER_MS}" ]]; then
       proxy_args+=(--jitter-ms "${PROXY_JITTER_MS}")
     fi
+    if [[ -n "${PROXY_BURST_CORRELATION}" ]]; then
+      proxy_args+=(--burst-correlation "${PROXY_BURST_CORRELATION}")
+    fi
+    if [[ -n "${PROXY_REORDER_PROB}" ]]; then
+      proxy_args+=(--reorder-rate "${PROXY_REORDER_PROB}")
+    fi
     python3 "${ROOT_DIR}/scripts/interop/udp_capture_proxy.py" \
       "${proxy_args[@]}" \
-      ${PROXY_REORDER_PROB:+"--reorder-prob" "${PROXY_REORDER_PROB}"} \
       >"${case_dir}/dns_proxy.log" 2>&1 &
     PROXY_PID=$!
     resolver_port="${proxy_port}"

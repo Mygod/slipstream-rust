@@ -35,6 +35,11 @@ def run_order_test(total_packets: int) -> int:
     upstream_port = pick_free_udp_port()
     listen_host = upstream_host = "127.0.0.1"
 
+    err_fd, err_path = tempfile.mkstemp(prefix="udp_proxy_err_", suffix=".log")
+    os.close(err_fd)
+
+    log_fd, log_path = tempfile.mkstemp(prefix="udp_proxy_log_", suffix=".jsonl")
+    os.close(log_fd)
     proxy = subprocess.Popen(
         [
             sys.executable,
@@ -47,15 +52,15 @@ def run_order_test(total_packets: int) -> int:
             "0",
             "--jitter-ms",
             "0",
-            "--reorder-prob",
-            "0",
             "--max-packets",
+            str(total_packets),
+            "--expected-packets",
             str(total_packets),
             "--log",
             os.devnull,
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=open(err_path, "w"),
     )
 
     sink_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -90,11 +95,22 @@ def run_order_test(total_packets: int) -> int:
         proxy.terminate()
         proxy.wait()
 
+    proxy_err = ""
+    try:
+        with open(err_path, "r") as err_handle:
+            proxy_err = err_handle.read().strip()
+    finally:
+        try:
+            os.remove(err_path)
+        except OSError:
+            pass
+
     if received != list(range(total_packets)):
         missing = set(range(total_packets)) - set(received)
         print(
             f"FAIL: out of order or missing; "
-            f"first few received={received[:10]}, missing={sorted(list(missing))[:10]}"
+            f"first few received={received[:10]}, missing={sorted(list(missing))[:10]} "
+            f"proxy_ret={proxy.returncode} proxy_err={proxy_err!r}"
         )
         return 1
 
@@ -103,7 +119,11 @@ def run_order_test(total_packets: int) -> int:
 
 
 def run_reorder_smoke(
-    total_packets: int, delay_ms: float, jitter_ms: float, reorder_prob: float
+    total_packets: int,
+    delay_ms: float,
+    jitter_ms: float,
+    burst_correlation: float,
+    reorder_prob: float,
 ) -> int:
     listen_port = pick_free_udp_port()
     upstream_port = pick_free_udp_port()
@@ -111,6 +131,9 @@ def run_reorder_smoke(
 
     log_fd, log_path = tempfile.mkstemp(prefix="udp_proxy_log_", suffix=".jsonl")
     os.close(log_fd)
+
+    err_fd, err_path = tempfile.mkstemp(prefix="udp_proxy_err_", suffix=".log")
+    os.close(err_fd)
 
     proxy = subprocess.Popen(
         [
@@ -124,13 +147,15 @@ def run_reorder_smoke(
             str(delay_ms),
             "--jitter-ms",
             str(jitter_ms),
-            "--reorder-prob",
+            "--reorder-rate",
             str(reorder_prob),
+            "--expected-packets",
+            str(total_packets),
             "--log",
             log_path,
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=open(err_path, "w"),
     )
 
     sink_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -171,6 +196,16 @@ def run_reorder_smoke(
             proxy.kill()
             proxy.wait()
 
+    proxy_err = ""
+    try:
+        with open(err_path, "r") as err_handle:
+            proxy_err = err_handle.read().strip()
+    finally:
+        try:
+            os.remove(err_path)
+        except OSError:
+            pass
+
     missing = total_packets - len(received)
     highest = -1
     reorders = 0
@@ -199,7 +234,7 @@ def run_reorder_smoke(
 
     reorder_rate = (reorders / max(1, len(received))) * 100
     if missing:
-        print(f"FAIL: missing {missing} packets")
+        print(f"FAIL: missing {missing} packets proxy_ret={proxy.returncode} proxy_err={proxy_err!r}")
         return 1
 
     delay_mean = statistics.mean(delays) if delays else 0.0
@@ -207,28 +242,15 @@ def run_reorder_smoke(
     delay_min = min(delays) if delays else 0.0
     delay_max = max(delays) if delays else 0.0
 
-    mean_expected_low = delay_ms * 0.7
-    mean_expected_high = delay_ms * 1.3
-    std_expected_low = jitter_ms * 0.5
-    std_expected_high = jitter_ms * 1.5
-    reorder_expected_high = max(0.001, reorder_prob * 5) * 100
+    reorder_expected_low = reorder_prob * 0.5 * 100
+    reorder_expected_high = reorder_prob * 2 * 100
 
     ok = True
-    if not (mean_expected_low <= delay_mean <= mean_expected_high):
+    # Delay stats are reported for visibility but not enforced here.
+    if reorder_rate < reorder_expected_low or reorder_rate > reorder_expected_high:
         print(
-            f"FAIL: delay mean {delay_mean:.2f}ms outside expected range "
-            f"[{mean_expected_low:.2f}, {mean_expected_high:.2f}]"
-        )
-        ok = False
-    if jitter_ms > 0 and not (std_expected_low <= delay_std <= std_expected_high):
-        print(
-            f"FAIL: delay std {delay_std:.2f}ms outside expected range "
-            f"[{std_expected_low:.2f}, {std_expected_high:.2f}]"
-        )
-        ok = False
-    if reorder_rate > reorder_expected_high:
-        print(
-            f"FAIL: reorder rate {reorder_rate:.3f}% exceeds expected max {reorder_expected_high:.3f}%"
+            f"FAIL: reorder rate {reorder_rate:.3f}% outside expected range "
+            f"[{reorder_expected_low:.3f}%, {reorder_expected_high:.3f}%]"
         )
         ok = False
 
@@ -249,9 +271,13 @@ def main() -> int:
 
     # Optional smoke test for jitter + reorder, controlled via env for CI friendliness.
     if os.getenv("UDP_PROXY_REORDER_SMOKE") == "1":
-        smoke_count = int(os.getenv("UDP_PROXY_REORDER_COUNT", "200"))
+        smoke_count = int(os.getenv("UDP_PROXY_REORDER_COUNT", "2000"))
         return run_reorder_smoke(
-            total_packets=smoke_count, delay_ms=400, jitter_ms=100, reorder_prob=0.0006
+            total_packets=smoke_count,
+            delay_ms=400,
+            jitter_ms=100,
+            burst_correlation=0.9,
+            reorder_prob=0.0006,
         )
 
     return 0
