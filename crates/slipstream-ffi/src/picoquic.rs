@@ -31,6 +31,27 @@ pub struct picoquic_congestion_algorithm_t {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct picoquic_path_quality_t {
+    pub receive_rate_estimate: u64,
+    pub pacing_rate: u64,
+    pub cwin: u64,
+    pub rtt: u64,
+    pub rtt_sample: u64,
+    pub rtt_variant: u64,
+    pub rtt_min: u64,
+    pub rtt_max: u64,
+    pub sent: u64,
+    pub lost: u64,
+    pub timer_losses: u64,
+    pub spurious_losses: u64,
+    pub max_spurious_rtt: u64,
+    pub max_reorder_delay: u64,
+    pub max_reorder_gap: u64,
+    pub bytes_in_transit: u64,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum picoquic_state_enum {
     picoquic_state_client_init = 0,
@@ -216,6 +237,10 @@ extern "C" {
     pub fn picoquic_get_rtt(cnx: *mut picoquic_cnx_t) -> u64;
     pub fn picoquic_get_cwin(cnx: *mut picoquic_cnx_t) -> u64;
     pub fn picoquic_get_pacing_rate(cnx: *mut picoquic_cnx_t) -> u64;
+    pub fn picoquic_get_default_path_quality(
+        cnx: *mut picoquic_cnx_t,
+        quality: *mut picoquic_path_quality_t,
+    );
 
     pub fn slipstream_request_poll(cnx: *mut picoquic_cnx_t);
     pub fn slipstream_is_flow_blocked(cnx: *mut picoquic_cnx_t) -> c_int;
@@ -345,5 +370,17 @@ pub fn get_pacing_rate(cnx: *mut picoquic_cnx_t) -> u64 {
         0
     } else {
         unsafe { picoquic_get_pacing_rate(cnx) }
+    }
+}
+
+pub fn get_bytes_in_transit(cnx: *mut picoquic_cnx_t) -> u64 {
+    if cnx.is_null() {
+        0
+    } else {
+        let mut quality = picoquic_path_quality_t::default();
+        unsafe {
+            picoquic_get_default_path_quality(cnx, &mut quality as *mut _);
+        }
+        quality.bytes_in_transit
     }
 }

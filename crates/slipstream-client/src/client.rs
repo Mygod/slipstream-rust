@@ -7,10 +7,10 @@ use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CL
 use slipstream_ffi::{
     configure_quic,
     picoquic::{
-        get_cwin, get_pacing_rate, get_rtt, picoquic_add_to_stream, picoquic_call_back_event_t,
-        picoquic_close, picoquic_cnx_t, picoquic_connection_id_t, picoquic_create,
-        picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
-        picoquic_enable_keep_alive, picoquic_get_next_local_stream_id,
+        get_bytes_in_transit, get_cwin, get_pacing_rate, get_rtt, picoquic_add_to_stream,
+        picoquic_call_back_event_t, picoquic_close, picoquic_cnx_t, picoquic_connection_id_t,
+        picoquic_create, picoquic_create_client_cnx, picoquic_current_time,
+        picoquic_disable_keep_alive, picoquic_enable_keep_alive, picoquic_get_next_local_stream_id,
         picoquic_get_next_wake_delay, picoquic_get_path_addr, picoquic_incoming_packet_ex,
         picoquic_mark_active_stream, picoquic_prepare_next_packet_ex, picoquic_prepare_packet_ex,
         picoquic_probe_new_path_ex, picoquic_provide_stream_data_buffer, picoquic_quic_t,
@@ -391,13 +391,18 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         };
         let streams_len_for_sleep = unsafe { (*state_ptr).streams.len() };
         let inflight_polls_for_sleep = inflight_poll_ids.len();
+        let inflight_packets_for_sleep = if config.authoritative {
+            inflight_packet_estimate(cnx, mtu)
+        } else {
+            0
+        };
         let poll_deficit_for_sleep = if config.authoritative {
             pacing_snapshot
                 .as_ref()
                 .map(|snapshot| {
                     snapshot
                         .target_inflight
-                        .saturating_sub(inflight_polls_for_sleep)
+                        .saturating_sub(inflight_packets_for_sleep)
                 })
                 .unwrap_or(0)
         } else {
@@ -542,11 +547,16 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         }
 
         let inflight_polls = inflight_poll_ids.len();
+        let mut inflight_packets = if config.authoritative {
+            inflight_packet_estimate(cnx, mtu)
+        } else {
+            0
+        };
         if config.authoritative {
             let pacing_target = pacing_snapshot
                 .map(|snapshot| snapshot.target_inflight)
                 .unwrap_or_else(|| cwnd_target_polls(cnx, mtu));
-            let mut poll_deficit = pacing_target.saturating_sub(inflight_polls);
+            let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
             if poll_deficit > 0 {
                 send_poll_queries(
                     cnx,
@@ -561,6 +571,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 )
                 .await?;
             }
+            inflight_packets = inflight_packet_estimate(cnx, mtu);
         } else if pending_polls > 0 {
             send_poll_queries(
                 cnx,
@@ -586,7 +597,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         debug.last_enqueue_at = last_enqueue_at;
         let pending_for_debug = if config.authoritative {
             pacing_snapshot
-                .map(|snapshot| snapshot.target_inflight.saturating_sub(inflight_polls))
+                .map(|snapshot| snapshot.target_inflight.saturating_sub(inflight_packets))
                 .unwrap_or(0)
         } else {
             pending_polls
@@ -825,6 +836,20 @@ fn cwnd_target_polls(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
     let cwnd = get_cwin(cnx);
     let target = cwnd.saturating_add(mtu - 1) / mtu;
     usize::try_from(target).unwrap_or(usize::MAX)
+}
+
+fn inflight_packet_estimate(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
+    let mtu = mtu as u64;
+    if mtu == 0 {
+        return 0;
+    }
+    let inflight = get_bytes_in_transit(cnx);
+    let packets = inflight.saturating_add(mtu - 1) / mtu;
+    if packets > usize::MAX as u64 {
+        usize::MAX
+    } else {
+        packets as usize
+    }
 }
 
 fn resolve_resolvers(resolvers: &[HostPort]) -> Result<Vec<ResolverAddr>, ClientError> {
