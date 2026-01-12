@@ -48,6 +48,12 @@ def main() -> int:
         default="normal",
         help="delay distribution (default: normal)",
     )
+    parser.add_argument(
+        "--reorder-prob",
+        type=float,
+        default=0.0,
+        help="probability to allow out-of-order delivery (default: 0)",
+    )
     args = parser.parse_args()
 
     listen = parse_hostport(args.listen)
@@ -63,6 +69,16 @@ def main() -> int:
     packet_count = 0
     rng = random.Random()
     pending = []
+    last_send_at = {
+        "client_to_server": 0.0,
+        "server_to_client": 0.0,
+    }
+    push_seq = 0
+    reorder_interval = int(1.0 / args.reorder_prob) if args.reorder_prob > 0 else 0
+    reorder_counters = {
+        "client_to_server": 0,
+        "server_to_client": 0,
+    }
 
     def sample_delay_ms() -> float:
         delay_ms = args.delay_ms
@@ -81,7 +97,7 @@ def main() -> int:
         while True:
             now_mono = time.monotonic()
             while pending and pending[0][0] <= now_mono:
-                _, data, dst = heapq.heappop(pending)
+                _, _, data, dst = heapq.heappop(pending)
                 sock.sendto(data, dst)
 
             timeout = None
@@ -122,7 +138,16 @@ def main() -> int:
             if dst is not None:
                 if delay_ms:
                     send_at = time.monotonic() + (delay_ms / 1000.0)
-                    heapq.heappush(pending, (send_at, data, dst))
+                    last_for_dir = last_send_at[direction]
+                    if send_at <= last_for_dir:
+                        send_at = last_for_dir + 1e-6
+                    if reorder_interval > 0:
+                        reorder_counters[direction] += 1
+                        if reorder_counters[direction] % reorder_interval == 0 and last_for_dir > 0:
+                            send_at = last_for_dir - 1e-6
+                    last_send_at[direction] = max(last_for_dir, send_at)
+                    push_seq += 1
+                    heapq.heappush(pending, (send_at, push_seq, data, dst))
                 else:
                     sock.sendto(data, dst)
 

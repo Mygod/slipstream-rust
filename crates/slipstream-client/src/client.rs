@@ -557,6 +557,16 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 .map(|snapshot| snapshot.target_inflight)
                 .unwrap_or_else(|| cwnd_target_polls(cnx, mtu));
             let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
+            if poll_deficit > 0 && debug.enabled {
+                let cwnd = get_cwin(cnx);
+                let in_transit = get_bytes_in_transit(cnx);
+                let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
+                let rtt = get_rtt(cnx);
+                eprintln!(
+                    "cc_state: cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
+                    cwnd, in_transit, rtt, flow_blocked, poll_deficit
+                );
+            }
             if poll_deficit > 0 {
                 send_poll_queries(
                     cnx,

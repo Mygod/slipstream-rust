@@ -28,6 +28,7 @@ PROXY_DELAY_MS="${PROXY_DELAY_MS:-}"
 PROXY_JITTER_MS="${PROXY_JITTER_MS:-}"
 PROXY_DIST="${PROXY_DIST:-normal}"
 PROXY_PORT="${PROXY_PORT:-}"
+PROXY_REORDER_PROB="${PROXY_REORDER_PROB:-}"
 CLIENT_ARGS="${CLIENT_ARGS:-}"
 
 client_extra_args=()
@@ -279,6 +280,7 @@ run_case() {
     fi
     python3 "${ROOT_DIR}/scripts/interop/udp_capture_proxy.py" \
       "${proxy_args[@]}" \
+      ${PROXY_REORDER_PROB:+"--reorder-prob" "${PROXY_REORDER_PROB}"} \
       >"${case_dir}/dns_proxy.log" 2>&1 &
     PROXY_PID=$!
     resolver_port="${proxy_port}"

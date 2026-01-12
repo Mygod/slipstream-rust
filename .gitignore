@@ -5,6 +5,7 @@
 /vendor/picoquic/build/
 /.worktrees/
 .idea/
+__pycache__/
 
 # Rust workspace artifacts
 /target/
