@@ -107,6 +107,17 @@ jobs:
           - name: rust-rust
             script: run_rust_rust_10mb.sh
             needs_c: false
+            client_args: ""
+            min_exfil: "5"
+            min_download: "10"
+            artifact_glob: bench-rust-rust-*
+          - name: rust-rust-auth
+            script: run_rust_rust_10mb.sh
+            needs_c: false
+            client_args: "--authoritative"
+            min_exfil: "5"
+            min_download: "15"
+            artifact_glob: bench-rust-rust-*
           # C repo benchmark disabled (C repo currently broken).
           # - name: c-c
           #   script: run_c_c_10mb.sh
@@ -139,6 +150,9 @@ jobs:
           SLIPSTREAM_DIR: slipstream-c
           RUNS: "5"
           TRANSFER_BYTES: "10485760"
+          CLIENT_ARGS: ${{ matrix.client_args }}
+          MIN_AVG_MIB_S_EXFIL: ${{ matrix.min_exfil }}
+          MIN_AVG_MIB_S_DOWNLOAD: ${{ matrix.min_download }}
         run: ./scripts/bench/${{ matrix.script }}
 
       - name: Upload benchmark logs
@@ -146,7 +160,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-${{ matrix.name }}-logs
-          path: .interop/bench-${{ matrix.name }}-*
+          path: .interop/${{ matrix.artifact_glob }}
           include-hidden-files: true
 
   bench-memory:
