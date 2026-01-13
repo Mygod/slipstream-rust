@@ -556,13 +556,8 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 poll_deficit = 0;
             }
             if poll_deficit > 0 && debug.enabled {
-                let (cwnd, in_transit, rtt) = unsafe {
-                    (
-                        get_cwin(cnx),
-                        get_bytes_in_transit(cnx),
-                        get_rtt(cnx),
-                    )
-                };
+                let (cwnd, in_transit, rtt) =
+                    unsafe { (get_cwin(cnx), get_bytes_in_transit(cnx), get_rtt(cnx)) };
                 eprintln!(
                     "cc_state: cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
                     cwnd, in_transit, rtt, flow_blocked, poll_deficit
