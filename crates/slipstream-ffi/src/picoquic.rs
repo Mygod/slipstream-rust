@@ -244,6 +244,7 @@ extern "C" {
 
     pub fn slipstream_request_poll(cnx: *mut picoquic_cnx_t);
     pub fn slipstream_is_flow_blocked(cnx: *mut picoquic_cnx_t) -> c_int;
+    pub fn slipstream_has_ready_stream(cnx: *mut picoquic_cnx_t) -> c_int;
     pub fn slipstream_disable_ack_delay(cnx: *mut picoquic_cnx_t);
 
     pub fn picoquic_get_first_cnx(quic: *mut picoquic_quic_t) -> *mut picoquic_cnx_t;

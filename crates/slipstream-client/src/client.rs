@@ -15,9 +15,9 @@ use slipstream_ffi::{
         picoquic_mark_active_stream, picoquic_prepare_next_packet_ex, picoquic_prepare_packet_ex,
         picoquic_probe_new_path_ex, picoquic_provide_stream_data_buffer, picoquic_quic_t,
         picoquic_reset_stream, picoquic_set_callback, picoquic_set_max_data_control,
-        picoquic_stream_data_consumed, slipstream_disable_ack_delay, slipstream_is_flow_blocked,
-        slipstream_request_poll, PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE,
-        PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
+        picoquic_stream_data_consumed, slipstream_disable_ack_delay, slipstream_has_ready_stream,
+        slipstream_is_flow_blocked, slipstream_request_poll, PICOQUIC_CONNECTION_ID_MAX_SIZE,
+        PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, ClientConfig, QuicGuard, SLIPSTREAM_FILE_CANCEL_ERROR,
     SLIPSTREAM_INTERNAL_ERROR,
@@ -93,7 +93,6 @@ struct ClientState {
     debug_streams: bool,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
-    outbound_enqueued: bool,
 }
 
 struct ClientStream {
@@ -275,7 +274,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         debug_streams,
         debug_enqueued_bytes: 0,
         debug_last_enqueue_at: 0,
-        outbound_enqueued: false,
     });
     let state_ptr: *mut ClientState = &mut *state;
     let _state = state;
@@ -364,9 +362,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     };
 
     loop {
-        unsafe {
-            (*state_ptr).outbound_enqueued = false;
-        }
         let current_time = unsafe { picoquic_current_time() };
         drain_commands(cnx, state_ptr, &mut command_rx);
         drain_stream_data(cnx, state_ptr);
@@ -550,9 +545,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 .map(|snapshot| snapshot.target_inflight)
                 .unwrap_or_else(|| cwnd_target_polls(cnx, mtu));
             let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
+            let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
             let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
-            let outbound_enqueued = unsafe { (*state_ptr).outbound_enqueued };
-            if outbound_enqueued && !flow_blocked {
+            if has_ready_stream && !flow_blocked {
                 poll_deficit = 0;
             }
             if poll_deficit > 0 && debug.enabled {
@@ -988,7 +983,6 @@ fn handle_command(cnx: *mut picoquic_cnx_t, state_ptr: *mut ClientState, command
                 let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                 state.streams.remove(&stream_id);
             } else if let Some(stream) = state.streams.get_mut(&stream_id) {
-                state.outbound_enqueued = true;
                 stream.tx_bytes = stream.tx_bytes.saturating_add(data.len() as u64);
                 let now = unsafe { picoquic_current_time() };
                 state.debug_enqueued_bytes =

@@ -33,7 +33,7 @@ Notes:
 - --authoritative keeps the DNS wire format unchanged and remains C interop safe.
 - Use --authoritative only when you control the resolver/server path and can absorb high QPS bursts.
 - Authoritative mode now derives its QPS budget from picoquic’s pacing rate (scaled by the DNS payload size and RTT proxy) and falls back to cwnd if pacing is unavailable; `--debug-poll` logs the pacing rate, target QPS, and inflight polls.
-- When outbound TCP data is enqueued, authoritative polling yields to data-bearing queries unless flow control blocks the stream.
+- When QUIC has ready stream data queued, authoritative polling yields to data-bearing queries unless flow control blocks progress.
 - Expect higher CPU usage and detectability risk; misusing it can overload resolvers/servers.
 
 ## slipstream-server
