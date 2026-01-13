@@ -349,38 +349,48 @@ extern "C" {
     ) -> c_int;
 }
 
-pub fn get_cwin(cnx: *mut picoquic_cnx_t) -> u64 {
+/// # Safety
+/// `cnx` must be null or point to a valid picoquic connection for the duration
+/// of the call.
+pub unsafe fn get_cwin(cnx: *mut picoquic_cnx_t) -> u64 {
     if cnx.is_null() {
         0
     } else {
-        unsafe { picoquic_get_cwin(cnx) }
+        picoquic_get_cwin(cnx)
     }
 }
 
-pub fn get_rtt(cnx: *mut picoquic_cnx_t) -> u64 {
+/// # Safety
+/// `cnx` must be null or point to a valid picoquic connection for the duration
+/// of the call.
+pub unsafe fn get_rtt(cnx: *mut picoquic_cnx_t) -> u64 {
     if cnx.is_null() {
         0
     } else {
-        unsafe { picoquic_get_rtt(cnx) }
+        picoquic_get_rtt(cnx)
     }
 }
 
-pub fn get_pacing_rate(cnx: *mut picoquic_cnx_t) -> u64 {
+/// # Safety
+/// `cnx` must be null or point to a valid picoquic connection for the duration
+/// of the call.
+pub unsafe fn get_pacing_rate(cnx: *mut picoquic_cnx_t) -> u64 {
     if cnx.is_null() {
         0
     } else {
-        unsafe { picoquic_get_pacing_rate(cnx) }
+        picoquic_get_pacing_rate(cnx)
     }
 }
 
-pub fn get_bytes_in_transit(cnx: *mut picoquic_cnx_t) -> u64 {
+/// # Safety
+/// `cnx` must be null or point to a valid picoquic connection for the duration
+/// of the call.
+pub unsafe fn get_bytes_in_transit(cnx: *mut picoquic_cnx_t) -> u64 {
     if cnx.is_null() {
         0
     } else {
         let mut quality = picoquic_path_quality_t::default();
-        unsafe {
-            picoquic_get_default_path_quality(cnx, &mut quality as *mut _);
-        }
+        picoquic_get_default_path_quality(cnx, &mut quality as *mut _);
         quality.bytes_in_transit
     }
 }

@@ -93,6 +93,7 @@ struct ClientState {
     debug_streams: bool,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
+    outbound_enqueued: bool,
 }
 
 struct ClientStream {
@@ -167,7 +168,6 @@ struct PacingPollBudget {
     payload_bytes: f64,
     mtu: u32,
     last_pacing_rate: u64,
-    rtt_floor_us: u64,
 }
 
 impl PacingPollBudget {
@@ -176,7 +176,6 @@ impl PacingPollBudget {
             payload_bytes: mtu.max(1) as f64,
             mtu,
             last_pacing_rate: 0,
-            rtt_floor_us: 10_000,
         }
     }
 
@@ -185,7 +184,7 @@ impl PacingPollBudget {
         cnx: *mut picoquic_cnx_t,
         rtt_proxy_us: u64,
     ) -> PacingBudgetSnapshot {
-        let pacing_rate = get_pacing_rate(cnx);
+        let pacing_rate = unsafe { get_pacing_rate(cnx) };
         let rtt_seconds = (self.derive_rtt_us(cnx, rtt_proxy_us) as f64) / 1_000_000.0;
         if pacing_rate == 0 {
             let target_inflight = cwnd_target_polls(cnx, self.mtu);
@@ -212,9 +211,9 @@ impl PacingPollBudget {
     }
 
     fn derive_rtt_us(&self, cnx: *mut picoquic_cnx_t, rtt_proxy_us: u64) -> u64 {
-        let smoothed = get_rtt(cnx);
+        let smoothed = unsafe { get_rtt(cnx) };
         let candidate = if smoothed > 0 { smoothed } else { rtt_proxy_us };
-        candidate.max(self.rtt_floor_us)
+        candidate.max(1)
     }
 
     fn next_gain(&mut self, pacing_rate: u64) -> f64 {
@@ -276,6 +275,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         debug_streams,
         debug_enqueued_bytes: 0,
         debug_last_enqueue_at: 0,
+        outbound_enqueued: false,
     });
     let state_ptr: *mut ClientState = &mut *state;
     let _state = state;
@@ -364,6 +364,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     };
 
     loop {
+        unsafe {
+            (*state_ptr).outbound_enqueued = false;
+        }
         let current_time = unsafe { picoquic_current_time() };
         drain_commands(cnx, state_ptr, &mut command_rx);
         drain_stream_data(cnx, state_ptr);
@@ -431,29 +434,19 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             recv = udp.recv_from(&mut recv_buf) => {
                 match recv {
                     Ok((size, peer)) => {
-                        handle_dns_response(
-                            &recv_buf[..size],
-                            peer,
+                        let mut response_ctx = DnsResponseContext {
                             quic,
-                            &local_addr_storage,
-                            &mut pending_polls,
-                            &mut inflight_poll_ids,
-                            &mut debug,
-                            config.authoritative,
-                        )?;
+                            local_addr_storage: &local_addr_storage,
+                            pending_polls: &mut pending_polls,
+                            inflight_poll_ids: &mut inflight_poll_ids,
+                            debug: &mut debug,
+                            authoritative: config.authoritative,
+                        };
+                        handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
                         for _ in 1..packet_loop_recv_max {
                             match udp.try_recv_from(&mut recv_buf) {
                                 Ok((size, peer)) => {
-                                    handle_dns_response(
-                                        &recv_buf[..size],
-                                        peer,
-                                        quic,
-                                        &local_addr_storage,
-                                        &mut pending_polls,
-                                        &mut inflight_poll_ids,
-                                        &mut debug,
-                                        config.authoritative,
-                                    )?;
+                                    handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
                                 }
                                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
                                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -557,11 +550,19 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 .map(|snapshot| snapshot.target_inflight)
                 .unwrap_or_else(|| cwnd_target_polls(cnx, mtu));
             let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
+            let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
+            let outbound_enqueued = unsafe { (*state_ptr).outbound_enqueued };
+            if outbound_enqueued && !flow_blocked {
+                poll_deficit = 0;
+            }
             if poll_deficit > 0 && debug.enabled {
-                let cwnd = get_cwin(cnx);
-                let in_transit = get_bytes_in_transit(cnx);
-                let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
-                let rtt = get_rtt(cnx);
+                let (cwnd, in_transit, rtt) = unsafe {
+                    (
+                        get_cwin(cnx),
+                        get_bytes_in_transit(cnx),
+                        get_rtt(cnx),
+                    )
+                };
                 eprintln!(
                     "cc_state: cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
                     cwnd, in_transit, rtt, flow_blocked, poll_deficit
@@ -843,7 +844,7 @@ fn cwnd_target_polls(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
     if mtu == 0 {
         return 0;
     }
-    let cwnd = get_cwin(cnx);
+    let cwnd = unsafe { get_cwin(cnx) };
     let target = cwnd.saturating_add(mtu - 1) / mtu;
     usize::try_from(target).unwrap_or(usize::MAX)
 }
@@ -853,7 +854,7 @@ fn inflight_packet_estimate(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
     if mtu == 0 {
         return 0;
     }
-    let inflight = get_bytes_in_transit(cnx);
+    let inflight = unsafe { get_bytes_in_transit(cnx) };
     let packets = inflight.saturating_add(mtu - 1) / mtu;
     if packets > usize::MAX as u64 {
         usize::MAX
@@ -992,6 +993,7 @@ fn handle_command(cnx: *mut picoquic_cnx_t, state_ptr: *mut ClientState, command
                 let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                 state.streams.remove(&stream_id);
             } else if let Some(stream) = state.streams.get_mut(&stream_id) {
+                state.outbound_enqueued = true;
                 stream.tx_bytes = stream.tx_bytes.saturating_add(data.len() as u64);
                 let now = unsafe { picoquic_current_time() };
                 state.debug_enqueued_bytes =
@@ -1167,32 +1169,36 @@ fn spawn_client_writer(
     });
 }
 
+struct DnsResponseContext<'a> {
+    quic: *mut picoquic_quic_t,
+    local_addr_storage: &'a libc::sockaddr_storage,
+    pending_polls: &'a mut usize,
+    inflight_poll_ids: &'a mut HashMap<u16, u64>,
+    debug: &'a mut DebugMetrics,
+    authoritative: bool,
+}
+
 fn handle_dns_response(
     buf: &[u8],
     peer: SocketAddr,
-    quic: *mut picoquic_quic_t,
-    local_addr_storage: &libc::sockaddr_storage,
-    pending_polls: &mut usize,
-    inflight_poll_ids: &mut HashMap<u16, u64>,
-    debug: &mut DebugMetrics,
-    authoritative: bool,
+    ctx: &mut DnsResponseContext<'_>,
 ) -> Result<(), ClientError> {
     if let Some(response_id) = dns_response_id(buf) {
-        debug.dns_responses = debug.dns_responses.saturating_add(1);
-        if authoritative {
-            inflight_poll_ids.remove(&response_id);
+        ctx.debug.dns_responses = ctx.debug.dns_responses.saturating_add(1);
+        if ctx.authoritative {
+            ctx.inflight_poll_ids.remove(&response_id);
         }
     }
 
     if let Some(payload) = decode_response(buf) {
         let mut peer_storage = socket_addr_to_storage(peer);
-        let mut local_storage = unsafe { std::ptr::read(local_addr_storage) };
+        let mut local_storage = unsafe { std::ptr::read(ctx.local_addr_storage) };
         let mut first_cnx: *mut picoquic_cnx_t = std::ptr::null_mut();
         let mut first_path: libc::c_int = 0;
         let current_time = unsafe { picoquic_current_time() };
         let ret = unsafe {
             picoquic_incoming_packet_ex(
-                quic,
+                ctx.quic,
                 payload.as_ptr() as *mut u8,
                 payload.len(),
                 &mut peer_storage as *mut _ as *mut libc::sockaddr,
@@ -1207,8 +1213,8 @@ fn handle_dns_response(
         if ret < 0 {
             return Err(ClientError::new("Failed processing inbound QUIC packet"));
         }
-        if !authoritative {
-            *pending_polls = pending_polls.saturating_add(1).min(MAX_POLL_BURST);
+        if !ctx.authoritative {
+            *ctx.pending_polls = ctx.pending_polls.saturating_add(1).min(MAX_POLL_BURST);
         }
     }
     Ok(())

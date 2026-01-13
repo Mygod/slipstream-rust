@@ -48,7 +48,8 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
 - `cnx->flow_blocked` and `cnx->stream_blocked`
   - Wrapper: `slipstream_is_flow_blocked` in `crates/slipstream-ffi/cc/slipstream_poll.c`.
   - Why: With deferred consumption, the client needs to send poll queries only when flow/stream
-    blocked so MAX_DATA updates can arrive without spamming polls.
+    blocked so MAX_DATA updates can arrive without spamming polls. The Rust client now also
+    suppresses extra polls when outbound data is enqueued unless flow control is blocking.
 
 - `cnx->no_ack_delay`
   - Wrapper: `slipstream_disable_ack_delay` in `crates/slipstream-ffi/cc/slipstream_poll.c`.

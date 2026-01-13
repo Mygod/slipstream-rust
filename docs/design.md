@@ -53,6 +53,8 @@ separate tasks, with bounded channels used to limit memory growth under load.
   an RTT proxy; cwnd remains a fallback if pacing is unavailable. A modest gain
   is applied when the pacing rate rises to track ProbeBW-like phases without
   overshooting.
+- When outbound TCP data is enqueued, the Rust client suppresses extra polls to
+  prioritize data-bearing queries unless flow control blocks progress.
 - When the server has no QUIC payload ready for a poll, the Rust server answers
   with an empty NOERROR response to clear the poll and avoid backlog, instead
   of dropping the query; this diverges from the C server, which currently emits
