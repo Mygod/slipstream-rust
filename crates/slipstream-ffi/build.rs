@@ -8,11 +8,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=PICOQUIC_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=PICOQUIC_LIB_DIR");
     println!("cargo:rerun-if-env-changed=PICOQUIC_AUTO_BUILD");
+    println!("cargo:rerun-if-env-changed=PICOTLS_INCLUDE_DIR");
 
     let explicit_paths = has_explicit_picoquic_paths();
     let auto_build = env_flag("PICOQUIC_AUTO_BUILD", true);
     let mut picoquic_include_dir = locate_picoquic_include_dir();
     let mut picoquic_lib_dir = locate_picoquic_lib_dir();
+    let mut picotls_include_dir = locate_picotls_include_dir();
 
     if auto_build
         && !explicit_paths
@@ -22,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         build_picoquic()?;
         picoquic_include_dir = locate_picoquic_include_dir();
         picoquic_lib_dir = locate_picoquic_lib_dir();
+        picotls_include_dir = locate_picotls_include_dir();
     }
 
     let picoquic_include_dir = picoquic_include_dir.ok_or(
@@ -29,6 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let picoquic_lib_dir = picoquic_lib_dir.ok_or(
         "Missing picoquic build artifacts; run ./scripts/build_picoquic.sh or set PICOQUIC_BUILD_DIR/PICOQUIC_LIB_DIR.",
+    )?;
+    let picotls_include_dir = picotls_include_dir.ok_or(
+        "Missing picotls headers; set PICOTLS_INCLUDE_DIR or build picoquic with PICOQUIC_FETCH_PTLS=ON.",
     )?;
 
     let mut object_paths = Vec::with_capacity(1);
@@ -39,9 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cc_src = cc_dir.join("slipstream_server_cc.c");
     let poll_src = cc_dir.join("slipstream_poll.c");
     let test_helpers_src = cc_dir.join("slipstream_test_helpers.c");
+    let picotls_layout_src = cc_dir.join("picotls_layout.c");
     println!("cargo:rerun-if-changed={}", cc_src.display());
     println!("cargo:rerun-if-changed={}", poll_src.display());
     println!("cargo:rerun-if-changed={}", test_helpers_src.display());
+    println!("cargo:rerun-if-changed={}", picotls_layout_src.display());
     let picoquic_internal = picoquic_include_dir.join("picoquic_internal.h");
     if picoquic_internal.exists() {
         println!("cargo:rerun-if-changed={}", picoquic_internal.display());
@@ -57,6 +65,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let test_helpers_obj = out_dir.join("slipstream_test_helpers.c.o");
     compile_cc(&test_helpers_src, &test_helpers_obj, &picoquic_include_dir)?;
     object_paths.push(test_helpers_obj);
+
+    let picotls_layout_obj = out_dir.join("picotls_layout.c.o");
+    compile_cc_with_includes(
+        &picotls_layout_src,
+        &picotls_layout_obj,
+        &[&picoquic_include_dir, &picotls_include_dir],
+    )?;
+    object_paths.push(picotls_layout_obj);
 
     let archive = out_dir.join("libslipstream_client_objs.a");
     create_archive(&archive, &object_paths)?;
@@ -193,8 +209,68 @@ fn locate_picoquic_lib_dir() -> Option<PathBuf> {
     None
 }
 
+fn locate_picotls_include_dir() -> Option<PathBuf> {
+    if let Ok(dir) = env::var("PICOTLS_INCLUDE_DIR") {
+        let candidate = PathBuf::from(dir);
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    if let Ok(dir) = env::var("PICOQUIC_BUILD_DIR") {
+        let candidate = Path::new(&dir)
+            .join("_deps")
+            .join("picotls-src")
+            .join("include");
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    if let Ok(dir) = env::var("PICOQUIC_LIB_DIR") {
+        let candidate = Path::new(&dir)
+            .join("_deps")
+            .join("picotls-src")
+            .join("include");
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
+        }
+        if let Some(parent) = Path::new(&dir).parent() {
+            let candidate = parent.join("_deps").join("picotls-src").join("include");
+            if has_picotls_header(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
+    if let Some(root) = locate_repo_root() {
+        let candidate = root
+            .join(".picoquic-build")
+            .join("_deps")
+            .join("picotls-src")
+            .join("include");
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
+        }
+        let candidate = root
+            .join("vendor")
+            .join("picoquic")
+            .join("picotls")
+            .join("include");
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
 fn has_picoquic_internal_header(dir: &Path) -> bool {
     dir.join("picoquic_internal.h").exists()
+}
+
+fn has_picotls_header(dir: &Path) -> bool {
+    dir.join("picotls.h").exists()
 }
 
 fn has_picoquic_libs(dir: &Path) -> bool {
@@ -320,6 +396,23 @@ fn compile_cc(
         .arg("-I")
         .arg(picoquic_include_dir)
         .status()?;
+    if !status.success() {
+        return Err(format!("Failed to compile {}.", source.display()).into());
+    }
+    Ok(())
+}
+
+fn compile_cc_with_includes(
+    source: &Path,
+    output: &Path,
+    include_dirs: &[&Path],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut command = Command::new("cc");
+    command.arg("-c").arg(source).arg("-o").arg(output);
+    for dir in include_dirs {
+        command.arg("-I").arg(dir);
+    }
+    let status = command.status()?;
     if !status.success() {
         return Err(format!("Failed to compile {}.", source.display()).into());
     }

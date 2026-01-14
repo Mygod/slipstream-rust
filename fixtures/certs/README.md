@@ -19,3 +19,4 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 ```
 
 Pass custom paths with `--cert` and `--key` when running `slipstream-server`.
+For client verification, pass the pinned server certificate via `--cert`.

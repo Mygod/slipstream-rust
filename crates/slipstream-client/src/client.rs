@@ -5,7 +5,7 @@ use slipstream_core::{
 };
 use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
-    configure_quic,
+    configure_pinned_certificate, configure_quic,
     picoquic::{
         get_bytes_in_transit, get_cwin, get_pacing_rate, get_rtt, picoquic_add_to_stream,
         picoquic_call_back_event_t, picoquic_close, picoquic_cnx_t, picoquic_connection_id_t,
@@ -266,13 +266,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         .map_err(|_| ClientError::new("ALPN contains an unexpected null byte"))?;
     let sni = CString::new(SLIPSTREAM_SNI)
         .map_err(|_| ClientError::new("SNI contains an unexpected null byte"))?;
-    let cert_root = match config.cert {
-        Some(cert) => Some(
-            CString::new(cert)
-                .map_err(|_| ClientError::new("Cert path contains an unexpected null byte"))?,
-        ),
-        None => None,
-    };
     let cc_algo = CString::new(config.congestion_control)
         .map_err(|_| ClientError::new("Congestion control contains an unexpected null byte"))?;
 
@@ -296,9 +289,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             8,
             std::ptr::null(),
             std::ptr::null(),
-            cert_root
-                .as_ref()
-                .map_or(std::ptr::null(), |cert| cert.as_ptr()),
+            std::ptr::null(),
             alpn.as_ptr(),
             Some(client_callback),
             state_ptr as *mut _,
@@ -318,6 +309,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let _quic_guard = QuicGuard::new(quic);
     unsafe {
         configure_quic(quic, cc_algo.as_ptr(), mtu);
+    }
+    if let Some(cert) = config.cert {
+        configure_pinned_certificate(quic, cert).map_err(ClientError::new)?;
     }
     if config.authoritative {
         let max_data =

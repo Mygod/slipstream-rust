@@ -1,10 +1,14 @@
-use std::io::{BufRead, BufReader};
-use std::net::UdpSocket;
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+const LOG_CAPACITY: usize = 200;
 
 struct ChildGuard {
     child: Child,
@@ -45,9 +49,6 @@ fn client_bin_path(root: &Path) -> PathBuf {
 
 fn ensure_client_bin(root: &Path) -> PathBuf {
     let path = client_bin_path(root);
-    if path.exists() {
-        return path;
-    }
     let status = Command::new("cargo")
         .arg("build")
         .arg("-p")
@@ -62,6 +63,11 @@ fn ensure_client_bin(root: &Path) -> PathBuf {
 fn pick_udp_port() -> std::io::Result<u16> {
     let socket = UdpSocket::bind("127.0.0.1:0")?;
     Ok(socket.local_addr()?.port())
+}
+
+fn pick_tcp_port() -> std::io::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
 }
 
 fn spawn_server(
@@ -90,21 +96,52 @@ fn spawn_server(
     ChildGuard { child }
 }
 
+struct LogCapture {
+    rx: Receiver<String>,
+    lines: Arc<Mutex<VecDeque<String>>>,
+}
+
+fn spawn_log_reader<R: std::io::Read + Send + 'static>(
+    reader: R,
+    tx: Sender<String>,
+    lines: Arc<Mutex<VecDeque<String>>>,
+    source: &'static str,
+) {
+    thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => break,
+            };
+            let tagged = format!("{}: {}", source, line);
+            let _ = tx.send(tagged.clone());
+            if let Ok(mut buffer) = lines.lock() {
+                if buffer.len() == LOG_CAPACITY {
+                    buffer.pop_front();
+                }
+                buffer.push_back(tagged);
+            }
+        }
+    });
+}
+
 fn spawn_client(
     client_bin: &Path,
     dns_port: u16,
+    tcp_port: u16,
     domain: &str,
     cert: Option<&Path>,
-) -> (ChildGuard, Receiver<String>) {
+) -> (ChildGuard, LogCapture) {
     let mut cmd = Command::new(client_bin);
     cmd.arg("--tcp-listen-port")
-        .arg("0")
+        .arg(tcp_port.to_string())
         .arg("--resolver")
         .arg(format!("127.0.0.1:{}", dns_port))
         .arg("--domain")
         .arg(domain)
         .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     if let Some(cert) = cert {
@@ -112,23 +149,27 @@ fn spawn_client(
     }
 
     let mut child = cmd.spawn().expect("start slipstream-client");
-    let stderr = child.stderr.take().expect("capture client stderr");
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            let line = match line {
-                Ok(line) => line,
-                Err(_) => break,
-            };
-            let _ = tx.send(line);
-        }
-    });
+    let lines = Arc::new(Mutex::new(VecDeque::new()));
+    if let Some(stdout) = child.stdout.take() {
+        spawn_log_reader(stdout, tx.clone(), Arc::clone(&lines), "stdout");
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_log_reader(stderr, tx, Arc::clone(&lines), "stderr");
+    }
 
-    (ChildGuard { child }, rx)
+    (ChildGuard { child }, LogCapture { rx, lines })
 }
 
-fn wait_for_log(rx: &Receiver<String>, needle: &str, timeout: Duration) -> bool {
+fn log_snapshot(logs: &LogCapture) -> String {
+    let buffer = logs.lines.lock().expect("lock log buffer");
+    if buffer.is_empty() {
+        return "<no logs captured>".to_string();
+    }
+    buffer.iter().cloned().collect::<Vec<_>>().join("\n")
+}
+
+fn wait_for_log(logs: &LogCapture, needle: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         let now = Instant::now();
@@ -136,7 +177,7 @@ fn wait_for_log(rx: &Receiver<String>, needle: &str, timeout: Duration) -> bool 
             return false;
         }
         let remaining = deadline.saturating_duration_since(now);
-        match rx.recv_timeout(remaining) {
+        match logs.rx.recv_timeout(remaining) {
             Ok(line) => {
                 if line.contains(needle) {
                     return true;
@@ -146,6 +187,34 @@ fn wait_for_log(rx: &Receiver<String>, needle: &str, timeout: Duration) -> bool 
             Err(mpsc::RecvTimeoutError::Disconnected) => return false,
         }
     }
+}
+
+fn poke_client(port: u16, timeout: Duration) -> bool {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+            Ok(mut stream) => {
+                let _ = stream.set_nodelay(true);
+                let _ = stream.write_all(b"ping");
+                return true;
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => {
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    false
 }
 
 #[test]
@@ -169,6 +238,20 @@ fn cert_pinning_e2e() {
             return;
         }
     };
+    let tcp_port_ok = match pick_tcp_port() {
+        Ok(port) => port,
+        Err(err) => {
+            eprintln!("skipping cert pinning e2e test: {}", err);
+            return;
+        }
+    };
+    let tcp_port_bad = match pick_tcp_port() {
+        Ok(port) => port,
+        Err(err) => {
+            eprintln!("skipping cert pinning e2e test: {}", err);
+            return;
+        }
+    };
     let domain = "test.example.com";
 
     let mut server = spawn_server(&server_bin, dns_port, domain, &cert, &key);
@@ -179,18 +262,50 @@ fn cert_pinning_e2e() {
     }
 
     {
-        let (_client, rx) = spawn_client(&client_bin, dns_port, domain, Some(&cert));
+        let (mut client, logs) =
+            spawn_client(&client_bin, dns_port, tcp_port_ok, domain, Some(&cert));
+        if !wait_for_log(&logs, "Listening on TCP port", Duration::from_secs(5)) {
+            let snapshot = log_snapshot(&logs);
+            panic!("client did not start listening\n{}", snapshot);
+        }
+        let poke_ok = poke_client(tcp_port_ok, Duration::from_secs(5));
         assert!(
-            wait_for_log(&rx, "Connection ready", Duration::from_secs(8)),
-            "expected connection ready with pinned cert"
+            poke_ok,
+            "failed to connect to client TCP port {}",
+            tcp_port_ok
         );
+        let ready = wait_for_log(&logs, "Connection ready", Duration::from_secs(10));
+        if !ready {
+            let exited = client.has_exited();
+            let snapshot = log_snapshot(&logs);
+            panic!(
+                "expected connection ready with pinned cert (client_exited={})\n{}",
+                exited, snapshot
+            );
+        }
     }
 
     {
-        let (_client, rx) = spawn_client(&client_bin, dns_port, domain, Some(&alt_cert));
+        let (mut client, logs) =
+            spawn_client(&client_bin, dns_port, tcp_port_bad, domain, Some(&alt_cert));
+        if !wait_for_log(&logs, "Listening on TCP port", Duration::from_secs(5)) {
+            let snapshot = log_snapshot(&logs);
+            panic!("client did not start listening\n{}", snapshot);
+        }
+        let poke_ok = poke_client(tcp_port_bad, Duration::from_secs(5));
         assert!(
-            !wait_for_log(&rx, "Connection ready", Duration::from_secs(4)),
-            "unexpected connection ready with mismatched cert"
+            poke_ok,
+            "failed to connect to client TCP port {}",
+            tcp_port_bad
         );
+        let ready = wait_for_log(&logs, "Connection ready", Duration::from_secs(5));
+        if ready {
+            let snapshot = log_snapshot(&logs);
+            panic!(
+                "unexpected connection ready with mismatched cert\n{}",
+                snapshot
+            );
+        }
+        let _ = client.has_exited();
     }
 }

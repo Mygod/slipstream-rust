@@ -12,8 +12,9 @@ This page documents runtime knobs and environment variables.
 
 Sample certs live in `fixtures/certs/` for local testing only. The server
 requires explicit `--cert` and `--key` paths; provide your own cert/key pair
-for real deployments. The client can pass `--cert` to load a PEM root or pinned
-server certificate; if omitted, server certificates are not verified.
+for real deployments. The client can pass `--cert` to pin the server leaf
+certificate (PEM); CA bundles are not supported and the PEM must contain a
+single certificate. If omitted, server certificates are not verified.
 
 ## Logging and debug knobs
 

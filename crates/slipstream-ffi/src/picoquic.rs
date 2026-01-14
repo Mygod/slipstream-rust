@@ -26,6 +26,11 @@ pub struct picoquic_cnx_t {
 }
 
 #[repr(C)]
+pub struct ptls_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 pub struct picoquic_congestion_algorithm_t {
     _private: [u8; 0],
 }
@@ -49,6 +54,13 @@ pub struct picoquic_path_quality_t {
     pub max_reorder_delay: u64,
     pub max_reorder_gap: u64,
     pub bytes_in_transit: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ptls_iovec_t {
+    pub base: *mut u8,
+    pub len: size_t,
 }
 
 #[repr(C)]
@@ -105,6 +117,31 @@ pub enum picoquic_call_back_event_t {
     picoquic_callback_path_quality_changed = 23,
     picoquic_callback_path_address_observed = 24,
     picoquic_callback_app_wakeup = 25,
+}
+
+pub type ptls_verify_sign_cb_fn = Option<
+    unsafe extern "C" fn(
+        verify_ctx: *mut c_void,
+        algo: u16,
+        data: ptls_iovec_t,
+        sign: ptls_iovec_t,
+    ) -> c_int,
+>;
+
+#[repr(C)]
+pub struct ptls_verify_certificate_t {
+    pub cb: Option<
+        unsafe extern "C" fn(
+            self_ptr: *mut ptls_verify_certificate_t,
+            tls: *mut ptls_t,
+            server_name: *const c_char,
+            verify_sign: *mut ptls_verify_sign_cb_fn,
+            verify_sign_ctx: *mut *mut c_void,
+            certs: *mut ptls_iovec_t,
+            num_certs: size_t,
+        ) -> c_int,
+    >,
+    pub algos: *const u16,
 }
 
 pub type picoquic_stream_data_cb_fn = Option<
@@ -200,6 +237,12 @@ extern "C" {
         initial_mtu_ipv6: u32,
     );
     pub fn picoquic_set_key_log_file_from_env(quic: *mut picoquic_quic_t);
+
+    pub fn picoquic_set_verify_certificate_callback(
+        quic: *mut picoquic_quic_t,
+        cb: *mut ptls_verify_certificate_t,
+        free_fn: Option<unsafe extern "C" fn(*mut ptls_verify_certificate_t)>,
+    );
 
     // Test helpers defined in cc/slipstream_test_helpers.c.
     pub fn slipstream_test_get_max_data_limit(quic: *mut picoquic_quic_t) -> u64;
