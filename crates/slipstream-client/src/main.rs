@@ -1,4 +1,5 @@
 mod client;
+mod pinning;
 
 use clap::Parser;
 use slipstream_core::{normalize_domain, parse_host_port, AddressKind, HostPort};

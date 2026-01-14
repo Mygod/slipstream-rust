@@ -1,12 +1,10 @@
 use slipstream_core::HostPort;
 
 pub mod picoquic;
-mod pinning;
 pub mod runtime;
 
 pub use picoquic::get_pacing_rate;
 pub use picoquic::get_rtt;
-pub use pinning::configure_pinned_certificate;
 
 #[derive(Debug)]
 pub struct ClientConfig<'a> {

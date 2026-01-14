@@ -1,13 +1,13 @@
-use crate::picoquic::{
-    picoquic_quic_t, picoquic_set_verify_certificate_callback, ptls_iovec_t, ptls_t,
-    ptls_verify_certificate_t, ptls_verify_sign_cb_fn,
-};
 use libc::{c_char, c_int, c_void, size_t};
 use openssl::hash::MessageDigest;
 use openssl::pkey::{Id, PKey, Public};
 use openssl::rsa::Padding;
 use openssl::sign::{RsaPssSaltlen, Verifier};
 use openssl::x509::X509;
+use slipstream_ffi::picoquic::{
+    picoquic_quic_t, picoquic_set_verify_certificate_callback, ptls_iovec_t, ptls_t,
+    ptls_verify_certificate_t, ptls_verify_sign_cb_fn,
+};
 use std::fs;
 
 const SIG_RSA_PKCS1_SHA256: u16 = 0x0401;
@@ -119,7 +119,7 @@ unsafe extern "C" fn pinned_verify_certificate(
     }
     let verifier = &*(self_ptr as *const PinnedCertVerifier);
     // SAFETY: picotls supplies a valid certificate chain for the duration of the callback.
-    let certs = std::slice::from_raw_parts(certs, num_certs as usize);
+    let certs = std::slice::from_raw_parts(certs, num_certs);
     let leaf = &certs[0];
     if leaf.base.is_null() || leaf.len == 0 {
         return -1;

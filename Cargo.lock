@@ -388,6 +388,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
+ "openssl",
  "slipstream-core",
  "slipstream-dns",
  "slipstream-ffi",
@@ -418,7 +419,6 @@ name = "slipstream-ffi"
 version = "0.1.0"
 dependencies = [
  "libc",
- "openssl",
  "slipstream-core",
 ]
 

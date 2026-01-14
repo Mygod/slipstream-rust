@@ -47,6 +47,7 @@ Then point Cargo at the build output if needed:
 
 - PICOQUIC_DIR: picoquic source tree (default: vendor/picoquic)
 - PICOQUIC_INCLUDE_DIR: headers (default: vendor/picoquic/picoquic)
+- PICOTLS_INCLUDE_DIR: picotls headers (default: .picoquic-build/_deps/picotls-src/include)
 - PICOQUIC_BUILD_DIR: build output (default: .picoquic-build)
 - PICOQUIC_LIB_DIR: directory containing picoquic and picotls libs
 

@@ -5,7 +5,7 @@ use slipstream_core::{
 };
 use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
-    configure_pinned_certificate, configure_quic,
+    configure_quic,
     picoquic::{
         get_bytes_in_transit, get_cwin, get_pacing_rate, get_rtt, picoquic_add_to_stream,
         picoquic_call_back_event_t, picoquic_close, picoquic_cnx_t, picoquic_connection_id_t,
@@ -35,6 +35,8 @@ use tokio::net::{
 use tokio::sync::{mpsc, Notify};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+
+use crate::pinning::configure_pinned_certificate;
 
 // Protocol defaults; see docs/config.md for details.
 const SLIPSTREAM_ALPN: &str = "picoquic_sample";

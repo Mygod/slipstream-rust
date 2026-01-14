@@ -10,6 +10,7 @@ readme = "../../README.md"
 [dependencies]
 clap = { workspace = true }
 libc = "0.2"
+openssl = "0.10"
 slipstream-core = { path = "../slipstream-core" }
 slipstream-dns = { path = "../slipstream-dns" }
 slipstream-ffi = { path = "../slipstream-ffi" }

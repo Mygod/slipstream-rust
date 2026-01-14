@@ -46,6 +46,9 @@ These affect the build script in crates/slipstream-ffi:
 - PICOQUIC_INCLUDE_DIR
   picoquic headers directory (default: vendor/picoquic/picoquic).
 
+- PICOTLS_INCLUDE_DIR
+  picotls headers directory (default: .picoquic-build/_deps/picotls-src/include).
+
 - PICOQUIC_BUILD_DIR
   picoquic build output (default: .picoquic-build).
 
