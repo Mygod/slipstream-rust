@@ -1,5 +1,8 @@
 use slipstream_core::tcp::stream_write_buffer_bytes;
-use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
+use slipstream_dns::{
+    build_qname_with_limit, encode_query, max_payload_len_for_domain_with_limit, QueryParams,
+    CLASS_IN, RR_TXT,
+};
 use slipstream_ffi::{
     configure_quic,
     picoquic::{
@@ -65,8 +68,7 @@ impl fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
-    let domain_len = config.domain.len();
-    let mtu = compute_mtu(domain_len)?;
+    let mtu = compute_mtu(config.domain, config.max_qname_len)?;
     let mut pacing_budget = PacingPollBudget::new(mtu);
     let mut resolvers = resolve_resolvers(config.resolvers)?;
     if resolvers.is_empty() {
@@ -340,8 +342,12 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             debug.send_packets = debug.send_packets.saturating_add(1);
             debug.send_bytes = debug.send_bytes.saturating_add(send_length as u64);
 
-            let qname = build_qname(&send_buf[..send_length], config.domain)
-                .map_err(|err| ClientError::new(err.to_string()))?;
+            let qname = build_qname_with_limit(
+                &send_buf[..send_length],
+                config.domain,
+                config.max_qname_len,
+            )
+            .map_err(|err| ClientError::new(err.to_string()))?;
             let params = QueryParams {
                 id: dns_id,
                 qname: &qname,
@@ -444,19 +450,15 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     Ok(0)
 }
 
-fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
-    if domain_len >= 240 {
+fn compute_mtu(domain: &str, max_qname_len: usize) -> Result<u32, ClientError> {
+    let max_payload = max_payload_len_for_domain_with_limit(domain, max_qname_len)
+        .map_err(|err| ClientError::new(err.to_string()))?;
+    if max_payload == 0 {
         return Err(ClientError::new(
-            "Domain name is too long for DNS transport",
+            "Max QNAME length leaves no room for payload; adjust --max-qname-len or domain",
         ));
     }
-    let mtu = ((240.0 - domain_len as f64) / 1.6) as u32;
-    if mtu == 0 {
-        return Err(ClientError::new(
-            "MTU computed to zero; check domain length",
-        ));
-    }
-    Ok(mtu)
+    Ok(max_payload as u32)
 }
 
 async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {

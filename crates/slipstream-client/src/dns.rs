@@ -1,7 +1,9 @@
 use crate::client::ClientError;
 use crate::pacing::PacingBudgetSnapshot;
 use slipstream_core::{resolve_host_port, HostPort};
-use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CLASS_IN, RR_TXT};
+use slipstream_dns::{
+    build_qname_with_limit, decode_response, encode_query, QueryParams, CLASS_IN, RR_TXT,
+};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_get_path_addr, picoquic_incoming_packet_ex,
     picoquic_prepare_packet_ex, picoquic_probe_new_path_ex, picoquic_quic_t,
@@ -224,8 +226,12 @@ pub(crate) async fn send_poll_queries(
         debug.polls_sent = debug.polls_sent.saturating_add(1);
 
         let poll_id = *dns_id;
-        let qname = build_qname(&send_buf[..send_length], config.domain)
-            .map_err(|err| ClientError::new(err.to_string()))?;
+        let qname = build_qname_with_limit(
+            &send_buf[..send_length],
+            config.domain,
+            config.max_qname_len,
+        )
+        .map_err(|err| ClientError::new(err.to_string()))?;
         let params = QueryParams {
             id: poll_id,
             qname: &qname,

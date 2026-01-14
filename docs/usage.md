@@ -17,6 +17,7 @@ Common flags:
 - --authoritative (assume direct server access; in-flight DNS polls follow the QUIC pacing rate with cwnd as a fallback)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <SECONDS> (default: 400)
+- --max-qname-len <LEN> (default: 253; caps the total QNAME length for payload labels + "." + domain, excluding the trailing dot)
 
 Example:
 
@@ -34,6 +35,7 @@ Notes:
 - IPv4 resolvers require an IPv6 dual-stack UDP socket (e.g., IPV6_V6ONLY=0 via OS defaults or sysctl).
 - Provide --cert to enable strict leaf pinning; omit it for legacy/no-verification behavior.
 - The pinned certificate must match the server leaf exactly; CA bundles are not supported.
+- If you need to tighten DNS name length behavior, lower --max-qname-len (for example, 101).
 - --authoritative keeps the DNS wire format unchanged and remains C interop safe.
 - Use --authoritative only when you control the resolver/server path and can absorb high QPS bursts.
 - Authoritative mode now derives its QPS budget from picoquic’s pacing rate (scaled by the DNS payload size and RTT proxy) and falls back to cwnd if pacing is unavailable; `--debug-poll` logs the pacing rate, target QPS, and inflight polls.

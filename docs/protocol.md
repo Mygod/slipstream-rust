@@ -60,7 +60,7 @@ codec is intentionally minimal and focused on speed and compatibility.
 - If the DNS message is not a query (QR=1): respond with FORMAT_ERROR.
 - If QDCOUNT != 1: respond with FORMAT_ERROR.
 - If QTYPE != TXT: respond with NAME_ERROR (ignore query).
-- If the QNAME subdomain is empty: respond with NAME_ERROR.
+- If the QNAME payload labels are empty: respond with NAME_ERROR.
 - If base32 decode fails: respond with SERVER_FAILURE.
 - If the DNS parser fails (decode error): drop the message (no response).
 - The server must verify that QNAME ends with .domain.; if not, respond with NAME_ERROR.
@@ -107,7 +107,10 @@ Otherwise, the response is ignored (including NAME_ERROR, which signals no data)
 - Inline dots ensure label length <= 57 chars.
 - EDNS0 is always included on outbound messages and advertises udp_payload=1232;
   incoming messages are accepted regardless of OPT presence.
-- Client MTU is derived from the domain length: floor((240 - domain_len) / 1.6).
+- Client max QNAME length defaults to 253 (excluding the trailing dot) and is
+  configurable via --max-qname-len.
+- Client payload size is capped by the configured max QNAME length; the payload
+  budget accounts for base32 expansion and inline dots.
 - Server MTU is fixed at 900.
 
 ## References

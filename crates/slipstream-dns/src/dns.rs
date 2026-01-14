@@ -155,8 +155,8 @@ pub fn decode_query(packet: &[u8], domain: &str) -> Result<DecodedQuery, DecodeQ
         });
     }
 
-    let subdomain_raw = match extract_subdomain(&question.name, domain) {
-        Ok(subdomain_raw) => subdomain_raw,
+    let payload_labels_raw = match extract_payload_labels(&question.name, domain) {
+        Ok(payload_labels_raw) => payload_labels_raw,
         Err(rcode) => {
             return Err(DecodeQueryError::Reply {
                 id: header.id,
@@ -168,7 +168,7 @@ pub fn decode_query(packet: &[u8], domain: &str) -> Result<DecodedQuery, DecodeQ
         }
     };
 
-    let undotted = dots::undotify(&subdomain_raw);
+    let undotted = dots::undotify(&payload_labels_raw);
     if undotted.is_empty() {
         return Err(DecodeQueryError::Reply {
             id: header.id,
@@ -376,7 +376,7 @@ fn encode_opt_record(out: &mut Vec<u8>) -> Result<(), DnsError> {
     Ok(())
 }
 
-fn extract_subdomain(qname: &str, domain: &str) -> Result<String, Rcode> {
+fn extract_payload_labels(qname: &str, domain: &str) -> Result<String, Rcode> {
     let domain = domain.trim_end_matches('.');
     if domain.is_empty() {
         return Err(Rcode::NameError);
@@ -395,11 +395,11 @@ fn extract_subdomain(qname: &str, domain: &str) -> Result<String, Rcode> {
     }
 
     let data_len = qname.len() - domain.len() - 2;
-    let subdomain = &qname[..data_len];
-    if subdomain.is_empty() {
+    let payload_labels = &qname[..data_len];
+    if payload_labels.is_empty() {
         return Err(Rcode::NameError);
     }
-    Ok(subdomain.to_string())
+    Ok(payload_labels.to_string())
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -11,6 +11,7 @@ pub struct ClientConfig<'a> {
     pub tcp_listen_port: u16,
     pub resolvers: &'a [HostPort],
     pub domain: &'a str,
+    pub max_qname_len: usize,
     pub cert: Option<&'a str>,
     pub congestion_control: &'a str,
     pub authoritative: bool,
