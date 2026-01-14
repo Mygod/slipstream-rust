@@ -156,6 +156,11 @@ class ReorderController:
         natural_send_at = recv_time + (natural_delay_ms / 1000.0)
         send_at = natural_send_at if natural_send_at >= floor else floor + self.min_gap_s
 
+        if self.interval == 0:
+            state["prev"] = None
+            state["floor"] = send_at
+            return [(send_at, natural_delay_ms, data, src, dst)]
+
         # First packet: just stash and wait for the next one.
         if prev is None:
             state["prev"] = (send_at, natural_delay_ms, data, src, dst)
