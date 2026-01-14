@@ -21,9 +21,9 @@ struct Args {
         value_parser = parse_target_address
     )]
     target_address: HostPort,
-    #[arg(long = "cert", short = 'c', default_value = ".github/certs/cert.pem")]
+    #[arg(long = "cert", short = 'c', value_name = "PATH")]
     cert: String,
-    #[arg(long = "key", short = 'k', default_value = ".github/certs/key.pem")]
+    #[arg(long = "key", short = 'k', value_name = "PATH")]
     key: String,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
     domain: String,

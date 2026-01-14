@@ -7,6 +7,8 @@ This page documents the CLI surface for the Rust client and server binaries.
 Required flags:
 
 - --domain <DOMAIN>
+- --cert <PATH>
+- --key <PATH>
 - --resolver <IP:PORT> (repeatable; at least one required)
 
 Common flags:
@@ -60,6 +62,15 @@ Example:
   --domain example.com \
   --cert ./cert.pem \
   --key ./key.pem
+```
+
+For quick tests you can use the sample certs in `fixtures/certs/` (test-only).
+To generate your own:
+
+```
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout key.pem -out cert.pem -days 365 \
+  -subj "/CN=slipstream"
 ```
 
 ## Local testing

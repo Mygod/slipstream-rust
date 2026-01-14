@@ -8,6 +8,12 @@ This page documents runtime knobs and environment variables.
   Overrides the connection-level QUIC max_data limit used for backpressure.
   Default is 8 MiB. Values must be positive integers.
 
+## TLS certificates
+
+Sample certs live in `fixtures/certs/` for local testing only. The server
+requires explicit `--cert` and `--key` paths; provide your own cert/key pair
+for real deployments.
+
 ## Logging and debug knobs
 
 - Logging uses `tracing` with `RUST_LOG` (default `info`). Example:

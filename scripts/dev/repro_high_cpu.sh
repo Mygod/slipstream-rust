@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Dev-only: internal profiling helper; not part of the public toolchain.
 
 usage() {
   cat <<'EOF'
-Usage: scripts/repro_high_cpu.sh [options]
+Usage: scripts/dev/repro_high_cpu.sh [options]
 
 Reproduce post-load CPU behavior for slipstream-server.
 
@@ -29,8 +30,8 @@ Options:
   --perf-seconds N          Run perf record -g on the server for N seconds after load.
   --perf-freq N             perf record frequency (default: 99).
   --nc-quit SECONDS         Seconds to wait after EOF before netcat closes (default: 1).
-  --cert PATH               TLS cert for server (default: .github/certs/cert.pem).
-  --key PATH                TLS key for server (default: .github/certs/key.pem).
+  --cert PATH               TLS cert for server (default: fixtures/certs/cert.pem).
+  --key PATH                TLS key for server (default: fixtures/certs/key.pem).
   --debug-streams           Enable --debug-streams in server/client.
   --debug-commands          Enable --debug-commands in server.
   --cleanup                 Remove temp logs on exit.
@@ -55,8 +56,8 @@ strace_seconds=0
 perf_seconds=0
 perf_freq=99
 nc_quit=1
-cert=".github/certs/cert.pem"
-key=".github/certs/key.pem"
+cert="fixtures/certs/cert.pem"
+key="fixtures/certs/key.pem"
 release=0
 build=0
 keep_logs=1

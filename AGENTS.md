@@ -4,7 +4,7 @@
 - `crates/` hosts the Cargo workspace (shared core utilities, DNS codec, and client/server CLIs). Tests live in `crates/*/tests/`.
 - `docs/` contains design notes and protocol docs (for example, `docs/protocol.md`, `docs/dns-codec.md`).
 - `fixtures/vectors/` stores golden DNS vectors used by Rust tests.
-- `.github/certs/` holds test TLS certs/keys for interop and benchmarks.
+- `fixtures/certs/` holds test-only TLS certs/keys for interop and benchmarks.
 - `tools/vector_gen/` contains the C vector generator and its CSV input.
 - `scripts/` holds automation utilities, including `scripts/interop/` and `scripts/bench/`.
 - `.interop/` is runtime output for captures/builds; keep it untracked.

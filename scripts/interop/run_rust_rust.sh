@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CERT_DIR="${CERT_DIR:-"${ROOT_DIR}/.github/certs"}"
+CERT_DIR="${CERT_DIR:-"${ROOT_DIR}/fixtures/certs"}"
 RUN_DIR="${ROOT_DIR}/.interop/run-rust-rust-$(date +%Y%m%d_%H%M%S)"
 
 DNS_LISTEN_PORT="${DNS_LISTEN_PORT:-8853}"

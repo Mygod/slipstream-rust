@@ -58,7 +58,7 @@ Environment variables (defaults in parentheses):
 
 - SLIPSTREAM_DIR (../slipstream) - C repo path (C harnesses only)
 - SLIPSTREAM_BUILD_DIR (.interop/slipstream-build) - C build output (C harnesses only)
-- CERT_DIR (.github/certs) - TLS certs
+- CERT_DIR (fixtures/certs) - test-only TLS certs (use your own for production)
 - DNS_LISTEN_PORT (8853)
 - PROXY_PORT (5300)
 - TCP_TARGET_PORT (5201)
@@ -79,9 +79,12 @@ cargo run -p slipstream-server -- \
   --dns-listen-port 8853 \
   --target-address 127.0.0.1:5201 \
   --domain test.com \
-  --cert .github/certs/cert.pem \
-  --key .github/certs/key.pem
+  --cert fixtures/certs/cert.pem \
+  --key fixtures/certs/key.pem
 ```
+
+The certs under `fixtures/certs/` are test-only; generate your own for any
+real deployment.
 
 Client:
 

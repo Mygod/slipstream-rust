@@ -3,6 +3,16 @@
 `gen_vectors.c` builds DNS queries and responses using the same SPCDNS + base32 + dotify logic as the C implementation.
 It reads `vectors.txt` and writes JSON to stdout.
 
+## Prereqs
+
+- The slipstream C repo checked out with submodules:
+  https://github.com/EndPositive/slipstream
+- A C compiler (`cc`).
+
+The helper script `scripts/gen_vectors.sh` builds the generator against the C
+repo (default `../slipstream`, override with `SLIPSTREAM_DIR`) and writes
+`fixtures/vectors/dns-vectors.json`.
+
 Format of `vectors.txt`:
 
 ```
@@ -33,4 +43,6 @@ Typical use:
 ./scripts/gen_vectors.sh
 ```
 
-This compiles the generator against the slipstream C repo at `../slipstream` (override with `SLIPSTREAM_DIR`).
+This compiles the generator against the slipstream C repo at `../slipstream`
+(override with `SLIPSTREAM_DIR`) and requires the C repo submodules to be
+initialized.
