@@ -28,7 +28,6 @@ contributors; "dev-only" scripts are internal or experimental.
 - `scripts/bench/run_rust_rust_10mb.sh`: Rust<->Rust throughput benchmark.
 - `scripts/bench/run_rust_rust_mem.sh`: Rust<->Rust memory benchmark.
 
-See `Makefile` for convenience targets for the commands above.
 
 ## Dev-only or experimental scripts
 

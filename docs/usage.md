@@ -7,14 +7,13 @@ This page documents the CLI surface for the Rust client and server binaries.
 Required flags:
 
 - --domain <DOMAIN>
-- --cert <PATH>
-- --key <PATH>
 - --resolver <IP:PORT> (repeatable; at least one required)
 
 Common flags:
 
 - --tcp-listen-port <PORT> (default: 5201)
 - --congestion-control <bbr|dcubic> (default: dcubic; defaults to bbr when --authoritative is set and this flag is omitted)
+- --cert <PATH> (optional; PEM root or pinned server cert for TLS verification)
 - --authoritative (assume direct server access; in-flight DNS polls follow the QUIC pacing rate with cwnd as a fallback)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <SECONDS> (default: 400)
@@ -33,6 +32,7 @@ Notes:
 - Resolver addresses may be IPv4 or bracketed IPv6; mixed families are supported.
 - IPv6 resolvers must be bracketed, for example: [2001:db8::1]:53.
 - IPv4 resolvers require an IPv6 dual-stack UDP socket (e.g., IPV6_V6ONLY=0 via OS defaults or sysctl).
+- Provide --cert to enable TLS verification; omit it for legacy/no-verification behavior.
 - --authoritative keeps the DNS wire format unchanged and remains C interop safe.
 - Use --authoritative only when you control the resolver/server path and can absorb high QPS bursts.
 - Authoritative mode now derives its QPS budget from picoquic’s pacing rate (scaled by the DNS payload size and RTT proxy) and falls back to cwnd if pacing is unavailable; `--debug-poll` logs the pacing rate, target QPS, and inflight polls.
@@ -44,13 +44,13 @@ Notes:
 Required flags:
 
 - --domain <DOMAIN>
+- --cert <PATH>
+- --key <PATH>
 
 Common flags:
 
 - --dns-listen-port <PORT> (default: 53)
 - --target-address <HOST:PORT> (default: 127.0.0.1:5201)
-- --cert <PATH>
-- --key <PATH>
 - IPv4 DNS clients require an IPv6 dual-stack UDP socket (e.g., IPV6_V6ONLY=0 via OS defaults or sysctl).
 
 Example:

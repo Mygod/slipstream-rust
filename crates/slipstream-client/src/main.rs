@@ -36,6 +36,8 @@ struct Args {
     gso: bool,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
     domain: String,
+    #[arg(long = "cert", value_name = "PATH")]
+    cert: Option<String>,
     #[arg(long = "keep-alive-interval", short = 't', default_value_t = 400)]
     keep_alive_interval: u16,
     #[arg(long = "debug-poll")]
@@ -63,6 +65,7 @@ fn main() {
         authoritative: args.authoritative,
         gso: args.gso,
         domain: &args.domain,
+        cert: args.cert.as_deref(),
         keep_alive_interval: args.keep_alive_interval as usize,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,

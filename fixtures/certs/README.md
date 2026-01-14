@@ -7,6 +7,8 @@ these keys in production or anywhere you require real security guarantees.
 Files:
 - `cert.pem`
 - `key.pem`
+- `alt_cert.pem` (mismatched cert for pinning tests)
+- `alt_key.pem`
 
 To generate your own cert/key pair:
 
