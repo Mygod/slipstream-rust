@@ -3,6 +3,7 @@ mod server;
 use clap::Parser;
 use server::{run_server, ServerConfig};
 use slipstream_core::{normalize_domain, parse_host_port, AddressKind};
+use slipstream_dns::max_payload_len_for_domain_with_subdomain_limit;
 use tokio::runtime::Builder;
 
 #[derive(Parser, Debug)]
@@ -23,6 +24,13 @@ struct Args {
     key: String,
     #[arg(long = "domain", short = 'd')]
     domain: Option<String>,
+    #[arg(
+        long = "max-subdomain-len",
+        value_name = "LEN",
+        value_parser = clap::value_parser!(usize),
+        help = "Maximum dotted subdomain length before the domain suffix"
+    )]
+    max_subdomain_len: Option<usize>,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
     #[arg(long = "debug-commands")]
@@ -47,6 +55,12 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(err) =
+        max_payload_len_for_domain_with_subdomain_limit(&domain, args.max_subdomain_len)
+    {
+        eprintln!("Server error: {}", err);
+        std::process::exit(1);
+    }
 
     let target_address = match parse_host_port(&args.target_address, 5201, AddressKind::Target) {
         Ok(address) => address,
@@ -63,6 +77,7 @@ fn main() {
         cert: args.cert,
         key: args.key,
         domain,
+        max_subdomain_len: args.max_subdomain_len,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
     };

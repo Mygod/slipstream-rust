@@ -2,6 +2,7 @@ mod client;
 
 use clap::Parser;
 use slipstream_core::{normalize_domain, parse_resolver_addresses};
+use slipstream_dns::max_payload_len_for_domain_with_subdomain_limit;
 use slipstream_ffi::ClientConfig;
 use tokio::runtime::Builder;
 
@@ -35,6 +36,13 @@ struct Args {
     gso: bool,
     #[arg(long = "domain", short = 'd')]
     domain: Option<String>,
+    #[arg(
+        long = "max-subdomain-len",
+        value_name = "LEN",
+        value_parser = clap::value_parser!(usize),
+        help = "Maximum dotted subdomain length before the domain suffix"
+    )]
+    max_subdomain_len: Option<usize>,
     #[arg(long = "keep-alive-interval", short = 't', default_value_t = 400)]
     keep_alive_interval: u16,
     #[arg(long = "debug-poll")]
@@ -66,6 +74,12 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Err(err) =
+        max_payload_len_for_domain_with_subdomain_limit(&domain, args.max_subdomain_len)
+    {
+        eprintln!("Client error: {}", err);
+        std::process::exit(1);
+    }
 
     let resolver_addresses = match parse_resolver_addresses(&args.resolver) {
         Ok(addrs) => addrs,
@@ -90,6 +104,7 @@ fn main() {
         authoritative: args.authoritative,
         gso: args.gso,
         domain: &domain,
+        max_subdomain_len: args.max_subdomain_len,
         keep_alive_interval: args.keep_alive_interval as usize,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,

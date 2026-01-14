@@ -4,7 +4,8 @@ use slipstream_core::{
     HostPort,
 };
 use slipstream_dns::{
-    decode_query, encode_response, DecodeQueryError, Question, Rcode, ResponseParams,
+    decode_query_with_subdomain_limit, encode_response, DecodeQueryError, Question, Rcode,
+    ResponseParams,
 };
 use slipstream_ffi::picoquic::{
     picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
@@ -72,6 +73,7 @@ pub struct ServerConfig {
     pub cert: String,
     pub key: String,
     pub domain: String,
+    pub max_subdomain_len: Option<usize>,
     pub debug_streams: bool,
     pub debug_commands: bool,
 }
@@ -294,6 +296,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                     &recv_buf[..size],
                     peer,
                     &config.domain,
+                    config.max_subdomain_len,
                     quic,
                     loop_time,
                     &local_addr_storage,
@@ -308,6 +311,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                                 &recv_buf[..size],
                                 peer,
                                 &config.domain,
+                                config.max_subdomain_len,
                                 quic,
                                 loop_time,
                                 &local_addr_storage,
@@ -388,12 +392,13 @@ fn decode_slot(
     packet: &[u8],
     peer: SocketAddr,
     domain: &str,
+    max_subdomain_len: Option<usize>,
     quic: *mut picoquic_quic_t,
     current_time: u64,
     local_addr_storage: &libc::sockaddr_storage,
     listen_ipv6: bool,
 ) -> Result<Option<Slot>, ServerError> {
-    match decode_query(packet, domain) {
+    match decode_query_with_subdomain_limit(packet, domain, max_subdomain_len) {
         Ok(query) => {
             let mut peer_storage = dummy_sockaddr_storage(listen_ipv6);
             let mut local_storage = unsafe { std::ptr::read(local_addr_storage) };

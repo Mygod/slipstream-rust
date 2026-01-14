@@ -16,6 +16,7 @@ Common flags:
 - --authoritative (assume direct server access; in-flight DNS polls follow the QUIC pacing rate with cwnd as a fallback)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <SECONDS> (default: 400)
+- --max-subdomain-len <LEN> (cap the dotted subdomain length before the domain suffix)
 
 Example:
 
@@ -35,6 +36,7 @@ Notes:
 - Authoritative mode now derives its QPS budget from picoquic’s pacing rate (scaled by the DNS payload size and RTT proxy) and falls back to cwnd if pacing is unavailable; `--debug-poll` logs the pacing rate, target QPS, and inflight polls.
 - When QUIC has ready stream data queued, authoritative polling yields to data-bearing queries unless flow control blocks progress.
 - Expect higher CPU usage and detectability risk; misusing it can overload resolvers/servers.
+- Use --max-subdomain-len to work around resolver/path limits that drop long subdomains.
 
 ## slipstream-server
 
@@ -49,6 +51,7 @@ Common flags:
 - --target-address <HOST:PORT> (default: 127.0.0.1:5201)
 - --cert <PATH>
 - --key <PATH>
+- --max-subdomain-len <LEN> (cap the dotted subdomain length before the domain suffix)
 
 Example:
 

@@ -11,6 +11,7 @@ pub struct ClientConfig<'a> {
     pub tcp_listen_port: u16,
     pub resolvers: &'a [HostPort],
     pub domain: &'a str,
+    pub max_subdomain_len: Option<usize>,
     pub congestion_control: &'a str,
     pub authoritative: bool,
     pub gso: bool,

@@ -3,7 +3,10 @@ use slipstream_core::{
     tcp::{stream_read_limit_chunks, stream_write_buffer_bytes, tcp_send_buffer_bytes},
     HostPort,
 };
-use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CLASS_IN, RR_TXT};
+use slipstream_dns::{
+    build_qname_with_subdomain_limit, decode_response, encode_query,
+    max_payload_len_for_domain_with_subdomain_limit, QueryParams, CLASS_IN, RR_TXT,
+};
 use slipstream_ffi::{
     configure_quic,
     picoquic::{
@@ -240,8 +243,7 @@ enum Command {
 }
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
-    let domain_len = config.domain.len();
-    let mtu = compute_mtu(domain_len)?;
+    let mtu = compute_mtu(config.domain, config.max_subdomain_len)?;
     let mut pacing_budget = PacingPollBudget::new(mtu);
     let mut resolvers = resolve_resolvers(config.resolvers)?;
     if resolvers.is_empty() {
@@ -518,8 +520,12 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             debug.send_packets = debug.send_packets.saturating_add(1);
             debug.send_bytes = debug.send_bytes.saturating_add(send_length as u64);
 
-            let qname = build_qname(&send_buf[..send_length], config.domain)
-                .map_err(|err| ClientError::new(err.to_string()))?;
+            let qname = build_qname_with_subdomain_limit(
+                &send_buf[..send_length],
+                config.domain,
+                config.max_subdomain_len,
+            )
+            .map_err(|err| ClientError::new(err.to_string()))?;
             let params = QueryParams {
                 id: dns_id,
                 qname: &qname,
@@ -789,13 +795,10 @@ fn handle_stream_data(
     }
 }
 
-fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
-    if domain_len >= 240 {
-        return Err(ClientError::new(
-            "Domain name is too long for DNS transport",
-        ));
-    }
-    let mtu = ((240.0 - domain_len as f64) / 1.6) as u32;
+fn compute_mtu(domain: &str, max_subdomain_len: Option<usize>) -> Result<u32, ClientError> {
+    let max_payload = max_payload_len_for_domain_with_subdomain_limit(domain, max_subdomain_len)
+        .map_err(|err| ClientError::new(err.to_string()))?;
+    let mtu = u32::try_from(max_payload).unwrap_or(u32::MAX);
     if mtu == 0 {
         return Err(ClientError::new(
             "MTU computed to zero; check domain length",
@@ -1268,8 +1271,12 @@ async fn send_poll_queries(
         debug.polls_sent = debug.polls_sent.saturating_add(1);
 
         let poll_id = *dns_id;
-        let qname = build_qname(&send_buf[..send_length], config.domain)
-            .map_err(|err| ClientError::new(err.to_string()))?;
+        let qname = build_qname_with_subdomain_limit(
+            &send_buf[..send_length],
+            config.domain,
+            config.max_subdomain_len,
+        )
+        .map_err(|err| ClientError::new(err.to_string()))?;
         let params = QueryParams {
             id: poll_id,
             qname: &qname,

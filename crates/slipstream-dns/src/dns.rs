@@ -110,6 +110,14 @@ impl fmt::Display for DnsError {
 impl std::error::Error for DnsError {}
 
 pub fn decode_query(packet: &[u8], domain: &str) -> Result<DecodedQuery, DecodeQueryError> {
+    decode_query_with_subdomain_limit(packet, domain, None)
+}
+
+pub fn decode_query_with_subdomain_limit(
+    packet: &[u8],
+    domain: &str,
+    max_subdomain_len: Option<usize>,
+) -> Result<DecodedQuery, DecodeQueryError> {
     let header = match parse_header(packet) {
         Some(header) => header,
         None => return Err(DecodeQueryError::Drop),
@@ -155,7 +163,7 @@ pub fn decode_query(packet: &[u8], domain: &str) -> Result<DecodedQuery, DecodeQ
         });
     }
 
-    let subdomain_raw = match extract_subdomain(&question.name, domain) {
+    let subdomain_raw = match extract_subdomain(&question.name, domain, max_subdomain_len) {
         Ok(subdomain_raw) => subdomain_raw,
         Err(rcode) => {
             return Err(DecodeQueryError::Reply {
@@ -376,7 +384,11 @@ fn encode_opt_record(out: &mut Vec<u8>) -> Result<(), DnsError> {
     Ok(())
 }
 
-fn extract_subdomain(qname: &str, domain: &str) -> Result<String, Rcode> {
+fn extract_subdomain(
+    qname: &str,
+    domain: &str,
+    max_subdomain_len: Option<usize>,
+) -> Result<String, Rcode> {
     let domain = domain.trim_end_matches('.');
     if domain.is_empty() {
         return Err(Rcode::NameError);
@@ -398,6 +410,11 @@ fn extract_subdomain(qname: &str, domain: &str) -> Result<String, Rcode> {
     let subdomain = &qname[..data_len];
     if subdomain.is_empty() {
         return Err(Rcode::NameError);
+    }
+    if let Some(limit) = max_subdomain_len {
+        if limit == 0 || subdomain.len() > limit {
+            return Err(Rcode::NameError);
+        }
     }
     Ok(subdomain.to_string())
 }
