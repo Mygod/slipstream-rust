@@ -22,6 +22,7 @@ static void slipstream_server_cc_init(picoquic_cnx_t * cnx, picoquic_path_t* pat
     path_x->congestion_alg_state = (void*)state;
 
     /* Disable congestion control/pacing limits for authoritative server mode. */
+    /* Keep packet_time_* non-zero to avoid zero-interval pacing paths. */
     path_x->cwin = UINT64_MAX;
     path_x->pacing.rate = UINT64_MAX;
     path_x->pacing.packet_time_nanosec = 1;

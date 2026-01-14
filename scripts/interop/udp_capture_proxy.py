@@ -319,7 +319,7 @@ def main() -> int:
         entry: Tuple[float, float, bytes, Tuple[str, int], Tuple[str, int]],
     ) -> None:
         nonlocal push_seq
-        send_at, nat_delay_ms, pkt_data, pkt_src, pkt_dst = entry
+        send_at, natural_delay_ms, pkt_data, pkt_src, pkt_dst = entry
         log_fp.write(
             json.dumps(
                 {
@@ -329,7 +329,7 @@ def main() -> int:
                     "src": addr_to_string(pkt_src),
                     "dst": addr_to_string(pkt_dst),
                     "hex": pkt_data.hex().upper(),
-                    "delay_ms": nat_delay_ms,
+                    "delay_ms": natural_delay_ms,
                 }
             )
             + "\n"

@@ -48,7 +48,8 @@ const CLIENT_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
 const MAX_POLL_BURST: usize = PICOQUIC_PACKET_LOOP_RECV_MAX;
 const AUTHORITATIVE_LOOP_MULTIPLIER: usize = 4;
 const AUTHORITATIVE_MAX_DATA_MULTIPLIER: usize = 4;
-const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 5_000_000;
+const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 5_000_000; // 5s idle poll cutoff.
+                                                      // Pacing gain tuning for the poll-based pacing loop.
 const PACING_GAIN_BASE: f64 = 1.0;
 const PACING_GAIN_PROBE: f64 = 1.25;
 const PACING_GAIN_EPSILON: f64 = 0.05;
@@ -171,6 +172,7 @@ struct PacingPollBudget {
 
 impl PacingPollBudget {
     fn new(mtu: u32) -> Self {
+        debug_assert!(mtu > 0, "PacingPollBudget::new expects MTU > 0");
         Self {
             payload_bytes: mtu.max(1) as f64,
             mtu,
@@ -212,6 +214,7 @@ impl PacingPollBudget {
     fn derive_rtt_us(&self, cnx: *mut picoquic_cnx_t, rtt_proxy_us: u64) -> u64 {
         let smoothed = unsafe { get_rtt(cnx) };
         let candidate = if smoothed > 0 { smoothed } else { rtt_proxy_us };
+        // Clamp to 1us to avoid divide-by-zero when RTT is unknown.
         candidate.max(1)
     }
 
@@ -830,6 +833,7 @@ fn expire_inflight_polls(inflight_poll_ids: &mut HashMap<u16, u64>, now: u64) {
 }
 
 fn cwnd_target_polls(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
+    debug_assert!(mtu > 0, "mtu must be > 0");
     let mtu = mtu as u64;
     if mtu == 0 {
         return 0;
@@ -840,6 +844,7 @@ fn cwnd_target_polls(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
 }
 
 fn inflight_packet_estimate(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
+    debug_assert!(mtu > 0, "mtu must be > 0");
     let mtu = mtu as u64;
     if mtu == 0 {
         return 0;

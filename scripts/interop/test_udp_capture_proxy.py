@@ -21,7 +21,6 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Tuple
 
 
 def pick_free_udp_port() -> int:
@@ -38,30 +37,29 @@ def run_order_test(total_packets: int) -> int:
     err_fd, err_path = tempfile.mkstemp(prefix="udp_proxy_err_", suffix=".log")
     os.close(err_fd)
 
-    log_fd, log_path = tempfile.mkstemp(prefix="udp_proxy_log_", suffix=".jsonl")
-    os.close(log_fd)
-    proxy = subprocess.Popen(
-        [
-            sys.executable,
-            os.path.join(os.path.dirname(__file__), "udp_capture_proxy.py"),
-            "--listen",
-            f"{listen_host}:{listen_port}",
-            "--upstream",
-            f"{upstream_host}:{upstream_port}",
-            "--delay-ms",
-            "0",
-            "--jitter-ms",
-            "0",
-            "--max-packets",
-            str(total_packets),
-            "--expected-packets",
-            str(total_packets),
-            "--log",
-            os.devnull,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=open(err_path, "w"),
-    )
+    with open(err_path, "w") as err_handle:
+        proxy = subprocess.Popen(
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), "udp_capture_proxy.py"),
+                "--listen",
+                f"{listen_host}:{listen_port}",
+                "--upstream",
+                f"{upstream_host}:{upstream_port}",
+                "--delay-ms",
+                "0",
+                "--jitter-ms",
+                "0",
+                "--max-packets",
+                str(total_packets),
+                "--expected-packets",
+                str(total_packets),
+                "--log",
+                os.devnull,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=err_handle,
+        )
 
     sink_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sink_sock.bind((upstream_host, upstream_port))
@@ -74,6 +72,7 @@ def run_order_test(total_packets: int) -> int:
                 data, _ = sink_sock.recvfrom(65535)
                 received.append(int.from_bytes(data, "big"))
         except socket.timeout:
+            # Expected: stop once packets stop arriving.
             pass
 
     sink_thread = threading.Thread(target=sink)
@@ -103,6 +102,7 @@ def run_order_test(total_packets: int) -> int:
         try:
             os.remove(err_path)
         except OSError:
+            # Best-effort cleanup of the temporary error log.
             pass
 
     if received != list(range(total_packets)):
@@ -135,28 +135,31 @@ def run_reorder_smoke(
     err_fd, err_path = tempfile.mkstemp(prefix="udp_proxy_err_", suffix=".log")
     os.close(err_fd)
 
-    proxy = subprocess.Popen(
-        [
-            sys.executable,
-            os.path.join(os.path.dirname(__file__), "udp_capture_proxy.py"),
-            "--listen",
-            f"{listen_host}:{listen_port}",
-            "--upstream",
-            f"{upstream_host}:{upstream_port}",
-            "--delay-ms",
-            str(delay_ms),
-            "--jitter-ms",
-            str(jitter_ms),
-            "--reorder-rate",
-            str(reorder_prob),
-            "--expected-packets",
-            str(total_packets),
-            "--log",
-            log_path,
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=open(err_path, "w"),
-    )
+    with open(err_path, "w") as err_handle:
+        proxy = subprocess.Popen(
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), "udp_capture_proxy.py"),
+                "--listen",
+                f"{listen_host}:{listen_port}",
+                "--upstream",
+                f"{upstream_host}:{upstream_port}",
+                "--delay-ms",
+                str(delay_ms),
+                "--jitter-ms",
+                str(jitter_ms),
+                "--reorder-rate",
+                str(reorder_prob),
+                "--burst-correlation",
+                str(burst_correlation),
+                "--expected-packets",
+                str(total_packets),
+                "--log",
+                log_path,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=err_handle,
+        )
 
     sink_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sink_sock.bind((upstream_host, upstream_port))
@@ -204,6 +207,7 @@ def run_reorder_smoke(
         try:
             os.remove(err_path)
         except OSError:
+            # Best-effort cleanup of the temporary error log.
             pass
 
     missing = total_packets - len(received)
@@ -230,6 +234,7 @@ def run_reorder_smoke(
         try:
             os.remove(log_path)
         except OSError:
+            # Best-effort cleanup of the temporary delay log.
             pass
 
     reorder_rate = (reorders / max(1, len(received))) * 100
@@ -242,6 +247,7 @@ def run_reorder_smoke(
     delay_min = min(delays) if delays else 0.0
     delay_max = max(delays) if delays else 0.0
 
+    # Wide bounds keep this smoke test stable for very low reorder probabilities.
     reorder_expected_low = reorder_prob * 0.5 * 100
     reorder_expected_high = reorder_prob * 2 * 100
 

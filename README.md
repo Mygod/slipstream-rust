@@ -75,7 +75,7 @@ See `scripts/bench` for scripts used for obtaining these results.
 | dnstt                                | 16.207 | 2.492 |
 | slipstream (C)                       | 5.332 | 1.096 |
 | slipstream-rust                      | 3.249 | 0.978 |
-| slipstream-rust (Authorirative mode) | 1.602 | 0.407 |
+| slipstream-rust (Authoritative mode) | 1.602 | 0.407 |
 
 ![Throughput bar chart](.github/throughput.png)
 
