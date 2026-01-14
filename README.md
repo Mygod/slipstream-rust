@@ -61,6 +61,24 @@ cargo run -p slipstream-client -- \
 
 Note: You can also run the client against a resolver that forwards to the server. For local testing, see the interop docs.
 
+## Benchmarks (local snapshot)
+
+All results below are end-to-end completion times in seconds (lower is better),
+averaged over 5 runs on local loopback. Payload: 10 MiB in each direction.
+Variants are dnstt, C-C slipstream, Rust-Rust (non-auth), and Rust-Rust (auth
+via `--authoritative`).
+
+See `scripts/bench` for scripts used for obtaining these results.
+
+| Variant                              | Exfil avg (s) | Download avg (s) |
+|--------------------------------------| ---: | ---: |
+| dnstt                                | 16.207 | 2.492 |
+| slipstream (C)                       | 5.332 | 1.096 |
+| slipstream-rust                      | 3.249 | 0.978 |
+| slipstream-rust (Authorirative mode) | 1.602 | 0.407 |
+
+![Throughput bar chart](.github/throughput.png)
+
 ## Documentation
 
 - docs/README.md for the doc index
