@@ -39,7 +39,7 @@ struct Args {
     #[arg(
         long = "max-subdomain-len",
         value_name = "LEN",
-        value_parser = clap::value_parser!(usize),
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
         help = "Maximum dotted subdomain length before the domain suffix"
     )]
     max_subdomain_len: Option<usize>,
