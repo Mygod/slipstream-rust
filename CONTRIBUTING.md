@@ -47,4 +47,5 @@ Interop:
 
 - Provide a short summary and rationale.
 - Include commands run (tests, benchmarks, interop, etc.).
-- Cargo.lock is ignored in this repo; only commit it if explicitly requested.
+- Cargo.lock is committed for reproducible releases (this repo ships binaries).
+  Include it when dependency versions change.

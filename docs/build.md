@@ -21,7 +21,9 @@ git submodule update --init --recursive
 ## Default build (auto-build picoquic)
 
 The build script in crates/slipstream-ffi will auto-build picoquic if the
-headers and libs are missing.
+headers and libs are missing. It uses vendor/picoquic and writes outputs to
+.picoquic-build/ (ignored). Set PICOQUIC_FETCH_PTLS=OFF to skip the picotls
+fetch.
 
 ```
 cargo build -p slipstream-client -p slipstream-server

@@ -25,6 +25,10 @@ Initialize the picoquic submodule:
 git submodule update --init --recursive
 ```
 
+`cargo build` will auto-build picoquic via `./scripts/build_picoquic.sh` when
+libs are missing (outputs to `.picoquic-build/`). Set `PICOQUIC_AUTO_BUILD=0`
+to disable or see `docs/build.md` for manual control.
+
 Build the Rust binaries:
 
 ```
