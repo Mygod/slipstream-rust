@@ -290,6 +290,10 @@ extern "C" {
     pub fn slipstream_is_flow_blocked(cnx: *mut picoquic_cnx_t) -> c_int;
     pub fn slipstream_has_ready_stream(cnx: *mut picoquic_cnx_t) -> c_int;
     pub fn slipstream_disable_ack_delay(cnx: *mut picoquic_cnx_t);
+    pub fn slipstream_find_path_id_by_addr(
+        cnx: *mut picoquic_cnx_t,
+        addr_peer: *const sockaddr,
+    ) -> c_int;
     pub fn slipstream_set_cc_override(alg_name: *const c_char);
     pub fn slipstream_set_default_path_mode(mode: c_int);
     pub fn slipstream_set_path_mode(cnx: *mut picoquic_cnx_t, path_id: c_int, mode: c_int);

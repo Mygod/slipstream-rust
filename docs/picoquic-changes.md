@@ -64,6 +64,12 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
   - Wrapper: `slipstream_has_ready_stream` in `crates/slipstream-ffi/cc/slipstream_poll.c`.
   - Why: Avoid sending extra polls while QUIC has stream data queued to send.
 
+- `picoquic_find_path_by_address` and `picoquic_path_t` internals (`peer_addr`,
+  `path_is_demoted`, `path_abandon_received`, `path_abandon_sent`, `cnx->nb_paths`)
+  - Wrapper: `slipstream_find_path_id_by_addr` in `crates/slipstream-ffi/cc/slipstream_poll.c`.
+  - Why: Keep resolver path IDs aligned after path deletion/compaction and avoid polling
+    demoted or abandoned paths.
+
 - `cnx->no_ack_delay`
   - Wrapper: `slipstream_disable_ack_delay` in `crates/slipstream-ffi/cc/slipstream_poll.c`.
   - Why: The server disables delayed ACK to reduce DNS round-trip latency for small packets.

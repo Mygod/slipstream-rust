@@ -25,7 +25,7 @@ use tracing::{debug, info, warn};
 
 use crate::dns::{
     add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
-    normalize_dual_stack_addr, resolve_resolvers, send_poll_queries,
+    normalize_dual_stack_addr, refresh_resolver_path, resolve_resolvers, send_poll_queries,
     sockaddr_storage_to_socket_addr, DnsResponseContext, ResolverState,
 };
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
@@ -215,7 +215,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let streams_len_for_sleep = unsafe { (*state_ptr).streams_len() };
         let mut has_work = streams_len_for_sleep > 0;
         for resolver in resolvers.iter_mut() {
-            if !resolver.added || resolver.path_id < 0 {
+            if !refresh_resolver_path(cnx, resolver) {
                 continue;
             }
             let pending_for_sleep = match resolver.mode {
@@ -378,7 +378,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
         let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
         for resolver in resolvers.iter_mut() {
-            if !resolver.added || resolver.path_id < 0 {
+            if !refresh_resolver_path(cnx, resolver) {
                 continue;
             }
             match resolver.mode {
@@ -469,7 +469,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             resolver.debug.last_enqueue_at = last_enqueue_at;
             resolver.debug.zero_send_loops = zero_send_loops;
             resolver.debug.zero_send_with_streams = zero_send_with_streams;
-            if !resolver.added || resolver.path_id < 0 {
+            if !refresh_resolver_path(cnx, resolver) {
                 continue;
             }
             let inflight_polls = resolver.inflight_poll_ids.len();
@@ -513,7 +513,7 @@ fn apply_path_mode(
     cnx: *mut picoquic_cnx_t,
     resolver: &mut ResolverState,
 ) -> Result<(), ClientError> {
-    if !resolver.added || resolver.path_id < 0 {
+    if !refresh_resolver_path(cnx, resolver) {
         return Ok(());
     }
     unsafe {

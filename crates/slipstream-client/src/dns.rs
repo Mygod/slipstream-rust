@@ -5,7 +5,8 @@ use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CL
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_get_path_addr, picoquic_incoming_packet_ex,
     picoquic_prepare_packet_ex, picoquic_probe_new_path_ex, picoquic_quic_t,
-    slipstream_request_poll, slipstream_set_default_path_mode, PICOQUIC_PACKET_LOOP_RECV_MAX,
+    slipstream_find_path_id_by_addr, slipstream_request_poll, slipstream_set_default_path_mode,
+    PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
 use slipstream_ffi::{socket_addr_to_storage, ClientConfig, ResolverMode, ResolverSpec};
 use std::collections::HashMap;
@@ -127,6 +128,41 @@ pub(crate) fn resolve_resolvers(
     Ok(resolved)
 }
 
+pub(crate) fn refresh_resolver_path(
+    cnx: *mut picoquic_cnx_t,
+    resolver: &mut ResolverState,
+) -> bool {
+    let peer = &resolver.storage as *const _ as *const libc::sockaddr;
+    let path_id = unsafe { slipstream_find_path_id_by_addr(cnx, peer) };
+    if path_id < 0 {
+        if resolver.added || resolver.path_id >= 0 {
+            reset_resolver_path(resolver);
+        }
+        return false;
+    }
+
+    resolver.added = true;
+    if resolver.path_id != path_id {
+        resolver.path_id = path_id;
+    }
+    true
+}
+
+fn reset_resolver_path(resolver: &mut ResolverState) {
+    warn!(
+        "Path for resolver {} became unavailable; resetting state",
+        resolver.addr
+    );
+    resolver.added = false;
+    resolver.path_id = -1;
+    resolver.local_addr_storage = None;
+    resolver.pending_polls = 0;
+    resolver.inflight_poll_ids.clear();
+    resolver.last_pacing_snapshot = None;
+    resolver.probe_attempts = 0;
+    resolver.next_probe_at = 0;
+}
+
 pub(crate) fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
     match addr {
         SocketAddr::V4(v4) => {
@@ -206,6 +242,10 @@ pub(crate) fn handle_dns_response(
             find_resolver_by_addr(ctx.resolvers, peer)
         };
         if let Some(resolver) = resolver {
+            if first_path >= 0 && resolver.path_id != first_path {
+                resolver.path_id = first_path;
+                resolver.added = true;
+            }
             resolver.debug.dns_responses = resolver.debug.dns_responses.saturating_add(1);
             if let Some(response_id) = response_id {
                 if resolver.mode == ResolverMode::Authoritative {
@@ -239,7 +279,7 @@ pub(crate) async fn send_poll_queries(
     remaining: &mut usize,
     send_buf: &mut [u8],
 ) -> Result<(), ClientError> {
-    if !resolver.added || resolver.path_id < 0 {
+    if !refresh_resolver_path(cnx, resolver) {
         return Ok(());
     }
     let mut remaining_count = *remaining;
