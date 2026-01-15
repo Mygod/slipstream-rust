@@ -3,7 +3,6 @@ use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
     picoquic_get_next_local_stream_id, picoquic_mark_active_stream,
     picoquic_provide_stream_data_buffer, picoquic_reset_stream, picoquic_stream_data_consumed,
-    slipstream_disable_ack_delay,
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
@@ -23,7 +22,6 @@ pub(crate) struct ClientState {
     streams: HashMap<u64, ClientStream>,
     command_tx: mpsc::UnboundedSender<Command>,
     data_notify: Arc<Notify>,
-    authoritative: bool,
     debug_streams: bool,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
@@ -33,7 +31,6 @@ impl ClientState {
     pub(crate) fn new(
         command_tx: mpsc::UnboundedSender<Command>,
         data_notify: Arc<Notify>,
-        authoritative: bool,
         debug_streams: bool,
     ) -> Self {
         Self {
@@ -42,7 +39,6 @@ impl ClientState {
             streams: HashMap::new(),
             command_tx,
             data_notify,
-            authoritative,
             debug_streams,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
@@ -108,11 +104,6 @@ pub(crate) unsafe extern "C" fn client_callback(
     match fin_or_event {
         picoquic_call_back_event_t::picoquic_callback_ready => {
             state.ready = true;
-            if state.authoritative {
-                unsafe {
-                    slipstream_disable_ack_delay(cnx);
-                }
-            }
             info!("Connection ready");
         }
         picoquic_call_back_event_t::picoquic_callback_stream_data
