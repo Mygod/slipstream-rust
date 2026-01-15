@@ -5,7 +5,7 @@ use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CL
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_get_path_addr, picoquic_incoming_packet_ex,
     picoquic_prepare_packet_ex, picoquic_probe_new_path_ex, picoquic_quic_t,
-    slipstream_request_poll, PICOQUIC_PACKET_LOOP_RECV_MAX,
+    slipstream_request_poll, slipstream_set_default_path_mode, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
 use slipstream_ffi::{socket_addr_to_storage, ClientConfig, ResolverMode, ResolverSpec};
 use std::collections::HashMap;
@@ -402,6 +402,8 @@ pub(crate) fn add_paths(
         return Ok(());
     }
     let now = unsafe { picoquic_current_time() };
+    let primary_mode = resolvers[0].mode;
+    let mut default_mode = primary_mode;
 
     for resolver in resolvers.iter_mut().skip(1) {
         if resolver.added {
@@ -409,6 +411,10 @@ pub(crate) fn add_paths(
         }
         if resolver.next_probe_at > now {
             continue;
+        }
+        if resolver.mode != default_mode {
+            unsafe { slipstream_set_default_path_mode(resolver_mode_to_c(resolver.mode)) };
+            default_mode = resolver.mode;
         }
         let mut path_id: libc::c_int = -1;
         let ret = unsafe {
@@ -439,6 +445,10 @@ pub(crate) fn add_paths(
         );
     }
 
+    if default_mode != primary_mode {
+        unsafe { slipstream_set_default_path_mode(resolver_mode_to_c(primary_mode)) };
+    }
+
     Ok(())
 }
 
@@ -460,6 +470,13 @@ fn find_resolver_by_addr(
 ) -> Option<&mut ResolverState> {
     let peer = normalize_dual_stack_addr(peer);
     resolvers.iter_mut().find(|resolver| resolver.addr == peer)
+}
+
+fn resolver_mode_to_c(mode: ResolverMode) -> libc::c_int {
+    match mode {
+        ResolverMode::Recursive => 1,
+        ResolverMode::Authoritative => 2,
+    }
 }
 
 fn path_probe_backoff(attempts: u32) -> u64 {

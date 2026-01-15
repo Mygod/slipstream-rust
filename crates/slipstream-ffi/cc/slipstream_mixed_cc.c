@@ -28,22 +28,16 @@ static slipstream_path_mode_t slipstream_resolve_mode(uint8_t mode)
     return resolved;
 }
 
-static picoquic_congestion_algorithm_t const* slipstream_select_cc_for_mode(
-    slipstream_path_mode_t mode)
+static picoquic_congestion_algorithm_t const* slipstream_select_cc(picoquic_path_t* path_x)
 {
     if (slipstream_cc_override != NULL) {
         return slipstream_cc_override;
     }
+    slipstream_path_mode_t mode = slipstream_resolve_mode(path_x->slipstream_path_mode);
     if (mode == slipstream_path_mode_authoritative) {
         return picoquic_bbr_algorithm;
     }
     return picoquic_dcubic_algorithm;
-}
-
-static picoquic_congestion_algorithm_t const* slipstream_select_cc(picoquic_path_t* path_x)
-{
-    slipstream_path_mode_t mode = slipstream_resolve_mode(path_x->slipstream_path_mode);
-    return slipstream_select_cc_for_mode(mode);
 }
 
 static void slipstream_mixed_cc_init(picoquic_cnx_t* cnx, picoquic_path_t* path_x, uint64_t current_time)
@@ -120,25 +114,7 @@ void slipstream_set_path_mode(picoquic_cnx_t* cnx, int path_id, int mode)
         return;
     }
     picoquic_path_t* path_x = cnx->path[path_id];
-    slipstream_path_mode_t next_mode = slipstream_normalize_mode(mode);
-    slipstream_path_mode_t prev_mode = slipstream_resolve_mode(path_x->slipstream_path_mode);
-    path_x->slipstream_path_mode = (uint8_t)next_mode;
-
-    if (slipstream_cc_override != NULL || prev_mode == next_mode) {
-        return;
-    }
-
-    picoquic_congestion_algorithm_t const* prev_alg = slipstream_select_cc_for_mode(prev_mode);
-    picoquic_congestion_algorithm_t const* next_alg = slipstream_select_cc_for_mode(next_mode);
-    if (prev_alg == next_alg || prev_alg == NULL || next_alg == NULL) {
-        return;
-    }
-    if (path_x->congestion_alg_state != NULL && prev_alg->alg_delete != NULL) {
-        prev_alg->alg_delete(path_x);
-    }
-    if (next_alg->alg_init != NULL) {
-        next_alg->alg_init(cnx, path_x, picoquic_get_quic_time(cnx->quic));
-    }
+    path_x->slipstream_path_mode = (uint8_t)slipstream_normalize_mode(mode);
 }
 
 void slipstream_set_path_ack_delay(picoquic_cnx_t* cnx, int path_id, int disable)
