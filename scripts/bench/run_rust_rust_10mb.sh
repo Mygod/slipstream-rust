@@ -31,11 +31,20 @@ PROXY_PORT="${PROXY_PORT:-}"
 PROXY_REORDER_PROB="${PROXY_REORDER_PROB:-}"
 PROXY_BURST_CORRELATION="${PROXY_BURST_CORRELATION:-}"
 CLIENT_ARGS="${CLIENT_ARGS:-}"
+RESOLVER_MODE="${RESOLVER_MODE:-resolver}"
 
 client_extra_args=()
 if [[ -n "${CLIENT_ARGS}" ]]; then
   read -r -a client_extra_args <<< "${CLIENT_ARGS}"
 fi
+
+case "${RESOLVER_MODE}" in
+  resolver|authoritative) ;;
+  *)
+    echo "RESOLVER_MODE must be resolver or authoritative (got: ${RESOLVER_MODE})" >&2
+    exit 1
+    ;;
+esac
 
 if [[ ! -f "${CERT_DIR}/cert.pem" || ! -f "${CERT_DIR}/key.pem" ]]; then
   echo "Missing test certs in ${CERT_DIR}. Set CERT_DIR to override." >&2
@@ -314,7 +323,7 @@ run_case() {
 
   "${ROOT_DIR}/target/release/slipstream-client" \
     --tcp-listen-port "${CLIENT_TCP_PORT}" \
-    --resolver "127.0.0.1:${resolver_port}" \
+    --"${RESOLVER_MODE}" "127.0.0.1:${resolver_port}" \
     --domain "${DOMAIN}" \
     "${client_extra_args[@]}" \
     >"${case_dir}/client.log" 2>&1 &

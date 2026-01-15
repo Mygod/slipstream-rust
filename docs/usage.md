@@ -36,6 +36,7 @@ Notes:
 - Provide --cert to enable strict leaf pinning; omit it for legacy/no-verification behavior.
 - The pinned certificate must match the server leaf exactly; CA bundles are not supported.
 - Resolver order follows the CLI; the first resolver becomes path 0.
+- Resolver addresses must be unique; duplicates are rejected.
 - --authoritative keeps the DNS wire format unchanged and remains C interop safe.
 - Use --authoritative only when you control the resolver/server path and can absorb high QPS bursts.
 - When --congestion-control is omitted, authoritative paths default to bbr and recursive paths default to dcubic.

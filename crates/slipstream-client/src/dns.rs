@@ -101,10 +101,18 @@ pub(crate) fn resolve_resolvers(
     debug_poll: bool,
 ) -> Result<Vec<ResolverState>, ClientError> {
     let mut resolved = Vec::with_capacity(resolvers.len());
+    let mut seen = HashMap::new();
     for (idx, resolver) in resolvers.iter().enumerate() {
         let addr = resolve_host_port(&resolver.resolver)
             .map_err(|err| ClientError::new(err.to_string()))?;
         let addr = normalize_dual_stack_addr(addr);
+        if let Some(existing_mode) = seen.get(&addr) {
+            return Err(ClientError::new(format!(
+                "Duplicate resolver address {} (modes: {:?} and {:?})",
+                addr, existing_mode, resolver.mode
+            )));
+        }
+        seen.insert(addr, resolver.mode);
         let is_primary = idx == 0;
         resolved.push(ResolverState {
             addr,
@@ -535,4 +543,37 @@ fn dns_response_id(packet: &[u8]) -> Option<u16> {
         return None;
     }
     Some(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slipstream_core::{AddressFamily, HostPort};
+
+    #[test]
+    fn rejects_duplicate_resolver_addr() {
+        let resolvers = vec![
+            ResolverSpec {
+                resolver: HostPort {
+                    host: "127.0.0.1".to_string(),
+                    port: 8853,
+                    family: AddressFamily::V4,
+                },
+                mode: ResolverMode::Recursive,
+            },
+            ResolverSpec {
+                resolver: HostPort {
+                    host: "127.0.0.1".to_string(),
+                    port: 8853,
+                    family: AddressFamily::V4,
+                },
+                mode: ResolverMode::Authoritative,
+            },
+        ];
+
+        match resolve_resolvers(&resolvers, 900, false) {
+            Ok(_) => panic!("expected duplicate resolver error"),
+            Err(err) => assert!(err.to_string().contains("Duplicate resolver address")),
+        }
+    }
 }
