@@ -347,6 +347,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             if let Ok(dest) = sockaddr_storage_to_socket_addr(&addr_to) {
                 let dest = normalize_dual_stack_addr(dest);
                 if let Some(resolver) = find_resolver_by_addr_mut(&mut resolvers, dest) {
+                    resolver.local_addr_storage = Some(unsafe { std::ptr::read(&addr_from) });
                     resolver.debug.send_packets = resolver.debug.send_packets.saturating_add(1);
                     resolver.debug.send_bytes =
                         resolver.debug.send_bytes.saturating_add(send_length as u64);

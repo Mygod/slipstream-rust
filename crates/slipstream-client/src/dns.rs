@@ -22,6 +22,7 @@ const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 5_000_000;
 pub(crate) struct ResolverState {
     pub(crate) addr: SocketAddr,
     pub(crate) storage: libc::sockaddr_storage,
+    pub(crate) local_addr_storage: Option<libc::sockaddr_storage>,
     pub(crate) mode: ResolverMode,
     pub(crate) added: bool,
     pub(crate) path_id: libc::c_int,
@@ -107,6 +108,7 @@ pub(crate) fn resolve_resolvers(
         resolved.push(ResolverState {
             addr,
             storage: socket_addr_to_storage(addr),
+            local_addr_storage: None,
             mode: resolver.mode,
             added: is_primary,
             path_id: if is_primary { 0 } else { -1 },
@@ -161,10 +163,23 @@ pub(crate) fn handle_dns_response(
     peer: SocketAddr,
     ctx: &mut DnsResponseContext<'_>,
 ) -> Result<(), ClientError> {
+    let peer = normalize_dual_stack_addr(peer);
     let response_id = dns_response_id(buf);
     if let Some(payload) = decode_response(buf) {
+        let resolver_index = ctx
+            .resolvers
+            .iter()
+            .position(|resolver| resolver.addr == peer);
         let mut peer_storage = socket_addr_to_storage(peer);
-        let mut local_storage = unsafe { std::ptr::read(ctx.local_addr_storage) };
+        let mut local_storage = if let Some(index) = resolver_index {
+            ctx.resolvers[index]
+                .local_addr_storage
+                .as_ref()
+                .map(|storage| unsafe { std::ptr::read(storage) })
+                .unwrap_or_else(|| unsafe { std::ptr::read(ctx.local_addr_storage) })
+        } else {
+            unsafe { std::ptr::read(ctx.local_addr_storage) }
+        };
         let mut first_cnx: *mut picoquic_cnx_t = std::ptr::null_mut();
         let mut first_path: libc::c_int = -1;
         let current_time = unsafe { picoquic_current_time() };
@@ -185,8 +200,7 @@ pub(crate) fn handle_dns_response(
         if ret < 0 {
             return Err(ClientError::new("Failed processing inbound QUIC packet"));
         }
-        let resolver = if let Some(resolver) = find_resolver_by_path_id(ctx.resolvers, first_path)
-        {
+        let resolver = if let Some(resolver) = find_resolver_by_path_id(ctx.resolvers, first_path) {
             Some(resolver)
         } else {
             find_resolver_by_addr(ctx.resolvers, peer)
@@ -265,6 +279,7 @@ pub(crate) async fn send_poll_queries(
 
         remaining_count -= 1;
         *local_addr_storage = addr_from;
+        resolver.local_addr_storage = Some(unsafe { std::ptr::read(local_addr_storage) });
         resolver.debug.send_packets = resolver.debug.send_packets.saturating_add(1);
         resolver.debug.send_bytes = resolver.debug.send_bytes.saturating_add(send_length as u64);
         resolver.debug.polls_sent = resolver.debug.polls_sent.saturating_add(1);
