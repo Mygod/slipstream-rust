@@ -6,9 +6,8 @@ use slipstream_ffi::{
         picoquic_connection_id_t, picoquic_create, picoquic_create_client_cnx,
         picoquic_current_time, picoquic_disable_keep_alive, picoquic_enable_keep_alive,
         picoquic_get_next_wake_delay, picoquic_prepare_next_packet_ex, picoquic_set_callback,
-        slipstream_has_ready_stream, slipstream_is_flow_blocked,
-        PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
-        PICOQUIC_PACKET_LOOP_SEND_MAX,
+        slipstream_has_ready_stream, slipstream_is_flow_blocked, PICOQUIC_CONNECTION_ID_MAX_SIZE,
+        PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, ClientConfig, QuicGuard,
 };
