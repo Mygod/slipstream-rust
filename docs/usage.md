@@ -44,7 +44,7 @@ Notes:
 
 Required flags:
 
-- --domain <DOMAIN>
+- --domain <DOMAIN> (repeatable)
 - --cert <PATH>
 - --key <PATH>
 
@@ -61,6 +61,7 @@ Example:
   --dns-listen-port 8853 \
   --target-address 127.0.0.1:5201 \
   --domain example.com \
+  --domain tunnel.example.com \
   --cert ./cert.pem \
   --key ./key.pem
 ```
@@ -83,3 +84,6 @@ For a local smoke test, the Rust to Rust interop script spins up a UDP proxy and
 ```
 
 See docs/interop.md for full details and C interop variants.
+
+When multiple --domain values are provided, the server matches the longest
+suffix in incoming QNAMEs.

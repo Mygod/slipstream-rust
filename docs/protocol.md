@@ -7,6 +7,7 @@ codec is intentionally minimal and focused on speed and compatibility.
 
 - The configured domain is appended to every QNAME as a suffix.
 - The domain is expected without a trailing dot; the implementation appends it.
+- Servers may be configured with multiple domains and must accept any matching suffix.
 
 ## Base32 and inline dots
 
@@ -63,7 +64,8 @@ codec is intentionally minimal and focused on speed and compatibility.
 - If the QNAME subdomain is empty: respond with NAME_ERROR.
 - If base32 decode fails: respond with SERVER_FAILURE.
 - If the DNS parser fails (decode error): drop the message (no response).
-- The server must verify that QNAME ends with .domain.; if not, respond with NAME_ERROR.
+- The server must verify that QNAME ends with a configured domain suffix; if not, respond with NAME_ERROR.
+- If multiple suffixes match, the server selects the longest matching suffix.
 
 ## Client-side decode rules
 
