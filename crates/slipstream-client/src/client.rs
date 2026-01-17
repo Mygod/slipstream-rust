@@ -332,7 +332,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) } != 0;
                     if flow_blocked {
                         for resolver in resolvers.iter_mut() {
-                            if resolver.mode == ResolverMode::Recursive {
+                            if resolver.mode == ResolverMode::Recursive && resolver.added {
                                 resolver.pending_polls = resolver.pending_polls.max(1);
                             }
                         }
