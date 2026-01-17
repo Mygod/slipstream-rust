@@ -1,4 +1,4 @@
-use crate::client::ClientError;
+use crate::error::ClientError;
 use crate::pacing::{PacingBudgetSnapshot, PacingPollBudget};
 use slipstream_core::resolve_host_port;
 use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CLASS_IN, RR_TXT};

@@ -1,7 +1,8 @@
-mod client;
 mod dns;
+mod error;
 mod pacing;
 mod pinning;
+mod runtime;
 mod streams;
 
 use clap::{ArgGroup, CommandFactory, FromArgMatches, Parser};
@@ -10,7 +11,7 @@ use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec};
 use tokio::runtime::Builder;
 use tracing_subscriber::EnvFilter;
 
-use client::run_client;
+use runtime::run_client;
 
 #[derive(Parser, Debug)]
 #[command(

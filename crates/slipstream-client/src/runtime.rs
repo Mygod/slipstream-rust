@@ -1,3 +1,22 @@
+mod path;
+mod setup;
+
+use self::path::{
+    apply_path_mode, drain_path_events, fetch_path_quality, find_resolver_by_addr_mut,
+    loop_burst_total, path_poll_burst_max, resolver_mode_to_c,
+};
+use self::setup::{bind_udp_socket, compute_mtu, map_io};
+use crate::dns::{
+    add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
+    normalize_dual_stack_addr, refresh_resolver_path, resolve_resolvers, send_poll_queries,
+    sockaddr_storage_to_socket_addr, DnsResponseContext,
+};
+use crate::error::ClientError;
+use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
+use crate::pinning::configure_pinned_certificate;
+use crate::streams::{
+    client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor, ClientState,
+};
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
     configure_quic_with_custom,
@@ -5,65 +24,27 @@ use slipstream_ffi::{
         picoquic_close, picoquic_cnx_t, picoquic_connection_id_t, picoquic_create,
         picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
         picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
-        picoquic_enable_path_callbacks_default, picoquic_get_default_path_quality,
-        picoquic_get_next_wake_delay, picoquic_get_path_addr, picoquic_get_path_quality,
-        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_get_path_id_from_unique,
-        slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm,
-        slipstream_set_cc_override, slipstream_set_default_path_mode,
-        slipstream_set_path_ack_delay, slipstream_set_path_mode, PICOQUIC_CONNECTION_ID_MAX_SIZE,
+        picoquic_enable_path_callbacks_default, picoquic_get_next_wake_delay,
+        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_has_ready_stream,
+        slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm, slipstream_set_cc_override,
+        slipstream_set_default_path_mode, PICOQUIC_CONNECTION_ID_MAX_SIZE,
         PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, ClientConfig, QuicGuard, ResolverMode,
 };
 use std::ffi::CString;
-use std::fmt;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::{TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
+use tokio::net::TcpListener as TokioTcpListener;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
-
-use crate::dns::{
-    add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
-    normalize_dual_stack_addr, refresh_resolver_path, reset_resolver_path, resolve_resolvers,
-    send_poll_queries, sockaddr_storage_to_socket_addr, DnsResponseContext, ResolverState,
-};
-use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
-use crate::pinning::configure_pinned_certificate;
-use crate::streams::{
-    client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor,
-    ClientState, PathEvent,
-};
 
 // Protocol defaults; see docs/config.md for details.
 const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const SLIPSTREAM_SNI: &str = "test.example.com";
 const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
-const AUTHORITATIVE_LOOP_MULTIPLIER: usize = 4;
-
-#[derive(Debug)]
-pub struct ClientError {
-    message: String,
-}
-
-impl ClientError {
-    pub(crate) fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for ClientError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for ClientError {}
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let domain_len = config.domain.len();
@@ -507,148 +488,4 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     }
 
     Ok(0)
-}
-
-fn resolver_mode_to_c(mode: ResolverMode) -> libc::c_int {
-    match mode {
-        ResolverMode::Recursive => 1,
-        ResolverMode::Authoritative => 2,
-    }
-}
-
-fn apply_path_mode(
-    cnx: *mut picoquic_cnx_t,
-    resolver: &mut ResolverState,
-) -> Result<(), ClientError> {
-    if !refresh_resolver_path(cnx, resolver) {
-        return Ok(());
-    }
-    unsafe {
-        slipstream_set_path_mode(cnx, resolver.path_id, resolver_mode_to_c(resolver.mode));
-        let disable_ack_delay = matches!(resolver.mode, ResolverMode::Authoritative) as libc::c_int;
-        slipstream_set_path_ack_delay(cnx, resolver.path_id, disable_ack_delay);
-    }
-    Ok(())
-}
-
-fn fetch_path_quality(
-    cnx: *mut picoquic_cnx_t,
-    resolver: &ResolverState,
-) -> slipstream_ffi::picoquic::picoquic_path_quality_t {
-    let mut quality = slipstream_ffi::picoquic::picoquic_path_quality_t::default();
-    let mut ret = -1;
-    if let Some(unique_path_id) = resolver.unique_path_id {
-        ret = unsafe { picoquic_get_path_quality(cnx, unique_path_id, &mut quality as *mut _) };
-    }
-    if ret != 0 {
-        unsafe {
-            picoquic_get_default_path_quality(cnx, &mut quality as *mut _);
-        }
-    }
-    quality
-}
-
-fn drain_path_events(
-    cnx: *mut picoquic_cnx_t,
-    resolvers: &mut [ResolverState],
-    state_ptr: *mut ClientState,
-) {
-    if state_ptr.is_null() {
-        return;
-    }
-    let events = unsafe { (*state_ptr).take_path_events() };
-    if events.is_empty() {
-        return;
-    }
-    for event in events {
-        match event {
-            PathEvent::Available(unique_path_id) => {
-                if let Some(addr) = path_peer_addr(cnx, unique_path_id) {
-                    if let Some(resolver) = find_resolver_by_addr_mut(resolvers, addr) {
-                        let path_id =
-                            unsafe { slipstream_get_path_id_from_unique(cnx, unique_path_id) };
-                        if path_id >= 0 {
-                            resolver.unique_path_id = Some(unique_path_id);
-                            resolver.path_id = path_id;
-                            resolver.added = true;
-                        } else {
-                            resolver.unique_path_id = None;
-                        }
-                    }
-                }
-            }
-            PathEvent::Deleted(unique_path_id) => {
-                if let Some(resolver) = find_resolver_by_unique_id_mut(resolvers, unique_path_id) {
-                    reset_resolver_path(resolver);
-                }
-            }
-        }
-    }
-}
-
-fn path_peer_addr(cnx: *mut picoquic_cnx_t, unique_path_id: u64) -> Option<SocketAddr> {
-    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let ret = unsafe { picoquic_get_path_addr(cnx, unique_path_id, 2, &mut storage) };
-    if ret != 0 {
-        return None;
-    }
-    sockaddr_storage_to_socket_addr(&storage).ok()
-}
-
-fn loop_burst_total(resolvers: &[ResolverState], base: usize) -> usize {
-    resolvers.iter().fold(0usize, |acc, resolver| {
-        acc.saturating_add(base.saturating_mul(path_loop_multiplier(resolver.mode)))
-    })
-}
-
-fn path_poll_burst_max(resolver: &ResolverState) -> usize {
-    PICOQUIC_PACKET_LOOP_SEND_MAX.saturating_mul(path_loop_multiplier(resolver.mode))
-}
-
-fn path_loop_multiplier(mode: ResolverMode) -> usize {
-    match mode {
-        ResolverMode::Authoritative => AUTHORITATIVE_LOOP_MULTIPLIER,
-        ResolverMode::Recursive => 1,
-    }
-}
-
-fn find_resolver_by_addr_mut(
-    resolvers: &mut [ResolverState],
-    addr: SocketAddr,
-) -> Option<&mut ResolverState> {
-    let addr = normalize_dual_stack_addr(addr);
-    resolvers.iter_mut().find(|resolver| resolver.addr == addr)
-}
-
-fn find_resolver_by_unique_id_mut(
-    resolvers: &mut [ResolverState],
-    unique_path_id: u64,
-) -> Option<&mut ResolverState> {
-    resolvers
-        .iter_mut()
-        .find(|resolver| resolver.unique_path_id == Some(unique_path_id))
-}
-
-fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
-    if domain_len >= 240 {
-        return Err(ClientError::new(
-            "Domain name is too long for DNS transport",
-        ));
-    }
-    let mtu = ((240.0 - domain_len as f64) / 1.6) as u32;
-    if mtu == 0 {
-        return Err(ClientError::new(
-            "MTU computed to zero; check domain length",
-        ));
-    }
-    Ok(mtu)
-}
-
-async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {
-    let bind_addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
-    TokioUdpSocket::bind(bind_addr).await.map_err(map_io)
-}
-
-fn map_io(err: std::io::Error) -> ClientError {
-    ClientError::new(err.to_string())
 }
