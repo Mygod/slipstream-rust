@@ -1,13 +1,14 @@
 use crate::client::ClientError;
-use crate::pacing::PacingBudgetSnapshot;
-use slipstream_core::{resolve_host_port, HostPort};
+use crate::pacing::{PacingBudgetSnapshot, PacingPollBudget};
+use slipstream_core::resolve_host_port;
 use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_get_path_addr, picoquic_incoming_packet_ex,
     picoquic_prepare_packet_ex, picoquic_probe_new_path_ex, picoquic_quic_t,
-    slipstream_request_poll, PICOQUIC_PACKET_LOOP_RECV_MAX,
+    slipstream_find_path_id_by_addr, slipstream_get_path_id_from_unique, slipstream_request_poll,
+    slipstream_set_default_path_mode, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
-use slipstream_ffi::{socket_addr_to_storage, ClientConfig};
+use slipstream_ffi::{socket_addr_to_storage, ClientConfig, ResolverMode, ResolverSpec};
 use std::collections::HashMap;
 use std::net::{SocketAddr, SocketAddrV6};
 use tokio::net::UdpSocket as TokioUdpSocket;
@@ -19,13 +20,30 @@ const DEBUG_REPORT_INTERVAL_US: u64 = 1_000_000;
 const MAX_POLL_BURST: usize = PICOQUIC_PACKET_LOOP_RECV_MAX;
 const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 5_000_000;
 
-#[derive(Clone)]
-pub(crate) struct ResolverAddr {
+pub(crate) struct ResolverState {
     pub(crate) addr: SocketAddr,
     pub(crate) storage: libc::sockaddr_storage,
+    pub(crate) local_addr_storage: Option<libc::sockaddr_storage>,
+    pub(crate) mode: ResolverMode,
     pub(crate) added: bool,
+    pub(crate) path_id: libc::c_int,
+    pub(crate) unique_path_id: Option<u64>,
     pub(crate) probe_attempts: u32,
     pub(crate) next_probe_at: u64,
+    pub(crate) pending_polls: usize,
+    pub(crate) inflight_poll_ids: HashMap<u16, u64>,
+    pub(crate) pacing_budget: Option<PacingPollBudget>,
+    pub(crate) last_pacing_snapshot: Option<PacingBudgetSnapshot>,
+    pub(crate) debug: DebugMetrics,
+}
+
+impl ResolverState {
+    pub(crate) fn label(&self) -> String {
+        format!(
+            "path_id={} unique_id={:?} resolver={} mode={:?}",
+            self.path_id, self.unique_path_id, self.addr, self.mode
+        )
+    }
 }
 
 pub(crate) struct DebugMetrics {
@@ -75,26 +93,96 @@ impl DebugMetrics {
 pub(crate) struct DnsResponseContext<'a> {
     pub(crate) quic: *mut picoquic_quic_t,
     pub(crate) local_addr_storage: &'a libc::sockaddr_storage,
-    pub(crate) pending_polls: &'a mut usize,
-    pub(crate) inflight_poll_ids: &'a mut HashMap<u16, u64>,
-    pub(crate) debug: &'a mut DebugMetrics,
-    pub(crate) authoritative: bool,
+    pub(crate) resolvers: &'a mut [ResolverState],
 }
 
-pub(crate) fn resolve_resolvers(resolvers: &[HostPort]) -> Result<Vec<ResolverAddr>, ClientError> {
+pub(crate) fn resolve_resolvers(
+    resolvers: &[ResolverSpec],
+    mtu: u32,
+    debug_poll: bool,
+) -> Result<Vec<ResolverState>, ClientError> {
     let mut resolved = Vec::with_capacity(resolvers.len());
-    for resolver in resolvers {
-        let addr = resolve_host_port(resolver).map_err(|err| ClientError::new(err.to_string()))?;
+    let mut seen = HashMap::new();
+    for (idx, resolver) in resolvers.iter().enumerate() {
+        let addr = resolve_host_port(&resolver.resolver)
+            .map_err(|err| ClientError::new(err.to_string()))?;
         let addr = normalize_dual_stack_addr(addr);
-        resolved.push(ResolverAddr {
+        if let Some(existing_mode) = seen.get(&addr) {
+            return Err(ClientError::new(format!(
+                "Duplicate resolver address {} (modes: {:?} and {:?})",
+                addr, existing_mode, resolver.mode
+            )));
+        }
+        seen.insert(addr, resolver.mode);
+        let is_primary = idx == 0;
+        resolved.push(ResolverState {
             addr,
             storage: socket_addr_to_storage(addr),
-            added: false,
+            local_addr_storage: None,
+            mode: resolver.mode,
+            added: is_primary,
+            path_id: if is_primary { 0 } else { -1 },
+            unique_path_id: if is_primary { Some(0) } else { None },
             probe_attempts: 0,
             next_probe_at: 0,
+            pending_polls: 0,
+            inflight_poll_ids: HashMap::new(),
+            pacing_budget: match resolver.mode {
+                ResolverMode::Authoritative => Some(PacingPollBudget::new(mtu)),
+                ResolverMode::Recursive => None,
+            },
+            last_pacing_snapshot: None,
+            debug: DebugMetrics::new(debug_poll),
         });
     }
     Ok(resolved)
+}
+
+pub(crate) fn refresh_resolver_path(
+    cnx: *mut picoquic_cnx_t,
+    resolver: &mut ResolverState,
+) -> bool {
+    if let Some(unique_path_id) = resolver.unique_path_id {
+        let path_id = unsafe { slipstream_get_path_id_from_unique(cnx, unique_path_id) };
+        if path_id >= 0 {
+            resolver.added = true;
+            if resolver.path_id != path_id {
+                resolver.path_id = path_id;
+            }
+            return true;
+        }
+        resolver.unique_path_id = None;
+    }
+    let peer = &resolver.storage as *const _ as *const libc::sockaddr;
+    let path_id = unsafe { slipstream_find_path_id_by_addr(cnx, peer) };
+    if path_id < 0 {
+        if resolver.added || resolver.path_id >= 0 {
+            reset_resolver_path(resolver);
+        }
+        return false;
+    }
+
+    resolver.added = true;
+    if resolver.path_id != path_id {
+        resolver.path_id = path_id;
+    }
+    true
+}
+
+pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
+    warn!(
+        "Path for resolver {} became unavailable; resetting state",
+        resolver.addr
+    );
+    resolver.added = false;
+    resolver.path_id = -1;
+    resolver.unique_path_id = None;
+    resolver.local_addr_storage = None;
+    resolver.pending_polls = 0;
+    resolver.inflight_poll_ids.clear();
+    resolver.last_pacing_snapshot = None;
+    resolver.probe_attempts = 0;
+    resolver.next_probe_at = 0;
 }
 
 pub(crate) fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
@@ -133,18 +221,25 @@ pub(crate) fn handle_dns_response(
     peer: SocketAddr,
     ctx: &mut DnsResponseContext<'_>,
 ) -> Result<(), ClientError> {
-    if let Some(response_id) = dns_response_id(buf) {
-        ctx.debug.dns_responses = ctx.debug.dns_responses.saturating_add(1);
-        if ctx.authoritative {
-            ctx.inflight_poll_ids.remove(&response_id);
-        }
-    }
-
+    let peer = normalize_dual_stack_addr(peer);
+    let response_id = dns_response_id(buf);
     if let Some(payload) = decode_response(buf) {
+        let resolver_index = ctx
+            .resolvers
+            .iter()
+            .position(|resolver| resolver.addr == peer);
         let mut peer_storage = socket_addr_to_storage(peer);
-        let mut local_storage = unsafe { std::ptr::read(ctx.local_addr_storage) };
+        let mut local_storage = if let Some(index) = resolver_index {
+            ctx.resolvers[index]
+                .local_addr_storage
+                .as_ref()
+                .map(|storage| unsafe { std::ptr::read(storage) })
+                .unwrap_or_else(|| unsafe { std::ptr::read(ctx.local_addr_storage) })
+        } else {
+            unsafe { std::ptr::read(ctx.local_addr_storage) }
+        };
         let mut first_cnx: *mut picoquic_cnx_t = std::ptr::null_mut();
-        let mut first_path: libc::c_int = 0;
+        let mut first_path: libc::c_int = -1;
         let current_time = unsafe { picoquic_current_time() };
         let ret = unsafe {
             picoquic_incoming_packet_ex(
@@ -163,8 +258,33 @@ pub(crate) fn handle_dns_response(
         if ret < 0 {
             return Err(ClientError::new("Failed processing inbound QUIC packet"));
         }
-        if !ctx.authoritative {
-            *ctx.pending_polls = ctx.pending_polls.saturating_add(1).min(MAX_POLL_BURST);
+        let resolver = if let Some(resolver) = find_resolver_by_path_id(ctx.resolvers, first_path) {
+            Some(resolver)
+        } else {
+            find_resolver_by_addr(ctx.resolvers, peer)
+        };
+        if let Some(resolver) = resolver {
+            if first_path >= 0 && resolver.path_id != first_path {
+                resolver.path_id = first_path;
+                resolver.added = true;
+            }
+            resolver.debug.dns_responses = resolver.debug.dns_responses.saturating_add(1);
+            if let Some(response_id) = response_id {
+                if resolver.mode == ResolverMode::Authoritative {
+                    resolver.inflight_poll_ids.remove(&response_id);
+                }
+            }
+            if resolver.mode == ResolverMode::Recursive {
+                resolver.pending_polls =
+                    resolver.pending_polls.saturating_add(1).min(MAX_POLL_BURST);
+            }
+        }
+    } else if let Some(response_id) = response_id {
+        if let Some(resolver) = find_resolver_by_addr(ctx.resolvers, peer) {
+            resolver.debug.dns_responses = resolver.debug.dns_responses.saturating_add(1);
+            if resolver.mode == ResolverMode::Authoritative {
+                resolver.inflight_poll_ids.remove(&response_id);
+            }
         }
     }
     Ok(())
@@ -177,15 +297,17 @@ pub(crate) async fn send_poll_queries(
     config: &ClientConfig<'_>,
     local_addr_storage: &mut libc::sockaddr_storage,
     dns_id: &mut u16,
-    pending_polls: &mut usize,
-    inflight_poll_ids: &mut HashMap<u16, u64>,
+    resolver: &mut ResolverState,
+    remaining: &mut usize,
     send_buf: &mut [u8],
-    debug: &mut DebugMetrics,
 ) -> Result<(), ClientError> {
-    let mut remaining = *pending_polls;
-    *pending_polls = 0;
+    if !refresh_resolver_path(cnx, resolver) {
+        return Ok(());
+    }
+    let mut remaining_count = *remaining;
+    *remaining = 0;
 
-    while remaining > 0 {
+    while remaining_count > 0 {
         let current_time = unsafe { picoquic_current_time() };
         unsafe {
             slipstream_request_poll(cnx);
@@ -198,7 +320,7 @@ pub(crate) async fn send_poll_queries(
         let ret = unsafe {
             picoquic_prepare_packet_ex(
                 cnx,
-                -1,
+                resolver.path_id,
                 current_time,
                 send_buf.as_mut_ptr(),
                 send_buf.len(),
@@ -213,15 +335,16 @@ pub(crate) async fn send_poll_queries(
             return Err(ClientError::new("Failed preparing poll packet"));
         }
         if send_length == 0 || addr_to.ss_family == 0 {
-            *pending_polls = remaining;
+            *remaining = remaining_count;
             break;
         }
 
-        remaining -= 1;
+        remaining_count -= 1;
         *local_addr_storage = addr_from;
-        debug.send_packets = debug.send_packets.saturating_add(1);
-        debug.send_bytes = debug.send_bytes.saturating_add(send_length as u64);
-        debug.polls_sent = debug.polls_sent.saturating_add(1);
+        resolver.local_addr_storage = Some(unsafe { std::ptr::read(local_addr_storage) });
+        resolver.debug.send_packets = resolver.debug.send_packets.saturating_add(1);
+        resolver.debug.send_bytes = resolver.debug.send_bytes.saturating_add(send_length as u64);
+        resolver.debug.polls_sent = resolver.debug.polls_sent.saturating_add(1);
 
         let poll_id = *dns_id;
         let qname = build_qname(&send_buf[..send_length], config.domain)
@@ -244,8 +367,8 @@ pub(crate) async fn send_poll_queries(
         udp.send_to(&packet, dest)
             .await
             .map_err(|err| ClientError::new(err.to_string()))?;
-        if config.authoritative {
-            inflight_poll_ids.insert(poll_id, current_time);
+        if resolver.mode == ResolverMode::Authoritative {
+            resolver.inflight_poll_ids.insert(poll_id, current_time);
         }
     }
 
@@ -253,13 +376,15 @@ pub(crate) async fn send_poll_queries(
 }
 
 pub(crate) fn maybe_report_debug(
-    debug: &mut DebugMetrics,
+    resolver: &mut ResolverState,
     now: u64,
     streams_len: usize,
     pending_polls: usize,
     inflight_polls: usize,
     pacing_snapshot: Option<PacingBudgetSnapshot>,
 ) {
+    let label = resolver.label();
+    let debug = &mut resolver.debug;
     if !debug.enabled {
         return;
     }
@@ -300,7 +425,8 @@ pub(crate) fn maybe_report_debug(
         String::new()
     };
     debug!(
-        "debug: dns+={} send_pkts+={} send_bytes+={} polls+={} zero_send+={} zero_send_streams+={} streams={} enqueued+={} last_enqueue_ms={} pending_polls={} inflight_polls={}{}",
+        "debug: {} dns+={} send_pkts+={} send_bytes+={} polls+={} zero_send+={} zero_send_streams+={} streams={} enqueued+={} last_enqueue_ms={} pending_polls={} inflight_polls={}{}",
+        label,
         dns_delta,
         send_pkt_delta,
         send_bytes_delta,
@@ -326,7 +452,7 @@ pub(crate) fn maybe_report_debug(
 
 pub(crate) fn add_paths(
     cnx: *mut picoquic_cnx_t,
-    resolvers: &mut [ResolverAddr],
+    resolvers: &mut [ResolverState],
 ) -> Result<(), ClientError> {
     if resolvers.len() <= 1 {
         return Ok(());
@@ -338,6 +464,8 @@ pub(crate) fn add_paths(
         return Ok(());
     }
     let now = unsafe { picoquic_current_time() };
+    let primary_mode = resolvers[0].mode;
+    let mut default_mode = primary_mode;
 
     for resolver in resolvers.iter_mut().skip(1) {
         if resolver.added {
@@ -345,6 +473,10 @@ pub(crate) fn add_paths(
         }
         if resolver.next_probe_at > now {
             continue;
+        }
+        if resolver.mode != default_mode {
+            unsafe { slipstream_set_default_path_mode(resolver_mode_to_c(resolver.mode)) };
+            default_mode = resolver.mode;
         }
         let mut path_id: libc::c_int = -1;
         let ret = unsafe {
@@ -360,6 +492,7 @@ pub(crate) fn add_paths(
         };
         if ret == 0 && path_id >= 0 {
             resolver.added = true;
+            resolver.path_id = path_id;
             info!("Added path {}", resolver.addr);
             continue;
         }
@@ -374,7 +507,38 @@ pub(crate) fn add_paths(
         );
     }
 
+    if default_mode != primary_mode {
+        unsafe { slipstream_set_default_path_mode(resolver_mode_to_c(primary_mode)) };
+    }
+
     Ok(())
+}
+
+fn find_resolver_by_path_id(
+    resolvers: &mut [ResolverState],
+    path_id: libc::c_int,
+) -> Option<&mut ResolverState> {
+    if path_id < 0 {
+        return None;
+    }
+    resolvers
+        .iter_mut()
+        .find(|resolver| resolver.added && resolver.path_id == path_id)
+}
+
+fn find_resolver_by_addr(
+    resolvers: &mut [ResolverState],
+    peer: SocketAddr,
+) -> Option<&mut ResolverState> {
+    let peer = normalize_dual_stack_addr(peer);
+    resolvers.iter_mut().find(|resolver| resolver.addr == peer)
+}
+
+fn resolver_mode_to_c(mode: ResolverMode) -> libc::c_int {
+    match mode {
+        ResolverMode::Recursive => 1,
+        ResolverMode::Authoritative => 2,
+    }
 }
 
 fn path_probe_backoff(attempts: u32) -> u64 {
@@ -393,4 +557,37 @@ fn dns_response_id(packet: &[u8]) -> Option<u16> {
         return None;
     }
     Some(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slipstream_core::{AddressFamily, HostPort};
+
+    #[test]
+    fn rejects_duplicate_resolver_addr() {
+        let resolvers = vec![
+            ResolverSpec {
+                resolver: HostPort {
+                    host: "127.0.0.1".to_string(),
+                    port: 8853,
+                    family: AddressFamily::V4,
+                },
+                mode: ResolverMode::Recursive,
+            },
+            ResolverSpec {
+                resolver: HostPort {
+                    host: "127.0.0.1".to_string(),
+                    port: 8853,
+                    family: AddressFamily::V4,
+                },
+                mode: ResolverMode::Authoritative,
+            },
+        ];
+
+        match resolve_resolvers(&resolvers, 900, false) {
+            Ok(_) => panic!("expected duplicate resolver error"),
+            Err(err) => assert!(err.to_string().contains("Duplicate resolver address")),
+        }
+    }
 }

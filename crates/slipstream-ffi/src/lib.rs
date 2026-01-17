@@ -6,14 +6,26 @@ pub mod runtime;
 pub use picoquic::get_pacing_rate;
 pub use picoquic::get_rtt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ResolverMode {
+    Recursive = 1,
+    Authoritative = 2,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolverSpec {
+    pub resolver: HostPort,
+    pub mode: ResolverMode,
+}
+
 #[derive(Debug)]
 pub struct ClientConfig<'a> {
     pub tcp_listen_port: u16,
-    pub resolvers: &'a [HostPort],
+    pub resolvers: &'a [ResolverSpec],
     pub domain: &'a str,
     pub cert: Option<&'a str>,
-    pub congestion_control: &'a str,
-    pub authoritative: bool,
+    pub congestion_control: Option<&'a str>,
     pub gso: bool,
     pub keep_alive_interval: usize,
     pub debug_poll: bool,

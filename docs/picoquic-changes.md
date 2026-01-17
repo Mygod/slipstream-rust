@@ -37,6 +37,15 @@ and the internal picoquic APIs that slipstream relies on, plus why they are need
     - Slipstream relies on explicit consumption to drive connection-level flow control.
       Using `data_consumed` ensures MAX_DATA frames reflect actual app drain, not mere receipt.
 
+- local (2026-01-08) "feat: per-path slipstream mode + ack-delay override"
+  - Files: `vendor/picoquic/picoquic/picoquic_internal.h`, `vendor/picoquic/picoquic/frames.c`
+  - What changed:
+    - Added `slipstream_path_mode` and `slipstream_no_ack_delay` fields to `picoquic_path_t`.
+    - ACK scheduling now checks the per-path no-ack-delay flag in addition to the connection flag.
+  - Why:
+    - Mixed authoritative/recursive multipath needs per-path congestion control selection and
+      per-path delayed-ACK behavior instead of connection-wide toggles.
+
 ## Internal picoquic APIs used by slipstream
 
 The following use `picoquic_internal.h` and therefore depend on picoquic internals:
@@ -55,6 +64,12 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
   - Wrapper: `slipstream_has_ready_stream` in `crates/slipstream-ffi/cc/slipstream_poll.c`.
   - Why: Avoid sending extra polls while QUIC has stream data queued to send.
 
+- `picoquic_find_path_by_address` and `picoquic_path_t` internals (`peer_addr`,
+  `path_is_demoted`, `path_abandon_received`, `path_abandon_sent`, `cnx->nb_paths`)
+  - Wrapper: `slipstream_find_path_id_by_addr` in `crates/slipstream-ffi/cc/slipstream_poll.c`.
+  - Why: Keep resolver path IDs aligned after path deletion/compaction and avoid polling
+    demoted or abandoned paths.
+
 - `cnx->no_ack_delay`
   - Wrapper: `slipstream_disable_ack_delay` in `crates/slipstream-ffi/cc/slipstream_poll.c`.
   - Why: The server disables delayed ACK to reduce DNS round-trip latency for small packets.
@@ -69,6 +84,14 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
   - Usage: `crates/slipstream-ffi/cc/slipstream_server_cc.c`.
   - Why: The server congestion algorithm is customized to effectively remove CC limits so
     DNS polling and application backpressure control throughput instead of packet-level CC.
+
+- `picoquic_path_t` internals (`slipstream_path_mode`, `slipstream_no_ack_delay`)
+  - Usage: `crates/slipstream-ffi/cc/slipstream_mixed_cc.c`.
+  - Why: The mixed-mode client selects congestion control per path and toggles delayed ACK per path.
+  - Note: The client sets the default path mode before probing a new path so CC init picks
+    the correct algorithm, then locks in per-path modes with `slipstream_set_path_mode`.
+    Dynamic path mode changes are not supported.
+  - Note: Per-path quality data is fetched via the public `picoquic_get_path_quality` API in Rust.
 
 ## Public picoquic APIs relied on by slipstream
 

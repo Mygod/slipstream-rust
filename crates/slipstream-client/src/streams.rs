@@ -3,7 +3,6 @@ use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
     picoquic_get_next_local_stream_id, picoquic_mark_active_stream,
     picoquic_provide_stream_data_buffer, picoquic_reset_stream, picoquic_stream_data_consumed,
-    slipstream_disable_ack_delay,
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
@@ -23,7 +22,7 @@ pub(crate) struct ClientState {
     streams: HashMap<u64, ClientStream>,
     command_tx: mpsc::UnboundedSender<Command>,
     data_notify: Arc<Notify>,
-    authoritative: bool,
+    path_events: Vec<PathEvent>,
     debug_streams: bool,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
@@ -33,7 +32,6 @@ impl ClientState {
     pub(crate) fn new(
         command_tx: mpsc::UnboundedSender<Command>,
         data_notify: Arc<Notify>,
-        authoritative: bool,
         debug_streams: bool,
     ) -> Self {
         Self {
@@ -42,7 +40,7 @@ impl ClientState {
             streams: HashMap::new(),
             command_tx,
             data_notify,
-            authoritative,
+            path_events: Vec::new(),
             debug_streams,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
@@ -63,6 +61,10 @@ impl ClientState {
 
     pub(crate) fn debug_snapshot(&self) -> (u64, u64) {
         (self.debug_enqueued_bytes, self.debug_last_enqueue_at)
+    }
+
+    pub(crate) fn take_path_events(&mut self) -> Vec<PathEvent> {
+        std::mem::take(&mut self.path_events)
     }
 }
 
@@ -91,6 +93,11 @@ pub(crate) enum Command {
     StreamWriteDrained { stream_id: u64, bytes: usize },
 }
 
+pub(crate) enum PathEvent {
+    Available(u64),
+    Deleted(u64),
+}
+
 pub(crate) unsafe extern "C" fn client_callback(
     cnx: *mut picoquic_cnx_t,
     stream_id: u64,
@@ -108,11 +115,6 @@ pub(crate) unsafe extern "C" fn client_callback(
     match fin_or_event {
         picoquic_call_back_event_t::picoquic_callback_ready => {
             state.ready = true;
-            if state.authoritative {
-                unsafe {
-                    slipstream_disable_ack_delay(cnx);
-                }
-            }
             info!("Connection ready");
         }
         picoquic_call_back_event_t::picoquic_callback_stream_data
@@ -165,6 +167,12 @@ pub(crate) unsafe extern "C" fn client_callback(
             if !bytes.is_null() {
                 let _ = picoquic_provide_stream_data_buffer(bytes as *mut _, 0, 0, 0);
             }
+        }
+        picoquic_call_back_event_t::picoquic_callback_path_available => {
+            state.path_events.push(PathEvent::Available(stream_id));
+        }
+        picoquic_call_back_event_t::picoquic_callback_path_deleted => {
+            state.path_events.push(PathEvent::Deleted(stream_id));
         }
         _ => {}
     }

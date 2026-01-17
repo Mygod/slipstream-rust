@@ -70,7 +70,7 @@ Note: You can also run the client against a resolver that forwards to the server
 All results below are end-to-end completion times in seconds (lower is better),
 averaged over 5 runs on local loopback. Payload: 10 MiB in each direction.
 Variants are dnstt, C-C slipstream, Rust-Rust (non-auth), and Rust-Rust (auth
-via `--authoritative`).
+via `--authoritative <resolver>`).
 
 See `scripts/bench` for scripts used for obtaining these results.
 
