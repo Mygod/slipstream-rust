@@ -5,8 +5,8 @@ use slipstream_dns::{build_qname, decode_response, encode_query, QueryParams, CL
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_get_path_addr, picoquic_incoming_packet_ex,
     picoquic_prepare_packet_ex, picoquic_probe_new_path_ex, picoquic_quic_t,
-    slipstream_find_path_id_by_addr, slipstream_request_poll, slipstream_set_default_path_mode,
-    PICOQUIC_PACKET_LOOP_RECV_MAX,
+    slipstream_find_path_id_by_addr, slipstream_get_path_id_from_unique, slipstream_request_poll,
+    slipstream_set_default_path_mode, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
 use slipstream_ffi::{socket_addr_to_storage, ClientConfig, ResolverMode, ResolverSpec};
 use std::collections::HashMap;
@@ -142,6 +142,17 @@ pub(crate) fn refresh_resolver_path(
     cnx: *mut picoquic_cnx_t,
     resolver: &mut ResolverState,
 ) -> bool {
+    if let Some(unique_path_id) = resolver.unique_path_id {
+        let path_id = unsafe { slipstream_get_path_id_from_unique(cnx, unique_path_id) };
+        if path_id >= 0 {
+            resolver.added = true;
+            if resolver.path_id != path_id {
+                resolver.path_id = path_id;
+            }
+            return true;
+        }
+        resolver.unique_path_id = None;
+    }
     let peer = &resolver.storage as *const _ as *const libc::sockaddr;
     let path_id = unsafe { slipstream_find_path_id_by_addr(cnx, peer) };
     if path_id < 0 {

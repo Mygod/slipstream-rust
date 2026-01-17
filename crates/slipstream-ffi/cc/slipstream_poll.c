@@ -49,3 +49,21 @@ int slipstream_find_path_id_by_addr(picoquic_cnx_t *cnx, const struct sockaddr* 
 
     return -1;
 }
+
+int slipstream_get_path_id_from_unique(picoquic_cnx_t *cnx, uint64_t unique_path_id) {
+    if (cnx == NULL) {
+        return -1;
+    }
+    int path_id = picoquic_get_path_id_from_unique(cnx, unique_path_id);
+    if (path_id < 0 || path_id >= cnx->nb_paths) {
+        return -1;
+    }
+    picoquic_path_t* path_x = cnx->path[path_id];
+    if (path_x == NULL) {
+        return -1;
+    }
+    if (path_x->path_is_demoted || path_x->path_abandon_received || path_x->path_abandon_sent) {
+        return -1;
+    }
+    return path_id;
+}

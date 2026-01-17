@@ -7,11 +7,11 @@ use slipstream_ffi::{
         picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
         picoquic_enable_path_callbacks_default, picoquic_get_default_path_quality,
         picoquic_get_next_wake_delay, picoquic_get_path_addr, picoquic_get_path_quality,
-        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_has_ready_stream,
-        slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm, slipstream_set_cc_override,
-        slipstream_set_default_path_mode, slipstream_set_path_ack_delay, slipstream_set_path_mode,
-        PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
-        PICOQUIC_PACKET_LOOP_SEND_MAX,
+        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_get_path_id_from_unique,
+        slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm,
+        slipstream_set_cc_override, slipstream_set_default_path_mode,
+        slipstream_set_path_ack_delay, slipstream_set_path_mode, PICOQUIC_CONNECTION_ID_MAX_SIZE,
+        PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, ClientConfig, QuicGuard, ResolverMode,
 };
@@ -565,8 +565,15 @@ fn drain_path_events(
             PathEvent::Available(unique_path_id) => {
                 if let Some(addr) = path_peer_addr(cnx, unique_path_id) {
                     if let Some(resolver) = find_resolver_by_addr_mut(resolvers, addr) {
-                        resolver.unique_path_id = Some(unique_path_id);
-                        resolver.added = true;
+                        let path_id =
+                            unsafe { slipstream_get_path_id_from_unique(cnx, unique_path_id) };
+                        if path_id >= 0 {
+                            resolver.unique_path_id = Some(unique_path_id);
+                            resolver.path_id = path_id;
+                            resolver.added = true;
+                        } else {
+                            resolver.unique_path_id = None;
+                        }
                     }
                 }
             }
