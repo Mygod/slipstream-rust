@@ -7,11 +7,13 @@ This document captures the DNS codec behavior and how it is validated.
 - Base32: RFC4648 alphabet, uppercase, no padding on encode; decode is case-insensitive.
 - Inline dots: insert '.' every 57 characters from the right, never add a trailing dot.
 - QNAME format: <base32(payload) with inline dots>.<domain>.
+- Servers may be configured with multiple domains; the QNAME suffix must match one.
 - DNS query: QTYPE=TXT, QCLASS=IN, RD=1, EDNS0 OPT always included.
 - Server decode rules:
   - QR=1 or QDCOUNT!=1 -> FORMAT_ERROR.
   - QTYPE!=TXT -> NAME_ERROR.
   - Empty subdomain or suffix mismatch -> NAME_ERROR.
+  - If multiple suffixes match, use the longest matching domain.
   - Base32 decode failure -> SERVER_FAILURE.
   - Parse errors -> drop the message (no response).
 - Client decode rules: accept only QR=1, RCODE=OK, ANCOUNT=1, TXT answer;
@@ -49,4 +51,4 @@ The Rust CLI enforces the following constraints:
 - Client requires --domain and at least one --resolver.
 - Resolver parsing supports IPv4, bracketed IPv6, and optional :port.
 - Resolver lists may mix IPv4 and IPv6 entries.
-- Server requires --domain; --target-address defaults to 127.0.0.1:5201.
+- Server requires at least one --domain (repeatable); --target-address defaults to 127.0.0.1:5201.

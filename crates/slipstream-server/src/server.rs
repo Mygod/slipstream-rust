@@ -1,6 +1,6 @@
 use slipstream_core::{resolve_host_port, HostPort};
 use slipstream_dns::{
-    decode_query, encode_response, DecodeQueryError, Question, Rcode, ResponseParams,
+    decode_query_with_domains, encode_response, DecodeQueryError, Question, Rcode, ResponseParams,
 };
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_incoming_packet_ex,
@@ -65,7 +65,7 @@ pub struct ServerConfig {
     pub target_address: HostPort,
     pub cert: String,
     pub key: String,
-    pub domain: String,
+    pub domains: Vec<String>,
     pub debug_streams: bool,
     pub debug_commands: bool,
 }
@@ -185,6 +185,11 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
 
     let udp = bind_udp_socket(config.dns_listen_port).await?;
     let local_addr_storage = socket_addr_to_storage(udp.local_addr().map_err(map_io)?);
+    warn_overlapping_domains(&config.domains);
+    let domains: Vec<&str> = config.domains.iter().map(String::as_str).collect();
+    if domains.is_empty() {
+        return Err(ServerError::new("At least one domain must be configured"));
+    }
 
     unsafe {
         libc::signal(libc::SIGTERM, handle_sigterm as usize);
@@ -217,7 +222,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 if let Some(slot) = decode_slot(
                     &recv_buf[..size],
                     peer,
-                    &config.domain,
+                    &domains,
                     quic,
                     loop_time,
                     &local_addr_storage,
@@ -230,7 +235,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                             if let Some(slot) = decode_slot(
                                 &recv_buf[..size],
                                 peer,
-                                &config.domain,
+                                &domains,
                                 quic,
                                 loop_time,
                                 &local_addr_storage,
@@ -310,12 +315,12 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
 fn decode_slot(
     packet: &[u8],
     peer: SocketAddr,
-    domain: &str,
+    domains: &[&str],
     quic: *mut picoquic_quic_t,
     current_time: u64,
     local_addr_storage: &libc::sockaddr_storage,
 ) -> Result<Option<Slot>, ServerError> {
-    match decode_query(packet, domain) {
+    match decode_query_with_domains(packet, domains) {
         Ok(query) => {
             let mut peer_storage = dummy_sockaddr_storage();
             let mut local_storage = unsafe { std::ptr::read(local_addr_storage) };
@@ -414,4 +419,49 @@ fn dummy_sockaddr_storage() -> libc::sockaddr_storage {
 
 fn map_io(err: std::io::Error) -> ServerError {
     ServerError::new(err.to_string())
+}
+
+fn warn_overlapping_domains(domains: &[String]) {
+    if domains.len() < 2 {
+        return;
+    }
+
+    let trimmed: Vec<String> = domains
+        .iter()
+        .map(|domain| domain.trim_end_matches('.').to_ascii_lowercase())
+        .collect();
+
+    for i in 0..trimmed.len() {
+        for j in (i + 1)..trimmed.len() {
+            let left = &trimmed[i];
+            let right = &trimmed[j];
+
+            if left == right {
+                tracing::warn!(
+                    "Duplicate domain configured: '{}' and '{}'",
+                    domains[i],
+                    domains[j]
+                );
+                continue;
+            }
+
+            if is_label_suffix(left, right) || is_label_suffix(right, left) {
+                tracing::warn!(
+                    "Configured domains overlap; longest suffix wins: '{}' and '{}'",
+                    domains[i],
+                    domains[j]
+                );
+            }
+        }
+    }
+}
+
+fn is_label_suffix(domain: &str, suffix: &str) -> bool {
+    if domain.len() <= suffix.len() {
+        return false;
+    }
+    if !domain.ends_with(suffix) {
+        return false;
+    }
+    domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.'
 }
