@@ -10,6 +10,8 @@ PROXY_PORT="${PROXY_PORT:-5300}"
 TCP_TARGET_PORT="${TCP_TARGET_PORT:-5201}"
 CLIENT_TCP_PORT="${CLIENT_TCP_PORT:-7000}"
 DOMAIN="${DOMAIN:-test.com}"
+DOMAINS="${DOMAINS:-}"
+CLIENT_DOMAIN="${CLIENT_DOMAIN:-}"
 CLIENT_PAYLOAD="${CLIENT_PAYLOAD:-slipstream-rust}"
 SOCKET_TIMEOUT="${SOCKET_TIMEOUT:-10}"
 
@@ -19,6 +21,40 @@ if [[ ! -f "${CERT_DIR}/cert.pem" || ! -f "${CERT_DIR}/key.pem" ]]; then
 fi
 
 mkdir -p "${RUN_DIR}" "${ROOT_DIR}/.interop"
+
+sanitize_domain() {
+  printf '%s' "$1" | tr -d '[:space:]'
+}
+
+server_domains=()
+if [[ -n "${DOMAINS}" ]]; then
+  if [[ "${DOMAINS}" == *","* ]]; then
+    IFS=',' read -r -a server_domains <<< "${DOMAINS}"
+  else
+    read -r -a server_domains <<< "${DOMAINS}"
+  fi
+else
+  server_domains=("${DOMAIN}")
+fi
+
+server_args=()
+for domain in "${server_domains[@]}"; do
+  domain="$(sanitize_domain "${domain}")"
+  if [[ -n "${domain}" ]]; then
+    server_args+=(--domain "${domain}")
+  fi
+done
+
+if [[ "${#server_args[@]}" -eq 0 ]]; then
+  echo "No server domains configured; set DOMAIN or DOMAINS." >&2
+  exit 1
+fi
+
+if [[ -n "${CLIENT_DOMAIN}" ]]; then
+  client_domain="$(sanitize_domain "${CLIENT_DOMAIN}")"
+else
+  client_domain="$(sanitize_domain "${server_domains[0]}")"
+fi
 
 cleanup() {
   for pid in "${CLIENT_PID:-}" "${PROXY_PID:-}" "${SERVER_PID:-}" "${ECHO_PID:-}"; do
@@ -41,7 +77,7 @@ cargo build -p slipstream-server -p slipstream-client
 "${ROOT_DIR}/target/debug/slipstream-server" \
   --dns-listen-port "${DNS_LISTEN_PORT}" \
   --target-address "127.0.0.1:${TCP_TARGET_PORT}" \
-  --domain "${DOMAIN}" \
+  "${server_args[@]}" \
   --cert "${CERT_DIR}/cert.pem" \
   --key "${CERT_DIR}/key.pem" \
   >"${RUN_DIR}/server.log" 2>&1 &
@@ -57,7 +93,7 @@ PROXY_PID=$!
 "${ROOT_DIR}/target/debug/slipstream-client" \
   --tcp-listen-port "${CLIENT_TCP_PORT}" \
   --resolver "127.0.0.1:${PROXY_PORT}" \
-  --domain "${DOMAIN}" \
+  --domain "${client_domain}" \
   >"${RUN_DIR}/client.log" 2>&1 &
 CLIENT_PID=$!
 

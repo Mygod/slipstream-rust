@@ -56,18 +56,28 @@ jobs:
         run: cargo audit
 
   interop:
-    name: Interop (${{ matrix.script }})
+    name: Interop (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        script:
+        include:
           # C repo interop disabled (C repo currently broken).
-          # - run_local.sh
-          # - run_rust_client.sh
-          # - run_rust_server.sh
-          - run_rust_rust.sh
+          # - name: run_local
+          #   script: run_local.sh
+          # - name: run_rust_client
+          #   script: run_rust_client.sh
+          # - name: run_rust_server
+          #   script: run_rust_server.sh
+          - name: rust-rust
+            script: run_rust_rust.sh
+            domains: ""
+            client_domain: ""
+          - name: rust-rust-multi-domain
+            script: run_rust_rust.sh
+            domains: "example.com,tunnel.example.com"
+            client_domain: "tunnel.example.com"
     steps:
       - name: Check out slipstream-rust
         uses: actions/checkout@v4
@@ -94,6 +104,8 @@ jobs:
         env:
           SLIPSTREAM_DIR: slipstream-c
           RUST_BACKTRACE: "1"
+          DOMAINS: ${{ matrix.domains }}
+          CLIENT_DOMAIN: ${{ matrix.client_domain }}
         run: ./scripts/interop/${{ matrix.script }}
 
   benchmarks:
