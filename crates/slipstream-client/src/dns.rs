@@ -27,6 +27,7 @@ pub(crate) struct ResolverState {
     pub(crate) mode: ResolverMode,
     pub(crate) added: bool,
     pub(crate) path_id: libc::c_int,
+    pub(crate) unique_path_id: Option<u64>,
     pub(crate) probe_attempts: u32,
     pub(crate) next_probe_at: u64,
     pub(crate) pending_polls: usize,
@@ -39,8 +40,8 @@ pub(crate) struct ResolverState {
 impl ResolverState {
     pub(crate) fn label(&self) -> String {
         format!(
-            "path_id={} resolver={} mode={:?}",
-            self.path_id, self.addr, self.mode
+            "path_id={} unique_id={:?} resolver={} mode={:?}",
+            self.path_id, self.unique_path_id, self.addr, self.mode
         )
     }
 }
@@ -121,6 +122,7 @@ pub(crate) fn resolve_resolvers(
             mode: resolver.mode,
             added: is_primary,
             path_id: if is_primary { 0 } else { -1 },
+            unique_path_id: if is_primary { Some(0) } else { None },
             probe_attempts: 0,
             next_probe_at: 0,
             pending_polls: 0,
@@ -156,13 +158,14 @@ pub(crate) fn refresh_resolver_path(
     true
 }
 
-fn reset_resolver_path(resolver: &mut ResolverState) {
+pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
     warn!(
         "Path for resolver {} became unavailable; resetting state",
         resolver.addr
     );
     resolver.added = false;
     resolver.path_id = -1;
+    resolver.unique_path_id = None;
     resolver.local_addr_storage = None;
     resolver.pending_polls = 0;
     resolver.inflight_poll_ids.clear();

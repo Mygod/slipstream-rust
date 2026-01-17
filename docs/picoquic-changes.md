@@ -85,14 +85,13 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
   - Why: The server congestion algorithm is customized to effectively remove CC limits so
     DNS polling and application backpressure control throughput instead of packet-level CC.
 
-- `picoquic_path_t` internals (`slipstream_path_mode`, `slipstream_no_ack_delay`,
-  `cwin`, `smoothed_rtt`, `bytes_in_transit`, `pacing.rate`, `receive_rate_estimate`)
+- `picoquic_path_t` internals (`slipstream_path_mode`, `slipstream_no_ack_delay`)
   - Usage: `crates/slipstream-ffi/cc/slipstream_mixed_cc.c`.
-  - Why: The mixed-mode client selects congestion control per path, pulls per-path quality
-    signals for pacing-based poll budgets, and toggles delayed ACK per path.
+  - Why: The mixed-mode client selects congestion control per path and toggles delayed ACK per path.
   - Note: The client sets the default path mode before probing a new path so CC init picks
     the correct algorithm, then locks in per-path modes with `slipstream_set_path_mode`.
     Dynamic path mode changes are not supported.
+  - Note: Per-path quality data is fetched via the public `picoquic_get_path_quality` API in Rust.
 
 ## Public picoquic APIs relied on by slipstream
 

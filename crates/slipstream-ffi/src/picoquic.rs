@@ -237,6 +237,7 @@ extern "C" {
         initial_mtu_ipv6: u32,
     );
     pub fn picoquic_set_key_log_file_from_env(quic: *mut picoquic_quic_t);
+    pub fn picoquic_enable_path_callbacks_default(quic: *mut picoquic_quic_t, are_enabled: c_int);
 
     pub fn picoquic_set_verify_certificate_callback(
         quic: *mut picoquic_quic_t,
@@ -267,6 +268,7 @@ extern "C" {
         callback_fn: picoquic_stream_data_cb_fn,
         callback_ctx: *mut c_void,
     );
+    pub fn picoquic_enable_path_callbacks(cnx: *mut picoquic_cnx_t, are_enabled: c_int);
     pub fn picoquic_close(cnx: *mut picoquic_cnx_t, application_reason_code: u64) -> c_int;
     pub fn picoquic_close_immediate(cnx: *mut picoquic_cnx_t);
 
@@ -285,6 +287,11 @@ extern "C" {
         cnx: *mut picoquic_cnx_t,
         quality: *mut picoquic_path_quality_t,
     );
+    pub fn picoquic_get_path_quality(
+        cnx: *mut picoquic_cnx_t,
+        unique_path_id: u64,
+        quality: *mut picoquic_path_quality_t,
+    ) -> c_int;
 
     pub fn slipstream_request_poll(cnx: *mut picoquic_cnx_t);
     pub fn slipstream_is_flow_blocked(cnx: *mut picoquic_cnx_t) -> c_int;
@@ -298,11 +305,6 @@ extern "C" {
     pub fn slipstream_set_default_path_mode(mode: c_int);
     pub fn slipstream_set_path_mode(cnx: *mut picoquic_cnx_t, path_id: c_int, mode: c_int);
     pub fn slipstream_set_path_ack_delay(cnx: *mut picoquic_cnx_t, path_id: c_int, disable: c_int);
-    pub fn slipstream_get_path_quality(
-        cnx: *mut picoquic_cnx_t,
-        path_id: c_int,
-        quality: *mut picoquic_path_quality_t,
-    ) -> c_int;
 
     pub fn picoquic_get_first_cnx(quic: *mut picoquic_quic_t) -> *mut picoquic_cnx_t;
     pub fn picoquic_get_next_cnx(cnx: *mut picoquic_cnx_t) -> *mut picoquic_cnx_t;

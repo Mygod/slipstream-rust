@@ -22,6 +22,7 @@ pub(crate) struct ClientState {
     streams: HashMap<u64, ClientStream>,
     command_tx: mpsc::UnboundedSender<Command>,
     data_notify: Arc<Notify>,
+    path_events: Vec<PathEvent>,
     debug_streams: bool,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
@@ -39,6 +40,7 @@ impl ClientState {
             streams: HashMap::new(),
             command_tx,
             data_notify,
+            path_events: Vec::new(),
             debug_streams,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
@@ -59,6 +61,10 @@ impl ClientState {
 
     pub(crate) fn debug_snapshot(&self) -> (u64, u64) {
         (self.debug_enqueued_bytes, self.debug_last_enqueue_at)
+    }
+
+    pub(crate) fn take_path_events(&mut self) -> Vec<PathEvent> {
+        std::mem::take(&mut self.path_events)
     }
 }
 
@@ -85,6 +91,11 @@ pub(crate) enum Command {
     StreamReadError { stream_id: u64 },
     StreamWriteError { stream_id: u64 },
     StreamWriteDrained { stream_id: u64, bytes: usize },
+}
+
+pub(crate) enum PathEvent {
+    Available(u64),
+    Deleted(u64),
 }
 
 pub(crate) unsafe extern "C" fn client_callback(
@@ -156,6 +167,12 @@ pub(crate) unsafe extern "C" fn client_callback(
             if !bytes.is_null() {
                 let _ = picoquic_provide_stream_data_buffer(bytes as *mut _, 0, 0, 0);
             }
+        }
+        picoquic_call_back_event_t::picoquic_callback_path_available => {
+            state.path_events.push(PathEvent::Available(stream_id));
+        }
+        picoquic_call_back_event_t::picoquic_callback_path_deleted => {
+            state.path_events.push(PathEvent::Deleted(stream_id));
         }
         _ => {}
     }

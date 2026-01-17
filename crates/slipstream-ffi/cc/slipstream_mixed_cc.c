@@ -124,30 +124,3 @@ void slipstream_set_path_ack_delay(picoquic_cnx_t* cnx, int path_id, int disable
     }
     cnx->path[path_id]->slipstream_no_ack_delay = (disable != 0) ? 1 : 0;
 }
-
-int slipstream_get_path_quality(picoquic_cnx_t* cnx, int path_id, picoquic_path_quality_t* quality)
-{
-    if (cnx == NULL || quality == NULL || path_id < 0 || path_id >= cnx->nb_paths) {
-        return -1;
-    }
-
-    picoquic_path_t* path_x = cnx->path[path_id];
-    picoquic_refresh_path_quality_thresholds(path_x);
-    quality->cwin = path_x->cwin;
-    quality->rtt = path_x->smoothed_rtt;
-    quality->rtt_sample = path_x->rtt_sample;
-    quality->rtt_min = path_x->rtt_min;
-    quality->rtt_max = path_x->rtt_max;
-    quality->rtt_variant = path_x->rtt_variant;
-    quality->pacing_rate = path_x->pacing.rate;
-    quality->receive_rate_estimate = path_x->receive_rate_estimate;
-    quality->sent = picoquic_get_sequence_number(path_x->cnx, path_x, picoquic_packet_context_application);
-    quality->lost = path_x->nb_losses_found;
-    quality->timer_losses = path_x->nb_timer_losses;
-    quality->spurious_losses = path_x->nb_spurious;
-    quality->max_spurious_rtt = path_x->max_spurious_rtt;
-    quality->max_reorder_delay = path_x->max_reorder_delay;
-    quality->max_reorder_gap = path_x->max_reorder_gap;
-    quality->bytes_in_transit = path_x->bytes_in_transit;
-    return 0;
-}

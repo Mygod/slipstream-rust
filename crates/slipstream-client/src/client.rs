@@ -4,8 +4,10 @@ use slipstream_ffi::{
     picoquic::{
         picoquic_close, picoquic_cnx_t, picoquic_connection_id_t, picoquic_create,
         picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
-        picoquic_enable_keep_alive, picoquic_get_next_wake_delay, picoquic_prepare_next_packet_ex,
-        picoquic_set_callback, slipstream_get_path_quality, slipstream_has_ready_stream,
+        picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
+        picoquic_enable_path_callbacks_default, picoquic_get_default_path_quality,
+        picoquic_get_next_wake_delay, picoquic_get_path_addr, picoquic_get_path_quality,
+        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_has_ready_stream,
         slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm, slipstream_set_cc_override,
         slipstream_set_default_path_mode, slipstream_set_path_ack_delay, slipstream_set_path_mode,
         PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
@@ -25,13 +27,14 @@ use tracing::{debug, info, warn};
 
 use crate::dns::{
     add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
-    normalize_dual_stack_addr, refresh_resolver_path, resolve_resolvers, send_poll_queries,
-    sockaddr_storage_to_socket_addr, DnsResponseContext, ResolverState,
+    normalize_dual_stack_addr, refresh_resolver_path, reset_resolver_path, resolve_resolvers,
+    send_poll_queries, sockaddr_storage_to_socket_addr, DnsResponseContext, ResolverState,
 };
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
 use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
     client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor, ClientState,
+    PathEvent,
 };
 
 // Protocol defaults; see docs/config.md for details.
@@ -131,6 +134,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     }
     unsafe {
         configure_quic_with_custom(quic, mixed_cc, mtu);
+        picoquic_enable_path_callbacks_default(quic, 1);
         let override_ptr = cc_override
             .as_ref()
             .map(|value| value.as_ptr())
@@ -165,6 +169,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
     unsafe {
         picoquic_set_callback(cnx, Some(client_callback), state_ptr as *mut _);
+        picoquic_enable_path_callbacks(cnx, 1);
         if config.keep_alive_interval > 0 {
             picoquic_enable_keep_alive(cnx, config.keep_alive_interval as u64 * 1000);
         } else {
@@ -202,6 +207,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
             }
         }
+        drain_path_events(cnx, &mut resolvers, state_ptr);
 
         for resolver in resolvers.iter_mut() {
             if resolver.mode == ResolverMode::Authoritative {
@@ -220,7 +226,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             }
             let pending_for_sleep = match resolver.mode {
                 ResolverMode::Authoritative => {
-                    let quality = fetch_path_quality(cnx, resolver.path_id);
+                    let quality = fetch_path_quality(cnx, resolver);
                     let snapshot = resolver
                         .pacing_budget
                         .as_mut()
@@ -293,6 +299,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
         drain_commands(cnx, state_ptr, &mut command_rx);
         drain_stream_data(cnx, state_ptr);
+        drain_path_events(cnx, &mut resolvers, state_ptr);
 
         for _ in 0..packet_loop_send_max {
             let current_time = unsafe { picoquic_current_time() };
@@ -383,7 +390,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             }
             match resolver.mode {
                 ResolverMode::Authoritative => {
-                    let quality = fetch_path_quality(cnx, resolver.path_id);
+                    let quality = fetch_path_quality(cnx, resolver);
                     let snapshot = resolver.last_pacing_snapshot;
                     let pacing_target = snapshot
                         .map(|snapshot| snapshot.target_inflight)
@@ -475,7 +482,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let inflight_polls = resolver.inflight_poll_ids.len();
             let pending_for_debug = match resolver.mode {
                 ResolverMode::Authoritative => {
-                    let quality = fetch_path_quality(cnx, resolver.path_id);
+                    let quality = fetch_path_quality(cnx, resolver);
                     let inflight_packets = inflight_packet_estimate(quality.bytes_in_transit, mtu);
                     resolver
                         .last_pacing_snapshot
@@ -526,14 +533,59 @@ fn apply_path_mode(
 
 fn fetch_path_quality(
     cnx: *mut picoquic_cnx_t,
-    path_id: libc::c_int,
+    resolver: &ResolverState,
 ) -> slipstream_ffi::picoquic::picoquic_path_quality_t {
     let mut quality = slipstream_ffi::picoquic::picoquic_path_quality_t::default();
-    let ret = unsafe { slipstream_get_path_quality(cnx, path_id, &mut quality as *mut _) };
+    let mut ret = -1;
+    if let Some(unique_path_id) = resolver.unique_path_id {
+        ret = unsafe { picoquic_get_path_quality(cnx, unique_path_id, &mut quality as *mut _) };
+    }
     if ret != 0 {
-        return quality;
+        unsafe {
+            picoquic_get_default_path_quality(cnx, &mut quality as *mut _);
+        }
     }
     quality
+}
+
+fn drain_path_events(
+    cnx: *mut picoquic_cnx_t,
+    resolvers: &mut [ResolverState],
+    state_ptr: *mut ClientState,
+) {
+    if state_ptr.is_null() {
+        return;
+    }
+    let events = unsafe { (*state_ptr).take_path_events() };
+    if events.is_empty() {
+        return;
+    }
+    for event in events {
+        match event {
+            PathEvent::Available(unique_path_id) => {
+                if let Some(addr) = path_peer_addr(cnx, unique_path_id) {
+                    if let Some(resolver) = find_resolver_by_addr_mut(resolvers, addr) {
+                        resolver.unique_path_id = Some(unique_path_id);
+                        resolver.added = true;
+                    }
+                }
+            }
+            PathEvent::Deleted(unique_path_id) => {
+                if let Some(resolver) = find_resolver_by_unique_id_mut(resolvers, unique_path_id) {
+                    reset_resolver_path(resolver);
+                }
+            }
+        }
+    }
+}
+
+fn path_peer_addr(cnx: *mut picoquic_cnx_t, unique_path_id: u64) -> Option<SocketAddr> {
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let ret = unsafe { picoquic_get_path_addr(cnx, unique_path_id, 2, &mut storage) };
+    if ret != 0 {
+        return None;
+    }
+    sockaddr_storage_to_socket_addr(&storage).ok()
 }
 
 fn loop_burst_total(resolvers: &[ResolverState], base: usize) -> usize {
@@ -559,6 +611,15 @@ fn find_resolver_by_addr_mut(
 ) -> Option<&mut ResolverState> {
     let addr = normalize_dual_stack_addr(addr);
     resolvers.iter_mut().find(|resolver| resolver.addr == addr)
+}
+
+fn find_resolver_by_unique_id_mut(
+    resolvers: &mut [ResolverState],
+    unique_path_id: u64,
+) -> Option<&mut ResolverState> {
+    resolvers
+        .iter_mut()
+        .find(|resolver| resolver.unique_path_id == Some(unique_path_id))
 }
 
 fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
