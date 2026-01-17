@@ -1,6 +1,4 @@
-use slipstream_ffi::picoquic::{
-    get_bytes_in_transit, get_cwin, get_pacing_rate, get_rtt, picoquic_cnx_t,
-};
+use slipstream_ffi::picoquic::picoquic_path_quality_t;
 
 // Pacing gain tuning for the poll-based pacing loop.
 const PACING_GAIN_BASE: f64 = 1.0;
@@ -33,13 +31,13 @@ impl PacingPollBudget {
 
     pub(crate) fn target_inflight(
         &mut self,
-        cnx: *mut picoquic_cnx_t,
+        quality: &picoquic_path_quality_t,
         rtt_proxy_us: u64,
     ) -> PacingBudgetSnapshot {
-        let pacing_rate = unsafe { get_pacing_rate(cnx) };
-        let rtt_seconds = (self.derive_rtt_us(cnx, rtt_proxy_us) as f64) / 1_000_000.0;
+        let pacing_rate = quality.pacing_rate;
+        let rtt_seconds = (self.derive_rtt_us(quality.rtt, rtt_proxy_us) as f64) / 1_000_000.0;
         if pacing_rate == 0 {
-            let target_inflight = cwnd_target_polls(cnx, self.mtu);
+            let target_inflight = cwnd_target_polls(quality.cwin, self.mtu);
             let qps = target_inflight as f64 / rtt_seconds;
             self.last_pacing_rate = 0;
             return PacingBudgetSnapshot {
@@ -62,9 +60,8 @@ impl PacingPollBudget {
         }
     }
 
-    fn derive_rtt_us(&self, cnx: *mut picoquic_cnx_t, rtt_proxy_us: u64) -> u64 {
-        let smoothed = unsafe { get_rtt(cnx) };
-        let candidate = if smoothed > 0 { smoothed } else { rtt_proxy_us };
+    fn derive_rtt_us(&self, rtt_us: u64, rtt_proxy_us: u64) -> u64 {
+        let candidate = if rtt_us > 0 { rtt_us } else { rtt_proxy_us };
         // Clamp to 1us to avoid divide-by-zero when RTT is unknown.
         candidate.max(1)
     }
@@ -81,25 +78,23 @@ impl PacingPollBudget {
     }
 }
 
-pub(crate) fn cwnd_target_polls(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
+pub(crate) fn cwnd_target_polls(cwin: u64, mtu: u32) -> usize {
     debug_assert!(mtu > 0, "mtu must be > 0");
     let mtu = mtu as u64;
     if mtu == 0 {
         return 0;
     }
-    let cwnd = unsafe { get_cwin(cnx) };
-    let target = cwnd.saturating_add(mtu - 1) / mtu;
+    let target = cwin.saturating_add(mtu - 1) / mtu;
     usize::try_from(target).unwrap_or(usize::MAX)
 }
 
-pub(crate) fn inflight_packet_estimate(cnx: *mut picoquic_cnx_t, mtu: u32) -> usize {
+pub(crate) fn inflight_packet_estimate(bytes_in_transit: u64, mtu: u32) -> usize {
     debug_assert!(mtu > 0, "mtu must be > 0");
     let mtu = mtu as u64;
     if mtu == 0 {
         return 0;
     }
-    let inflight = unsafe { get_bytes_in_transit(cnx) };
-    let packets = inflight.saturating_add(mtu - 1) / mtu;
+    let packets = bytes_in_transit.saturating_add(mtu - 1) / mtu;
     if packets > usize::MAX as u64 {
         usize::MAX
     } else {

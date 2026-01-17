@@ -108,16 +108,26 @@ jobs:
             script: run_rust_rust_10mb.sh
             needs_c: false
             client_args: ""
+            resolver_mode: resolver
             min_exfil: "5"
             min_download: "10"
             artifact_glob: bench-rust-rust-*
           - name: rust-rust-auth
             script: run_rust_rust_10mb.sh
             needs_c: false
-            client_args: "--authoritative"
+            client_args: ""
+            resolver_mode: authoritative
             min_exfil: "5"
             min_download: "15"
             artifact_glob: bench-rust-rust-*
+          - name: rust-rust-mixed
+            script: run_rust_rust_10mb.sh
+            needs_c: false
+            client_args: ""
+            resolver_mode: mixed
+            min_exfil: "5"
+            min_download: "25"
+            artifact_glob: bench-rust-rust-mixed-*
           # C repo benchmark disabled (C repo currently broken).
           # - name: c-c
           #   script: run_c_c_10mb.sh
@@ -151,6 +161,7 @@ jobs:
           RUNS: "5"
           TRANSFER_BYTES: "10485760"
           CLIENT_ARGS: ${{ matrix.client_args }}
+          RESOLVER_MODE: ${{ matrix.resolver_mode }}
           MIN_AVG_MIB_S_EXFIL: ${{ matrix.min_exfil }}
           MIN_AVG_MIB_S_DOWNLOAD: ${{ matrix.min_download }}
         run: ./scripts/bench/${{ matrix.script }}

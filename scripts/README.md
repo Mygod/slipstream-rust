@@ -25,7 +25,7 @@ contributors; "dev-only" scripts are internal or experimental.
 - `scripts/build_picoquic.sh`: build picoquic for the Rust FFI layer.
 - `scripts/gen_vectors.sh`: regenerate DNS vectors (requires the C repo).
 - `scripts/interop/run_rust_rust.sh`: Rust client/server interop harness.
-- `scripts/bench/run_rust_rust_10mb.sh`: Rust<->Rust throughput benchmark.
+- `scripts/bench/run_rust_rust_10mb.sh`: Rust<->Rust throughput benchmark (set `RESOLVER_MODE=mixed` for mixed resolver runs).
 - `scripts/bench/run_rust_rust_mem.sh`: Rust<->Rust memory benchmark.
 
 

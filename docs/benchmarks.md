@@ -6,6 +6,8 @@ Benchmark harnesses live under scripts/bench and write artifacts under .interop/
 
 - Run the Rust <-> Rust harness:
   TRANSFER_BYTES=10485760 ./scripts/bench/run_rust_rust_10mb.sh
+- Run the Rust <-> Rust mixed resolver harness:
+  TRANSFER_BYTES=10485760 RESOLVER_MODE=mixed ./scripts/bench/run_rust_rust_10mb.sh
 - Run the Rust <-> Rust memory sampler:
   TRANSFER_BYTES=10485760 ./scripts/bench/run_rust_rust_mem.sh
 - Run the C <-> C harness:

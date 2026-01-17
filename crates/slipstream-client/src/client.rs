@@ -1,17 +1,20 @@
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
-    configure_quic,
+    configure_quic_with_custom,
     picoquic::{
-        get_bytes_in_transit, get_cwin, get_rtt, picoquic_close, picoquic_cnx_t,
-        picoquic_connection_id_t, picoquic_create, picoquic_create_client_cnx,
-        picoquic_current_time, picoquic_disable_keep_alive, picoquic_enable_keep_alive,
-        picoquic_get_next_wake_delay, picoquic_prepare_next_packet_ex, picoquic_set_callback,
-        slipstream_has_ready_stream, slipstream_is_flow_blocked, PICOQUIC_CONNECTION_ID_MAX_SIZE,
+        picoquic_close, picoquic_cnx_t, picoquic_connection_id_t, picoquic_create,
+        picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
+        picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
+        picoquic_enable_path_callbacks_default, picoquic_get_default_path_quality,
+        picoquic_get_next_wake_delay, picoquic_get_path_addr, picoquic_get_path_quality,
+        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_get_path_id_from_unique,
+        slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm,
+        slipstream_set_cc_override, slipstream_set_default_path_mode,
+        slipstream_set_path_ack_delay, slipstream_set_path_mode, PICOQUIC_CONNECTION_ID_MAX_SIZE,
         PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
-    socket_addr_to_storage, ClientConfig, QuicGuard,
+    socket_addr_to_storage, ClientConfig, QuicGuard, ResolverMode,
 };
-use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
@@ -24,13 +27,14 @@ use tracing::{debug, info, warn};
 
 use crate::dns::{
     add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
-    normalize_dual_stack_addr, resolve_resolvers, send_poll_queries,
-    sockaddr_storage_to_socket_addr, DebugMetrics, DnsResponseContext,
+    normalize_dual_stack_addr, refresh_resolver_path, reset_resolver_path, resolve_resolvers,
+    send_poll_queries, sockaddr_storage_to_socket_addr, DnsResponseContext, ResolverState,
 };
-use crate::pacing::{cwnd_target_polls, inflight_packet_estimate, PacingPollBudget};
+use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
 use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
-    client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor, ClientState,
+    client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor,
+    ClientState, PathEvent,
 };
 
 // Protocol defaults; see docs/config.md for details.
@@ -64,8 +68,7 @@ impl std::error::Error for ClientError {}
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let domain_len = config.domain.len();
     let mtu = compute_mtu(domain_len)?;
-    let mut pacing_budget = PacingPollBudget::new(mtu);
-    let mut resolvers = resolve_resolvers(config.resolvers)?;
+    let mut resolvers = resolve_resolvers(config.resolvers, mtu, config.debug_poll)?;
     if resolvers.is_empty() {
         return Err(ClientError::new("At least one resolver is required"));
     }
@@ -86,13 +89,16 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         .map_err(|_| ClientError::new("ALPN contains an unexpected null byte"))?;
     let sni = CString::new(SLIPSTREAM_SNI)
         .map_err(|_| ClientError::new("SNI contains an unexpected null byte"))?;
-    let cc_algo = CString::new(config.congestion_control)
-        .map_err(|_| ClientError::new("Congestion control contains an unexpected null byte"))?;
+    let cc_override = match config.congestion_control {
+        Some(value) => Some(CString::new(value).map_err(|_| {
+            ClientError::new("Congestion control contains an unexpected null byte")
+        })?),
+        None => None,
+    };
 
     let mut state = Box::new(ClientState::new(
         command_tx,
         data_notify.clone(),
-        config.authoritative,
         debug_streams,
     ));
     let state_ptr: *mut ClientState = &mut *state;
@@ -122,8 +128,21 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         return Err(ClientError::new("Could not create QUIC context"));
     }
     let _quic_guard = QuicGuard::new(quic);
+    let mixed_cc = unsafe { slipstream_mixed_cc_algorithm };
+    if mixed_cc.is_null() {
+        return Err(ClientError::new("Could not load mixed congestion control"));
+    }
     unsafe {
-        configure_quic(quic, cc_algo.as_ptr(), mtu);
+        configure_quic_with_custom(quic, mixed_cc, mtu);
+        picoquic_enable_path_callbacks_default(quic, 1);
+        let override_ptr = cc_override
+            .as_ref()
+            .map(|value| value.as_ptr())
+            .unwrap_or(std::ptr::null());
+        slipstream_set_cc_override(override_ptr);
+    }
+    unsafe {
+        slipstream_set_default_path_mode(resolver_mode_to_c(resolvers[0].mode));
     }
     if let Some(cert) = config.cert {
         configure_pinned_certificate(quic, cert).map_err(ClientError::new)?;
@@ -146,8 +165,11 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         return Err(ClientError::new("Could not create QUIC connection"));
     }
 
+    apply_path_mode(cnx, &mut resolvers[0])?;
+
     unsafe {
         picoquic_set_callback(cnx, Some(client_callback), state_ptr as *mut _);
+        picoquic_enable_path_callbacks(cnx, 1);
         if config.keep_alive_interval > 0 {
             picoquic_enable_keep_alive(cnx, config.keep_alive_interval as u64 * 1000);
         } else {
@@ -160,21 +182,12 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     }
 
     let mut dns_id = 1u16;
-    let mut pending_polls: usize = 0;
-    let mut inflight_poll_ids: HashMap<u16, u64> = HashMap::new();
-    let mut debug = DebugMetrics::new(config.debug_poll);
     let mut recv_buf = vec![0u8; 4096];
     let mut send_buf = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
-    let packet_loop_send_max = if config.authoritative {
-        PICOQUIC_PACKET_LOOP_SEND_MAX * AUTHORITATIVE_LOOP_MULTIPLIER
-    } else {
-        PICOQUIC_PACKET_LOOP_SEND_MAX
-    };
-    let packet_loop_recv_max = if config.authoritative {
-        PICOQUIC_PACKET_LOOP_RECV_MAX * AUTHORITATIVE_LOOP_MULTIPLIER
-    } else {
-        PICOQUIC_PACKET_LOOP_RECV_MAX
-    };
+    let packet_loop_send_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_SEND_MAX);
+    let packet_loop_recv_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_RECV_MAX);
+    let mut zero_send_loops = 0u64;
+    let mut zero_send_with_streams = 0u64;
 
     loop {
         let current_time = unsafe { picoquic_current_time() };
@@ -188,44 +201,54 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let ready = unsafe { (*state_ptr).is_ready() };
         if ready {
             add_paths(cnx, &mut resolvers)?;
+            for resolver in resolvers.iter_mut() {
+                if resolver.added {
+                    apply_path_mode(cnx, resolver)?;
+                }
+            }
         }
+        drain_path_events(cnx, &mut resolvers, state_ptr);
 
-        if config.authoritative {
-            expire_inflight_polls(&mut inflight_poll_ids, current_time);
+        for resolver in resolvers.iter_mut() {
+            if resolver.mode == ResolverMode::Authoritative {
+                expire_inflight_polls(&mut resolver.inflight_poll_ids, current_time);
+            }
         }
 
         let delay_us =
             unsafe { picoquic_get_next_wake_delay(quic, current_time, DNS_WAKE_DELAY_MAX_US) };
         let delay_us = if delay_us < 0 { 0 } else { delay_us as u64 };
-        let pacing_snapshot = if config.authoritative {
-            Some(pacing_budget.target_inflight(cnx, delay_us.max(1)))
-        } else {
-            None
-        };
         let streams_len_for_sleep = unsafe { (*state_ptr).streams_len() };
-        let inflight_polls_for_sleep = inflight_poll_ids.len();
-        let inflight_packets_for_sleep = if config.authoritative {
-            inflight_packet_estimate(cnx, mtu)
-        } else {
-            0
-        };
-        let poll_deficit_for_sleep = if config.authoritative {
-            pacing_snapshot
-                .as_ref()
-                .map(|snapshot| {
-                    snapshot
-                        .target_inflight
-                        .saturating_sub(inflight_packets_for_sleep)
-                })
-                .unwrap_or(0)
-        } else {
-            pending_polls
-        };
-        let has_work = if config.authoritative {
-            poll_deficit_for_sleep > 0 || streams_len_for_sleep > 0 || inflight_polls_for_sleep > 0
-        } else {
-            poll_deficit_for_sleep > 0 || streams_len_for_sleep > 0
-        };
+        let mut has_work = streams_len_for_sleep > 0;
+        for resolver in resolvers.iter_mut() {
+            if !refresh_resolver_path(cnx, resolver) {
+                continue;
+            }
+            let pending_for_sleep = match resolver.mode {
+                ResolverMode::Authoritative => {
+                    let quality = fetch_path_quality(cnx, resolver);
+                    let snapshot = resolver
+                        .pacing_budget
+                        .as_mut()
+                        .map(|budget| budget.target_inflight(&quality, delay_us.max(1)));
+                    resolver.last_pacing_snapshot = snapshot;
+                    let target = snapshot
+                        .map(|snapshot| snapshot.target_inflight)
+                        .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
+                    let inflight_packets = inflight_packet_estimate(quality.bytes_in_transit, mtu);
+                    target.saturating_sub(inflight_packets)
+                }
+                ResolverMode::Recursive => resolver.pending_polls,
+            };
+            if pending_for_sleep > 0 {
+                has_work = true;
+            }
+            if resolver.mode == ResolverMode::Authoritative
+                && !resolver.inflight_poll_ids.is_empty()
+            {
+                has_work = true;
+            }
+        }
         // Avoid a tight poll loop when idle, but keep the short slice during active transfers.
         let timeout_us = if has_work {
             delay_us.clamp(1, DNS_POLL_SLICE_US)
@@ -247,10 +270,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                         let mut response_ctx = DnsResponseContext {
                             quic,
                             local_addr_storage: &local_addr_storage,
-                            pending_polls: &mut pending_polls,
-                            inflight_poll_ids: &mut inflight_poll_ids,
-                            debug: &mut debug,
-                            authoritative: config.authoritative,
+                            resolvers: &mut resolvers,
                         };
                         handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
                         for _ in 1..packet_loop_recv_max {
@@ -279,6 +299,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
         drain_commands(cnx, state_ptr, &mut command_rx);
         drain_stream_data(cnx, state_ptr);
+        drain_path_events(cnx, &mut resolvers, state_ptr);
 
         for _ in 0..packet_loop_send_max {
             let current_time = unsafe { picoquic_current_time() };
@@ -311,13 +332,17 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 return Err(ClientError::new("Failed preparing outbound QUIC packet"));
             }
             if send_length == 0 {
-                debug.zero_send_loops = debug.zero_send_loops.saturating_add(1);
+                zero_send_loops = zero_send_loops.saturating_add(1);
                 let streams_len = unsafe { (*state_ptr).streams_len() };
                 if streams_len > 0 {
-                    debug.zero_send_with_streams = debug.zero_send_with_streams.saturating_add(1);
+                    zero_send_with_streams = zero_send_with_streams.saturating_add(1);
                     let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) } != 0;
-                    if flow_blocked && !config.authoritative {
-                        pending_polls = pending_polls.max(1);
+                    if flow_blocked {
+                        for resolver in resolvers.iter_mut() {
+                            if resolver.mode == ResolverMode::Recursive && resolver.added {
+                                resolver.pending_polls = resolver.pending_polls.max(1);
+                            }
+                        }
                     }
                 }
                 break;
@@ -326,8 +351,15 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             if addr_to.ss_family == 0 {
                 break;
             }
-            debug.send_packets = debug.send_packets.saturating_add(1);
-            debug.send_bytes = debug.send_bytes.saturating_add(send_length as u64);
+            if let Ok(dest) = sockaddr_storage_to_socket_addr(&addr_to) {
+                let dest = normalize_dual_stack_addr(dest);
+                if let Some(resolver) = find_resolver_by_addr_mut(&mut resolvers, dest) {
+                    resolver.local_addr_storage = Some(unsafe { std::ptr::read(&addr_from) });
+                    resolver.debug.send_packets = resolver.debug.send_packets.saturating_add(1);
+                    resolver.debug.send_bytes =
+                        resolver.debug.send_bytes.saturating_add(send_length as u64);
+                }
+            }
 
             let qname = build_qname(&send_buf[..send_length], config.domain)
                 .map_err(|err| ClientError::new(err.to_string()))?;
@@ -350,80 +382,124 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             udp.send_to(&packet, dest).await.map_err(map_io)?;
         }
 
-        let inflight_polls = inflight_poll_ids.len();
-        let mut inflight_packets = if config.authoritative {
-            inflight_packet_estimate(cnx, mtu)
-        } else {
-            0
-        };
-        if config.authoritative {
-            let pacing_target = pacing_snapshot
-                .map(|snapshot| snapshot.target_inflight)
-                .unwrap_or_else(|| cwnd_target_polls(cnx, mtu));
-            let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
-            let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
-            let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
-            if has_ready_stream && !flow_blocked {
-                poll_deficit = 0;
+        let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
+        let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
+        for resolver in resolvers.iter_mut() {
+            if !refresh_resolver_path(cnx, resolver) {
+                continue;
             }
-            if poll_deficit > 0 && debug.enabled {
-                let (cwnd, in_transit, rtt) =
-                    unsafe { (get_cwin(cnx), get_bytes_in_transit(cnx), get_rtt(cnx)) };
-                debug!(
-                    "cc_state: cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
-                    cwnd, in_transit, rtt, flow_blocked, poll_deficit
-                );
+            match resolver.mode {
+                ResolverMode::Authoritative => {
+                    let quality = fetch_path_quality(cnx, resolver);
+                    let snapshot = resolver.last_pacing_snapshot;
+                    let pacing_target = snapshot
+                        .map(|snapshot| snapshot.target_inflight)
+                        .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
+                    let inflight_packets = inflight_packet_estimate(quality.bytes_in_transit, mtu);
+                    let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
+                    if has_ready_stream && !flow_blocked {
+                        poll_deficit = 0;
+                    }
+                    if poll_deficit > 0 && resolver.debug.enabled {
+                        debug!(
+                            "cc_state: {} cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
+                            resolver.label(),
+                            quality.cwin,
+                            quality.bytes_in_transit,
+                            quality.rtt,
+                            flow_blocked,
+                            poll_deficit
+                        );
+                    }
+                    if poll_deficit > 0 {
+                        let burst_max = path_poll_burst_max(resolver);
+                        let mut to_send = poll_deficit.min(burst_max);
+                        send_poll_queries(
+                            cnx,
+                            &udp,
+                            config,
+                            &mut local_addr_storage,
+                            &mut dns_id,
+                            resolver,
+                            &mut to_send,
+                            &mut send_buf,
+                        )
+                        .await?;
+                    }
+                }
+                ResolverMode::Recursive => {
+                    resolver.last_pacing_snapshot = None;
+                    if resolver.pending_polls > 0 {
+                        let burst_max = path_poll_burst_max(resolver);
+                        if resolver.pending_polls > burst_max {
+                            let mut to_send = burst_max;
+                            send_poll_queries(
+                                cnx,
+                                &udp,
+                                config,
+                                &mut local_addr_storage,
+                                &mut dns_id,
+                                resolver,
+                                &mut to_send,
+                                &mut send_buf,
+                            )
+                            .await?;
+                            resolver.pending_polls = resolver
+                                .pending_polls
+                                .saturating_sub(burst_max)
+                                .saturating_add(to_send);
+                        } else {
+                            let mut pending = resolver.pending_polls;
+                            send_poll_queries(
+                                cnx,
+                                &udp,
+                                config,
+                                &mut local_addr_storage,
+                                &mut dns_id,
+                                resolver,
+                                &mut pending,
+                                &mut send_buf,
+                            )
+                            .await?;
+                            resolver.pending_polls = pending;
+                        }
+                    }
+                }
             }
-            if poll_deficit > 0 {
-                send_poll_queries(
-                    cnx,
-                    &udp,
-                    config,
-                    &mut local_addr_storage,
-                    &mut dns_id,
-                    &mut poll_deficit,
-                    &mut inflight_poll_ids,
-                    &mut send_buf,
-                    &mut debug,
-                )
-                .await?;
-            }
-            inflight_packets = inflight_packet_estimate(cnx, mtu);
-        } else if pending_polls > 0 {
-            send_poll_queries(
-                cnx,
-                &udp,
-                config,
-                &mut local_addr_storage,
-                &mut dns_id,
-                &mut pending_polls,
-                &mut inflight_poll_ids,
-                &mut send_buf,
-                &mut debug,
-            )
-            .await?;
         }
 
         let report_time = unsafe { picoquic_current_time() };
         let streams_len = unsafe { (*state_ptr).streams_len() };
         let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
-        debug.enqueued_bytes = enqueued_bytes;
-        debug.last_enqueue_at = last_enqueue_at;
-        let pending_for_debug = if config.authoritative {
-            pacing_snapshot
-                .map(|snapshot| snapshot.target_inflight.saturating_sub(inflight_packets))
-                .unwrap_or(0)
-        } else {
-            pending_polls
-        };
-        maybe_report_debug(
-            &mut debug,
-            report_time,
-            streams_len,
-            pending_for_debug,
-            inflight_polls,
-            pacing_snapshot,
-        );
+        for resolver in resolvers.iter_mut() {
+            resolver.debug.enqueued_bytes = enqueued_bytes;
+            resolver.debug.last_enqueue_at = last_enqueue_at;
+            resolver.debug.zero_send_loops = zero_send_loops;
+            resolver.debug.zero_send_with_streams = zero_send_with_streams;
+            if !refresh_resolver_path(cnx, resolver) {
+                continue;
+            }
+            let inflight_polls = resolver.inflight_poll_ids.len();
+            let pending_for_debug = match resolver.mode {
+                ResolverMode::Authoritative => {
+                    let quality = fetch_path_quality(cnx, resolver);
+                    let inflight_packets = inflight_packet_estimate(quality.bytes_in_transit, mtu);
+                    resolver
+                        .last_pacing_snapshot
+                        .map(|snapshot| snapshot.target_inflight.saturating_sub(inflight_packets))
+                        .unwrap_or(0)
+                }
+                ResolverMode::Recursive => resolver.pending_polls,
+            };
+            maybe_report_debug(
+                resolver,
+                report_time,
+                streams_len,
+                pending_for_debug,
+                inflight_polls,
+                resolver.last_pacing_snapshot,
+            );
+        }
     }
 
     unsafe {
@@ -431,6 +507,126 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     }
 
     Ok(0)
+}
+
+fn resolver_mode_to_c(mode: ResolverMode) -> libc::c_int {
+    match mode {
+        ResolverMode::Recursive => 1,
+        ResolverMode::Authoritative => 2,
+    }
+}
+
+fn apply_path_mode(
+    cnx: *mut picoquic_cnx_t,
+    resolver: &mut ResolverState,
+) -> Result<(), ClientError> {
+    if !refresh_resolver_path(cnx, resolver) {
+        return Ok(());
+    }
+    unsafe {
+        slipstream_set_path_mode(cnx, resolver.path_id, resolver_mode_to_c(resolver.mode));
+        let disable_ack_delay = matches!(resolver.mode, ResolverMode::Authoritative) as libc::c_int;
+        slipstream_set_path_ack_delay(cnx, resolver.path_id, disable_ack_delay);
+    }
+    Ok(())
+}
+
+fn fetch_path_quality(
+    cnx: *mut picoquic_cnx_t,
+    resolver: &ResolverState,
+) -> slipstream_ffi::picoquic::picoquic_path_quality_t {
+    let mut quality = slipstream_ffi::picoquic::picoquic_path_quality_t::default();
+    let mut ret = -1;
+    if let Some(unique_path_id) = resolver.unique_path_id {
+        ret = unsafe { picoquic_get_path_quality(cnx, unique_path_id, &mut quality as *mut _) };
+    }
+    if ret != 0 {
+        unsafe {
+            picoquic_get_default_path_quality(cnx, &mut quality as *mut _);
+        }
+    }
+    quality
+}
+
+fn drain_path_events(
+    cnx: *mut picoquic_cnx_t,
+    resolvers: &mut [ResolverState],
+    state_ptr: *mut ClientState,
+) {
+    if state_ptr.is_null() {
+        return;
+    }
+    let events = unsafe { (*state_ptr).take_path_events() };
+    if events.is_empty() {
+        return;
+    }
+    for event in events {
+        match event {
+            PathEvent::Available(unique_path_id) => {
+                if let Some(addr) = path_peer_addr(cnx, unique_path_id) {
+                    if let Some(resolver) = find_resolver_by_addr_mut(resolvers, addr) {
+                        let path_id =
+                            unsafe { slipstream_get_path_id_from_unique(cnx, unique_path_id) };
+                        if path_id >= 0 {
+                            resolver.unique_path_id = Some(unique_path_id);
+                            resolver.path_id = path_id;
+                            resolver.added = true;
+                        } else {
+                            resolver.unique_path_id = None;
+                        }
+                    }
+                }
+            }
+            PathEvent::Deleted(unique_path_id) => {
+                if let Some(resolver) = find_resolver_by_unique_id_mut(resolvers, unique_path_id) {
+                    reset_resolver_path(resolver);
+                }
+            }
+        }
+    }
+}
+
+fn path_peer_addr(cnx: *mut picoquic_cnx_t, unique_path_id: u64) -> Option<SocketAddr> {
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let ret = unsafe { picoquic_get_path_addr(cnx, unique_path_id, 2, &mut storage) };
+    if ret != 0 {
+        return None;
+    }
+    sockaddr_storage_to_socket_addr(&storage).ok()
+}
+
+fn loop_burst_total(resolvers: &[ResolverState], base: usize) -> usize {
+    resolvers.iter().fold(0usize, |acc, resolver| {
+        acc.saturating_add(base.saturating_mul(path_loop_multiplier(resolver.mode)))
+    })
+}
+
+fn path_poll_burst_max(resolver: &ResolverState) -> usize {
+    PICOQUIC_PACKET_LOOP_SEND_MAX.saturating_mul(path_loop_multiplier(resolver.mode))
+}
+
+fn path_loop_multiplier(mode: ResolverMode) -> usize {
+    match mode {
+        ResolverMode::Authoritative => AUTHORITATIVE_LOOP_MULTIPLIER,
+        ResolverMode::Recursive => 1,
+    }
+}
+
+fn find_resolver_by_addr_mut(
+    resolvers: &mut [ResolverState],
+    addr: SocketAddr,
+) -> Option<&mut ResolverState> {
+    let addr = normalize_dual_stack_addr(addr);
+    resolvers.iter_mut().find(|resolver| resolver.addr == addr)
+}
+
+fn find_resolver_by_unique_id_mut(
+    resolvers: &mut [ResolverState],
+    unique_path_id: u64,
+) -> Option<&mut ResolverState> {
+    resolvers
+        .iter_mut()
+        .find(|resolver| resolver.unique_path_id == Some(unique_path_id))
 }
 
 fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {

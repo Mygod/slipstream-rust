@@ -43,10 +43,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let cc_dir = manifest_dir.join("cc");
     let cc_src = cc_dir.join("slipstream_server_cc.c");
+    let mixed_cc_src = cc_dir.join("slipstream_mixed_cc.c");
     let poll_src = cc_dir.join("slipstream_poll.c");
     let test_helpers_src = cc_dir.join("slipstream_test_helpers.c");
     let picotls_layout_src = cc_dir.join("picotls_layout.c");
     println!("cargo:rerun-if-changed={}", cc_src.display());
+    println!("cargo:rerun-if-changed={}", mixed_cc_src.display());
     println!("cargo:rerun-if-changed={}", poll_src.display());
     println!("cargo:rerun-if-changed={}", test_helpers_src.display());
     println!("cargo:rerun-if-changed={}", picotls_layout_src.display());
@@ -57,6 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cc_obj = out_dir.join("slipstream_server_cc.c.o");
     compile_cc(&cc_src, &cc_obj, &picoquic_include_dir)?;
     object_paths.push(cc_obj);
+
+    let mixed_cc_obj = out_dir.join("slipstream_mixed_cc.c.o");
+    compile_cc(&mixed_cc_src, &mixed_cc_obj, &picoquic_include_dir)?;
+    object_paths.push(mixed_cc_obj);
 
     let poll_obj = out_dir.join("slipstream_poll.c.o");
     compile_cc(&poll_src, &poll_obj, &picoquic_include_dir)?;
