@@ -396,6 +396,7 @@ fn compile_cc(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("cc")
         .arg("-c")
+        .arg("-fPIC")
         .arg(source)
         .arg("-o")
         .arg(output)
@@ -414,7 +415,12 @@ fn compile_cc_with_includes(
     include_dirs: &[&Path],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut command = Command::new("cc");
-    command.arg("-c").arg(source).arg("-o").arg(output);
+    command
+        .arg("-c")
+        .arg("-fPIC")
+        .arg(source)
+        .arg("-o")
+        .arg(output);
     for dir in include_dirs {
         command.arg("-I").arg(dir);
     }
