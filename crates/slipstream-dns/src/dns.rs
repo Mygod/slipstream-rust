@@ -410,26 +410,49 @@ fn extract_subdomain(qname: &str, domain: &str) -> Result<String, Rcode> {
 }
 
 fn extract_subdomain_multi(qname: &str, domains: &[&str]) -> Result<String, Rcode> {
-    let mut best: Option<(usize, String)> = None;
+    let qname_trimmed = qname.trim_end_matches('.');
+    if qname_trimmed.is_empty() {
+        return Err(Rcode::NameError);
+    }
+    let qname_lower = qname_trimmed.to_ascii_lowercase();
+
+    let mut best_domain: Option<&str> = None;
+    let mut best_len = 0usize;
+    let mut best_empty = false;
 
     for domain in domains {
-        match extract_subdomain(qname, domain) {
-            Ok(subdomain) => {
-                let domain_len = domain.trim_end_matches('.').len();
-                let is_better = match best {
-                    Some((best_len, _)) => domain_len > best_len,
-                    None => true,
-                };
-                if is_better {
-                    best = Some((domain_len, subdomain));
-                }
-            }
-            Err(Rcode::NameError) => continue,
-            Err(rcode) => return Err(rcode),
+        let domain_trimmed = domain.trim_end_matches('.');
+        if domain_trimmed.is_empty() {
+            continue;
+        }
+        let domain_lower = domain_trimmed.to_ascii_lowercase();
+
+        let is_exact = qname_lower == domain_lower;
+        let is_suffix = !is_exact
+            && qname_lower.len() > domain_lower.len()
+            && qname_lower.ends_with(&domain_lower)
+            && qname_lower.as_bytes()[qname_lower.len() - domain_lower.len() - 1] == b'.';
+
+        if !is_exact && !is_suffix {
+            continue;
+        }
+
+        let domain_len = domain_trimmed.len();
+        if domain_len > best_len {
+            best_len = domain_len;
+            best_domain = Some(domain_trimmed);
+            best_empty = is_exact;
         }
     }
 
-    best.map(|(_, subdomain)| subdomain).ok_or(Rcode::NameError)
+    let Some(best_domain) = best_domain else {
+        return Err(Rcode::NameError);
+    };
+    if best_empty {
+        return Err(Rcode::NameError);
+    }
+
+    extract_subdomain(qname, best_domain)
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -1,6 +1,6 @@
 use slipstream_dns::{
-    build_qname, decode_query_with_domains, encode_query, DecodeQueryError, QueryParams, CLASS_IN,
-    RR_TXT,
+    build_qname, decode_query_with_domains, encode_query, DecodeQueryError, QueryParams, Rcode,
+    CLASS_IN, RR_TXT,
 };
 
 #[test]
@@ -64,5 +64,28 @@ fn decode_query_with_domains_rejects_unknown_domain() {
     match decode_query_with_domains(&query, &["other.com"]) {
         Err(DecodeQueryError::Reply { .. }) => {}
         other => panic!("expected reply error, got {:?}", other),
+    }
+}
+
+#[test]
+fn decode_query_with_domains_rejects_empty_subdomain_on_overlap() {
+    let qname = "aa.example.com.";
+    let query = encode_query(&QueryParams {
+        id: 100,
+        qname,
+        qtype: RR_TXT,
+        qclass: CLASS_IN,
+        rd: true,
+        cd: false,
+        qdcount: 1,
+        is_query: true,
+    })
+    .expect("encode query");
+
+    match decode_query_with_domains(&query, &["aa.example.com", "example.com"]) {
+        Err(DecodeQueryError::Reply { rcode, .. }) => {
+            assert_eq!(rcode, Rcode::NameError);
+        }
+        other => panic!("expected name error, got {:?}", other),
     }
 }
