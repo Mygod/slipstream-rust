@@ -34,6 +34,7 @@ pub struct ClientConfig<'a> {
     pub keep_alive_interval: usize,
     pub debug_poll: bool,
     pub debug_streams: bool,
+    pub random_src_port_workers: usize,
 }
 
 pub use runtime::{

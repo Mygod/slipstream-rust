@@ -2,6 +2,7 @@ use crate::error::ClientError;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use tokio::net::{lookup_host, TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
+
 use tracing::warn;
 
 pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
@@ -23,6 +24,7 @@ pub(crate) async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {
     let bind_addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
     bind_udp_socket_addr(bind_addr)
 }
+
 
 pub(crate) async fn bind_tcp_listener(
     host: &str,
@@ -97,3 +99,4 @@ fn bind_udp_socket_addr(addr: SocketAddr) -> Result<TokioUdpSocket, ClientError>
 pub(crate) fn map_io(err: std::io::Error) -> ClientError {
     ClientError::new(err.to_string())
 }
+

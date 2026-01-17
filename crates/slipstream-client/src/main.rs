@@ -58,6 +58,13 @@ struct Args {
     debug_poll: bool,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
+    #[arg(
+        long = "random-src-port",
+        default_value_t = 0,
+        value_parser = parse_random_src_port,
+        help = "Number of ephemeral socket workers for random source ports (0 = disabled, max 1000)"
+    )]
+    random_src_port: usize,
 }
 
 fn main() {
@@ -203,6 +210,7 @@ fn main() {
         keep_alive_interval: keep_alive_interval as usize,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
+        random_src_port_workers: args.random_src_port,
     };
 
     let runtime = Builder::new_current_thread()
@@ -234,6 +242,21 @@ fn parse_domain(input: &str) -> Result<String, String> {
 
 fn parse_resolver(input: &str) -> Result<HostPort, String> {
     parse_host_port(input, 53, AddressKind::Resolver).map_err(|err| err.to_string())
+}
+
+const MAX_RANDOM_SRC_PORT_WORKERS: usize = 1000;
+
+fn parse_random_src_port(input: &str) -> Result<usize, String> {
+    let value: usize = input
+        .parse()
+        .map_err(|_| format!("Invalid number: {}", input))?;
+    if value > MAX_RANDOM_SRC_PORT_WORKERS {
+        return Err(format!(
+            "random-src-port must be at most {} (got {})",
+            MAX_RANDOM_SRC_PORT_WORKERS, value
+        ));
+    }
+    Ok(value)
 }
 
 fn build_resolvers(matches: &clap::ArgMatches, require: bool) -> Result<Vec<ResolverSpec>, String> {
