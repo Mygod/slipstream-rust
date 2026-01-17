@@ -33,8 +33,8 @@ use crate::dns::{
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
 use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
-    client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor, ClientState,
-    PathEvent,
+    client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor,
+    ClientState, PathEvent,
 };
 
 // Protocol defaults; see docs/config.md for details.
