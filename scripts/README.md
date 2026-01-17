@@ -26,6 +26,7 @@ contributors; "dev-only" scripts are internal or experimental.
 - `scripts/gen_vectors.sh`: regenerate DNS vectors (requires the C repo).
 - `scripts/interop/run_rust_rust.sh`: Rust client/server interop harness.
 - `scripts/bench/run_rust_rust_10mb.sh`: Rust<->Rust throughput benchmark.
+- `scripts/bench/run_rust_rust_mixed.sh`: Rust<->Rust mixed resolver benchmark.
 - `scripts/bench/run_rust_rust_mem.sh`: Rust<->Rust memory benchmark.
 
 

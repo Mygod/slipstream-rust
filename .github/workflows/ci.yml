@@ -120,6 +120,14 @@ jobs:
             min_exfil: "5"
             min_download: "15"
             artifact_glob: bench-rust-rust-*
+          - name: rust-rust-mixed
+            script: run_rust_rust_mixed.sh
+            needs_c: false
+            client_args: ""
+            resolver_mode: resolver
+            min_exfil: "5"
+            min_download: "25"
+            artifact_glob: bench-rust-rust-mixed-*
           # C repo benchmark disabled (C repo currently broken).
           # - name: c-c
           #   script: run_c_c_10mb.sh
