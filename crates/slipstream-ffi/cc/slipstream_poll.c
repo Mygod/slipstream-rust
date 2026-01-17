@@ -33,26 +33,19 @@ int slipstream_find_path_id_by_addr(picoquic_cnx_t *cnx, const struct sockaddr* 
         return -1;
     }
 
-    int partial_match = -1;
-    int path_id = picoquic_find_path_by_address(cnx, NULL, addr_peer, &partial_match);
-    if (path_id < 0) {
-        path_id = partial_match;
+    for (int path_id = 0; path_id < cnx->nb_paths; path_id++) {
+        picoquic_path_t* path_x = cnx->path[path_id];
+        if (path_x == NULL) {
+            continue;
+        }
+        if (path_x->path_is_demoted || path_x->path_abandon_received || path_x->path_abandon_sent) {
+            continue;
+        }
+        if (picoquic_compare_addr((struct sockaddr*) &path_x->peer_addr, addr_peer) != 0) {
+            continue;
+        }
+        return path_id;
     }
 
-    if (path_id < 0 || path_id >= cnx->nb_paths) {
-        return -1;
-    }
-
-    picoquic_path_t* path_x = cnx->path[path_id];
-    if (path_x == NULL) {
-        return -1;
-    }
-    if (path_x->path_is_demoted || path_x->path_abandon_received || path_x->path_abandon_sent) {
-        return -1;
-    }
-    if (picoquic_compare_addr((struct sockaddr*) &path_x->peer_addr, addr_peer) != 0) {
-        return -1;
-    }
-
-    return path_id;
+    return -1;
 }
