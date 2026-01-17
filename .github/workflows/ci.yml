@@ -121,10 +121,10 @@ jobs:
             min_download: "15"
             artifact_glob: bench-rust-rust-*
           - name: rust-rust-mixed
-            script: run_rust_rust_mixed.sh
+            script: run_rust_rust_10mb.sh
             needs_c: false
             client_args: ""
-            resolver_mode: resolver
+            resolver_mode: mixed
             min_exfil: "5"
             min_download: "25"
             artifact_glob: bench-rust-rust-mixed-*
