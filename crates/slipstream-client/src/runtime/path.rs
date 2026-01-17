@@ -1,5 +1,5 @@
 use crate::dns::{
-    normalize_dual_stack_addr, refresh_resolver_path, reset_resolver_path,
+    normalize_dual_stack_addr, refresh_resolver_path, reset_resolver_path, resolver_mode_to_c,
     sockaddr_storage_to_socket_addr, ResolverState,
 };
 use crate::error::ClientError;
@@ -13,13 +13,6 @@ use slipstream_ffi::ResolverMode;
 use std::net::SocketAddr;
 
 const AUTHORITATIVE_LOOP_MULTIPLIER: usize = 4;
-
-pub(crate) fn resolver_mode_to_c(mode: ResolverMode) -> libc::c_int {
-    match mode {
-        ResolverMode::Recursive => 1,
-        ResolverMode::Authoritative => 2,
-    }
-}
 
 pub(crate) fn apply_path_mode(
     cnx: *mut picoquic_cnx_t,

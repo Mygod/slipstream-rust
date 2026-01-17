@@ -3,13 +3,13 @@ mod setup;
 
 use self::path::{
     apply_path_mode, drain_path_events, fetch_path_quality, find_resolver_by_addr_mut,
-    loop_burst_total, path_poll_burst_max, resolver_mode_to_c,
+    loop_burst_total, path_poll_burst_max,
 };
 use self::setup::{bind_udp_socket, compute_mtu, map_io};
 use crate::dns::{
     add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
-    normalize_dual_stack_addr, refresh_resolver_path, resolve_resolvers, send_poll_queries,
-    sockaddr_storage_to_socket_addr, DnsResponseContext,
+    normalize_dual_stack_addr, refresh_resolver_path, resolve_resolvers, resolver_mode_to_c,
+    send_poll_queries, sockaddr_storage_to_socket_addr, DnsResponseContext,
 };
 use crate::error::ClientError;
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
