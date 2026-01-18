@@ -78,12 +78,7 @@ jobs:
       - name: Build picoquic
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-        run: |
-          if [ "${{ matrix.musl }}" = "true" ]; then
-            # Use musl compiler for musl targets
-            export CC=musl-gcc
-          fi
-          ./scripts/build_picoquic.sh
+        run: ./scripts/build_picoquic.sh
 
       - name: Create picotls-fusion stub (ARM builds)
         if: contains(matrix.os, 'arm') || matrix.os == 'macos-14' || matrix.os == 'macos-latest' || contains(matrix.target, 'aarch64')
@@ -111,7 +106,6 @@ jobs:
         run: |
           echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
           echo "RUSTFLAGS=-C target-feature=+crt-static" >> $GITHUB_ENV
-          echo "CC=musl-gcc" >> $GITHUB_ENV
 
       - name: Build release binaries
         env:
