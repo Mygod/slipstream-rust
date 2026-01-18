@@ -27,8 +27,8 @@ struct Args {
     cert: String,
     #[arg(long = "key", short = 'k', value_name = "PATH")]
     key: String,
-    #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
-    domain: String,
+    #[arg(long = "domain", short = 'd', value_parser = parse_domain, required = true)]
+    domains: Vec<String>,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
     #[arg(long = "debug-commands")]
@@ -44,7 +44,7 @@ fn main() {
         target_address: args.target_address,
         cert: args.cert,
         key: args.key,
-        domain: args.domain,
+        domains: args.domains,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
     };

@@ -73,17 +73,19 @@ fn pick_tcp_port() -> std::io::Result<u16> {
 fn spawn_server(
     server_bin: &Path,
     dns_port: u16,
-    domain: &str,
+    domains: &[&str],
     cert: &Path,
     key: &Path,
 ) -> ChildGuard {
-    let child = Command::new(server_bin)
-        .arg("--dns-listen-port")
+    let mut cmd = Command::new(server_bin);
+    cmd.arg("--dns-listen-port")
         .arg(dns_port.to_string())
         .arg("--target-address")
-        .arg("127.0.0.1:1")
-        .arg("--domain")
-        .arg(domain)
+        .arg("127.0.0.1:1");
+    for domain in domains {
+        cmd.arg("--domain").arg(domain);
+    }
+    let child = cmd
         .arg("--cert")
         .arg(cert)
         .arg("--key")
@@ -253,8 +255,9 @@ fn cert_pinning_e2e() {
         }
     };
     let domain = "test.example.com";
+    let alt_domain = "alt.example.com";
 
-    let mut server = spawn_server(&server_bin, dns_port, domain, &cert, &key);
+    let mut server = spawn_server(&server_bin, dns_port, &[domain, alt_domain], &cert, &key);
     thread::sleep(Duration::from_millis(200));
     if server.has_exited() {
         eprintln!("skipping cert pinning e2e test: server failed to start");
@@ -286,8 +289,13 @@ fn cert_pinning_e2e() {
     }
 
     {
-        let (mut client, logs) =
-            spawn_client(&client_bin, dns_port, tcp_port_bad, domain, Some(&alt_cert));
+        let (mut client, logs) = spawn_client(
+            &client_bin,
+            dns_port,
+            tcp_port_bad,
+            alt_domain,
+            Some(&alt_cert),
+        );
         if !wait_for_log(&logs, "Listening on TCP port", Duration::from_secs(5)) {
             let snapshot = log_snapshot(&logs);
             panic!("client did not start listening\n{}", snapshot);

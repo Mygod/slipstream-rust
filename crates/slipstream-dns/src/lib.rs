@@ -1,21 +1,27 @@
 mod base32;
-mod dns;
+mod codec;
 mod dots;
+mod name;
+mod types;
+mod wire;
 
 pub use base32::{decode as base32_decode, encode as base32_encode, Base32Error};
-pub use dns::{
-    decode_query, decode_response, encode_query, encode_response, is_response, DecodeQueryError,
-    DecodedQuery, DnsError, QueryParams, Question, Rcode, ResponseParams, CLASS_IN,
-    EDNS_UDP_PAYLOAD, RR_A, RR_OPT, RR_TXT,
+pub use codec::{
+    decode_query, decode_query_with_domains, decode_response, encode_query, encode_response,
+    is_response,
 };
 pub use dots::{dotify, undotify};
+pub use types::{
+    DecodeQueryError, DecodedQuery, DnsError, QueryParams, Question, Rcode, ResponseParams,
+    CLASS_IN, EDNS_UDP_PAYLOAD, RR_A, RR_OPT, RR_TXT,
+};
 
 pub fn build_qname(payload: &[u8], domain: &str) -> Result<String, DnsError> {
-    build_qname_with_limit(payload, domain, dns::MAX_DNS_NAME_LEN)
+    build_qname_with_limit(payload, domain, name::MAX_DNS_NAME_LEN)
 }
 
 pub fn max_payload_len_for_domain(domain: &str) -> Result<usize, DnsError> {
-    max_payload_len_for_domain_with_limit(domain, dns::MAX_DNS_NAME_LEN)
+    max_payload_len_for_domain_with_limit(domain, name::MAX_DNS_NAME_LEN)
 }
 
 pub fn build_qname_with_limit(
@@ -47,7 +53,7 @@ pub fn max_payload_len_for_domain_with_limit(
     if max_name_len == 0 {
         return Err(DnsError::new("max name length must be positive"));
     }
-    if max_name_len > dns::MAX_DNS_NAME_LEN {
+    if max_name_len > name::MAX_DNS_NAME_LEN {
         return Err(DnsError::new("max name length too long"));
     }
     if domain.len() > max_name_len {
