@@ -403,6 +403,8 @@ fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
 fn dummy_sockaddr_storage() -> libc::sockaddr_storage {
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let sockaddr = libc::sockaddr_in6 {
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+        sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
         sin6_family: libc::AF_INET6 as libc::sa_family_t,
         sin6_port: 12345u16.to_be(),
         sin6_flowinfo: 0,

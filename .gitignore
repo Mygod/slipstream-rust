@@ -10,3 +10,6 @@ __pycache__/
 # Rust workspace artifacts
 /target/
 **/*.rs.bk
+
+# Generated DTrace probe headers (from CMake/picotls build)
+.tmp.dprobes.h
