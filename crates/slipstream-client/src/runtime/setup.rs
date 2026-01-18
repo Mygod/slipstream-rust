@@ -1,20 +1,17 @@
 use crate::error::ClientError;
+use slipstream_dns::max_payload_len_for_domain_with_limit;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use tokio::net::UdpSocket as TokioUdpSocket;
 
-pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
-    if domain_len >= 240 {
+pub(crate) fn compute_mtu(domain: &str, max_qname_len: usize) -> Result<u32, ClientError> {
+    let max_payload = max_payload_len_for_domain_with_limit(domain, max_qname_len)
+        .map_err(|err| ClientError::new(err.to_string()))?;
+    if max_payload == 0 {
         return Err(ClientError::new(
-            "Domain name is too long for DNS transport",
+            "Max QNAME length leaves no room for payload; adjust --max-qname-len or domain",
         ));
     }
-    let mtu = ((240.0 - domain_len as f64) / 1.6) as u32;
-    if mtu == 0 {
-        return Err(ClientError::new(
-            "MTU computed to zero; check domain length",
-        ));
-    }
-    Ok(mtu)
+    Ok(max_payload as u32)
 }
 
 pub(crate) async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {

@@ -17,11 +17,23 @@ pub use types::{
 };
 
 pub fn build_qname(payload: &[u8], domain: &str) -> Result<String, DnsError> {
+    build_qname_with_limit(payload, domain, name::MAX_DNS_NAME_LEN)
+}
+
+pub fn max_payload_len_for_domain(domain: &str) -> Result<usize, DnsError> {
+    max_payload_len_for_domain_with_limit(domain, name::MAX_DNS_NAME_LEN)
+}
+
+pub fn build_qname_with_limit(
+    payload: &[u8],
+    domain: &str,
+    max_name_len: usize,
+) -> Result<String, DnsError> {
     let domain = domain.trim_end_matches('.');
     if domain.is_empty() {
         return Err(DnsError::new("domain must not be empty"));
     }
-    let max_payload = max_payload_len_for_domain(domain)?;
+    let max_payload = max_payload_len_for_domain_with_limit(domain, max_name_len)?;
     if payload.len() > max_payload {
         return Err(DnsError::new("payload too large for domain"));
     }
@@ -30,15 +42,23 @@ pub fn build_qname(payload: &[u8], domain: &str) -> Result<String, DnsError> {
     Ok(format!("{}.{}.", dotted, domain))
 }
 
-pub fn max_payload_len_for_domain(domain: &str) -> Result<usize, DnsError> {
+pub fn max_payload_len_for_domain_with_limit(
+    domain: &str,
+    max_name_len: usize,
+) -> Result<usize, DnsError> {
     let domain = domain.trim_end_matches('.');
     if domain.is_empty() {
         return Err(DnsError::new("domain must not be empty"));
     }
-    if domain.len() > name::MAX_DNS_NAME_LEN {
+    if max_name_len == 0 {
+        return Err(DnsError::new("max name length must be positive"));
+    }
+    if max_name_len > name::MAX_DNS_NAME_LEN {
+        return Err(DnsError::new("max name length too long"));
+    }
+    if domain.len() > max_name_len {
         return Err(DnsError::new("domain too long"));
     }
-    let max_name_len = name::MAX_DNS_NAME_LEN;
     let max_dotted_len = max_name_len.saturating_sub(domain.len() + 1);
     if max_dotted_len == 0 {
         return Ok(0);
@@ -68,7 +88,10 @@ fn base32_len(payload_len: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_qname, max_payload_len_for_domain};
+    use super::{
+        build_qname, build_qname_with_limit, max_payload_len_for_domain,
+        max_payload_len_for_domain_with_limit,
+    };
 
     #[test]
     fn build_qname_rejects_payload_overflow() {
@@ -83,5 +106,31 @@ mod tests {
         let domain = format!("{}.com", "a".repeat(260));
         let payload = vec![0u8; 1];
         assert!(build_qname(&payload, &domain).is_err());
+    }
+
+    #[test]
+    fn max_payload_len_with_limit_bounds_payload() {
+        let domain = "test.com";
+        let max_name_len = domain.len() + 3;
+        let max_payload =
+            max_payload_len_for_domain_with_limit(domain, max_name_len).expect("max payload");
+        assert_eq!(max_payload, 1);
+    }
+
+    #[test]
+    fn build_qname_with_limit_rejects_payload_overflow() {
+        let domain = "test.com";
+        let max_name_len = domain.len() + 3;
+        let payload = vec![0u8; 2];
+        assert!(build_qname_with_limit(&payload, domain, max_name_len).is_err());
+    }
+
+    #[test]
+    fn build_qname_with_limit_respects_name_len() {
+        let domain = "test.com";
+        let max_name_len = domain.len() + 3;
+        let payload = vec![0u8; 1];
+        let qname = build_qname_with_limit(&payload, domain, max_name_len).expect("build qname");
+        assert!(qname.trim_end_matches('.').len() <= max_name_len);
     }
 }

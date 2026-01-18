@@ -17,6 +17,7 @@ Common flags:
 - --authoritative <IP:PORT> (repeatable; mark a resolver path as authoritative and use pacing-based polling)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <SECONDS> (default: 400)
+- --max-qname-len <LEN> (default: 253; caps the total QNAME length for payload labels + "." + domain, excluding the trailing dot)
 
 Example:
 
@@ -35,6 +36,7 @@ Notes:
 - IPv4 resolvers require an IPv6 dual-stack UDP socket (e.g., IPV6_V6ONLY=0 via OS defaults or sysctl).
 - Provide --cert to enable strict leaf pinning; omit it for legacy/no-verification behavior.
 - The pinned certificate must match the server leaf exactly; CA bundles are not supported.
+- If you need to tighten DNS name length behavior, lower --max-qname-len (for example, 101).
 - Resolver order follows the CLI; the first resolver becomes path 0.
 - Resolver addresses must be unique; duplicates are rejected.
 - --authoritative keeps the DNS wire format unchanged and remains C interop safe.

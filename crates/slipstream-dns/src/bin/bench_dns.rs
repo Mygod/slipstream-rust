@@ -1,6 +1,6 @@
 use slipstream_dns::{
-    build_qname, decode_query, decode_response, encode_query, encode_response,
-    max_payload_len_for_domain, QueryParams, Question, ResponseParams, CLASS_IN, RR_TXT,
+    build_qname_with_limit, decode_query, decode_response, encode_query, encode_response,
+    max_payload_len_for_domain_with_limit, QueryParams, Question, ResponseParams, CLASS_IN, RR_TXT,
 };
 use std::env;
 use std::time::Instant;
@@ -12,6 +12,7 @@ fn main() {
     let mut iterations = 10_000usize;
     let mut payload_len = 256usize;
     let mut domain = "test.com".to_string();
+    let mut max_qname_len = 253usize;
 
     for arg in env::args().skip(1) {
         if let Some(value) = arg.strip_prefix("--iterations=") {
@@ -20,13 +21,25 @@ fn main() {
             payload_len = value.parse().unwrap_or(payload_len);
         } else if let Some(value) = arg.strip_prefix("--domain=") {
             domain = value.to_string();
+        } else if let Some(value) = arg.strip_prefix("--max-qname-len=") {
+            match value.parse::<usize>() {
+                Ok(value) if (1..=253).contains(&value) => max_qname_len = value,
+                Ok(_) => {
+                    error!("Max QNAME length must be between 1 and 253.");
+                    std::process::exit(1);
+                }
+                Err(_) => {
+                    error!("Max QNAME length must be a positive integer.");
+                    std::process::exit(1);
+                }
+            }
         } else if arg == "--help" {
             print_usage();
             return;
         }
     }
 
-    let max_payload = match max_payload_len_for_domain(&domain) {
+    let max_payload = match max_payload_len_for_domain_with_limit(&domain, max_qname_len) {
         Ok(limit) => limit,
         Err(err) => {
             error!("Invalid domain: {}", err);
@@ -46,7 +59,7 @@ fn main() {
     }
 
     let payload: Vec<u8> = (0..payload_len).map(|i| (i % 256) as u8).collect();
-    let qname = match build_qname(&payload, &domain) {
+    let qname = match build_qname_with_limit(&payload, &domain, max_qname_len) {
         Ok(name) => name,
         Err(err) => {
             error!("Failed to build qname: {}", err);
@@ -81,7 +94,7 @@ fn main() {
     let response = encode_response(&response_params).expect("encode response");
 
     bench("build_qname", iterations, payload_len, || {
-        let _ = build_qname(&payload, &domain).expect("build qname");
+        let _ = build_qname_with_limit(&payload, &domain, max_qname_len).expect("build qname");
     });
     bench("encode_query", iterations, query.len(), || {
         let _ = encode_query(&query_params).expect("encode query");
@@ -121,7 +134,9 @@ fn bench(label: &str, iterations: usize, bytes_per_iter: usize, mut f: impl FnMu
 }
 
 fn print_usage() {
-    println!("Usage: bench_dns [--iterations=N] [--payload-len=N] [--domain=NAME]");
+    println!(
+        "Usage: bench_dns [--iterations=N] [--payload-len=N] [--domain=NAME] [--max-qname-len=N]"
+    );
 }
 
 fn init_logging() {

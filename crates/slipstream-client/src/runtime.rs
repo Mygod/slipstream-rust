@@ -17,7 +17,7 @@ use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
     client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor, ClientState,
 };
-use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
+use slipstream_dns::{build_qname_with_limit, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
     configure_quic_with_custom,
     picoquic::{
@@ -47,8 +47,7 @@ const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
-    let domain_len = config.domain.len();
-    let mtu = compute_mtu(domain_len)?;
+    let mtu = compute_mtu(config.domain, config.max_qname_len)?;
     let mut resolvers = resolve_resolvers(config.resolvers, mtu, config.debug_poll)?;
     if resolvers.is_empty() {
         return Err(ClientError::new("At least one resolver is required"));
@@ -342,8 +341,12 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
             }
 
-            let qname = build_qname(&send_buf[..send_length], config.domain)
-                .map_err(|err| ClientError::new(err.to_string()))?;
+            let qname = build_qname_with_limit(
+                &send_buf[..send_length],
+                config.domain,
+                config.max_qname_len,
+            )
+            .map_err(|err| ClientError::new(err.to_string()))?;
             let params = QueryParams {
                 id: dns_id,
                 qname: &qname,

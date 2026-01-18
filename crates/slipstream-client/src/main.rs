@@ -47,6 +47,13 @@ struct Args {
     gso: bool,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
     domain: String,
+    #[arg(
+        long = "max-qname-len",
+        value_name = "LEN",
+        default_value_t = 253,
+        value_parser = parse_max_qname_len
+    )]
+    max_qname_len: usize,
     #[arg(long = "cert", value_name = "PATH")]
     cert: Option<String>,
     #[arg(long = "keep-alive-interval", short = 't', default_value_t = 400)]
@@ -72,6 +79,7 @@ fn main() {
         congestion_control: args.congestion_control.as_deref(),
         gso: args.gso,
         domain: &args.domain,
+        max_qname_len: args.max_qname_len,
         cert: args.cert.as_deref(),
         keep_alive_interval: args.keep_alive_interval as usize,
         debug_poll: args.debug_poll,
@@ -107,6 +115,16 @@ fn parse_domain(input: &str) -> Result<String, String> {
 
 fn parse_resolver(input: &str) -> Result<HostPort, String> {
     parse_host_port(input, 53, AddressKind::Resolver).map_err(|err| err.to_string())
+}
+
+fn parse_max_qname_len(input: &str) -> Result<usize, String> {
+    let value: usize = input
+        .parse()
+        .map_err(|_| "Max QNAME length must be a positive integer".to_string())?;
+    if !(1..=253).contains(&value) {
+        return Err("Max QNAME length must be between 1 and 253".to_string());
+    }
+    Ok(value)
 }
 
 fn build_resolvers(matches: &clap::ArgMatches) -> Result<Vec<ResolverSpec>, String> {
@@ -150,6 +168,33 @@ fn collect_resolvers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_qname_len_defaults_to_253() {
+        let args = Args::try_parse_from([
+            "slipstream-client",
+            "--resolver",
+            "1.1.1.1",
+            "--domain",
+            "example.com",
+        ])
+        .expect("parse args");
+        assert_eq!(args.max_qname_len, 253);
+    }
+
+    #[test]
+    fn max_qname_len_rejects_out_of_range() {
+        let result = Args::try_parse_from([
+            "slipstream-client",
+            "--resolver",
+            "1.1.1.1",
+            "--domain",
+            "example.com",
+            "--max-qname-len",
+            "254",
+        ]);
+        assert!(result.is_err());
+    }
 
     #[test]
     fn preserves_ordered_resolvers() {
