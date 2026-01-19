@@ -341,10 +341,7 @@ fn parse_congestion_control(options: &[sip003::Sip003Option]) -> Result<Option<S
         if option.key == "congestion-control" {
             let value = option.value.trim();
             if value != "bbr" && value != "dcubic" {
-                return Err(format!(
-                    "Invalid congestion-control value: {}",
-                    option.value
-                ));
+                return Err(format!("Invalid congestion-control value: {}", value));
             }
             last = Some(value.to_string());
         }
@@ -359,7 +356,7 @@ fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<
             let value = option.value.trim();
             let parsed = value
                 .parse::<u16>()
-                .map_err(|_| format!("Invalid keep-alive-interval value: {}", option.value))?;
+                .map_err(|_| format!("Invalid keep-alive-interval value: {}", value))?;
             last = Some(parsed);
         }
     }
