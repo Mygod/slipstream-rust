@@ -13,6 +13,7 @@ slipstream-core = { path = "../slipstream-core" }
 slipstream-dns = { path = "../slipstream-dns" }
 slipstream-ffi = { path = "../slipstream-ffi" }
 libc = "0.2"
+socket2 = "0.6"
 tokio = { version = "1.37", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -5,7 +5,7 @@ use self::path::{
     apply_path_mode, drain_path_events, fetch_path_quality, find_resolver_by_addr_mut,
     loop_burst_total, path_poll_burst_max,
 };
-use self::setup::{bind_udp_socket, compute_mtu, map_io};
+use self::setup::{bind_tcp_listener, bind_udp_socket, compute_mtu, map_io};
 use crate::dns::{
     add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
     normalize_dual_stack_addr, refresh_resolver_path, resolve_resolvers, resolver_mode_to_c,
@@ -37,7 +37,6 @@ use std::ffi::CString;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpListener as TokioTcpListener;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -71,7 +70,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let tcp_host = config.tcp_listen_host;
     let tcp_port = config.tcp_listen_port;
     let mut bound_host = tcp_host.to_string();
-    let listener = match TokioTcpListener::bind((tcp_host, tcp_port)).await {
+    let listener = match bind_tcp_listener(tcp_host, tcp_port) {
         Ok(listener) => listener,
         Err(err) => {
             if is_ipv6_unspecified(tcp_host) {
@@ -79,7 +78,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     "Failed to bind TCP listener on {}:{} ({}); falling back to 0.0.0.0",
                     tcp_host, tcp_port, err
                 );
-                match TokioTcpListener::bind(("0.0.0.0", tcp_port)).await {
+                match bind_tcp_listener("0.0.0.0", tcp_port) {
                     Ok(listener) => {
                         bound_host = "0.0.0.0".to_string();
                         listener
@@ -92,7 +91,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     }
                 }
             } else {
-                return Err(map_io(err));
+                return Err(err);
             }
         }
     };
