@@ -97,10 +97,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         }
     };
     spawn_acceptor(listener, command_tx.clone());
-    info!(
-        "Listening on TCP port {} (host {})",
-        tcp_port, bound_host
-    );
+    info!("Listening on TCP port {} (host {})", tcp_port, bound_host);
 
     let alpn = CString::new(SLIPSTREAM_ALPN)
         .map_err(|_| ClientError::new("ALPN contains an unexpected null byte"))?;

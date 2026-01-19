@@ -187,9 +187,9 @@ fn read_env_value(name: &str) -> Option<String> {
 
 fn parse_port(value: &str, label: &str) -> Result<u16, ConfigError> {
     let trimmed = value.trim();
-    let port = trimmed.parse::<u16>().map_err(|_| {
-        ConfigError::new(format!("Invalid {}_PORT value: {}", label, trimmed))
-    })?;
+    let port = trimmed
+        .parse::<u16>()
+        .map_err(|_| ConfigError::new(format!("Invalid {}_PORT value: {}", label, trimmed)))?;
     if port == 0 {
         return Err(ConfigError::new(format!(
             "Invalid {}_PORT value: {}",
