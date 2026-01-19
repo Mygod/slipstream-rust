@@ -39,6 +39,9 @@ jobs:
           cargo test -p slipstream-dns
           cargo test
 
+      - name: IPv4 listener check
+        run: ./scripts/verify_ipv4_listener.sh
+
   cargo-audit:
     name: Cargo Audit
     runs-on: ubuntu-latest

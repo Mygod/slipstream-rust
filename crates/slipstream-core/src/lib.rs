@@ -2,6 +2,7 @@ use std::fmt;
 
 mod macros;
 pub mod net;
+pub mod sip003;
 pub mod stream;
 pub mod tcp;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
@@ -153,6 +154,41 @@ pub fn parse_host_port(
         host: host.to_string(),
         port,
         family: AddressFamily::V4,
+    })
+}
+
+pub fn parse_host_port_parts(
+    host: &str,
+    port: u16,
+    kind: AddressKind,
+) -> Result<HostPort, ConfigError> {
+    let trimmed = host.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigError::new(format!(
+            "Invalid {} address: {}",
+            kind.label(),
+            host
+        )));
+    }
+
+    let family = if trimmed.parse::<Ipv4Addr>().is_ok() {
+        AddressFamily::V4
+    } else if trimmed.parse::<Ipv6Addr>().is_ok() {
+        AddressFamily::V6
+    } else if trimmed.contains(':') {
+        return Err(ConfigError::new(format!(
+            "Invalid {} address: {}",
+            kind.label(),
+            host
+        )));
+    } else {
+        AddressFamily::V4
+    };
+
+    Ok(HostPort {
+        host: trimmed.to_string(),
+        port,
+        family,
     })
 }
 

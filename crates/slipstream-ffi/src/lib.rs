@@ -21,6 +21,7 @@ pub struct ResolverSpec {
 
 #[derive(Debug)]
 pub struct ClientConfig<'a> {
+    pub tcp_listen_host: &'a str,
     pub tcp_listen_port: u16,
     pub resolvers: &'a [ResolverSpec],
     pub domain: &'a str,

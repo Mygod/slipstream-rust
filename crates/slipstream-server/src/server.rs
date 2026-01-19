@@ -61,6 +61,7 @@ impl fmt::Display for ServerError {
 impl std::error::Error for ServerError {}
 
 pub struct ServerConfig {
+    pub dns_listen_host: String,
     pub dns_listen_port: u16,
     pub target_address: HostPort,
     pub cert: String,
@@ -183,8 +184,10 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         configure_quic_with_custom(quic, slipstream_server_cc_algorithm, QUIC_MTU);
     }
 
-    let udp = bind_udp_socket(config.dns_listen_port).await?;
-    let local_addr_storage = socket_addr_to_storage(udp.local_addr().map_err(map_io)?);
+    let udp = bind_udp_socket(&config.dns_listen_host, config.dns_listen_port).await?;
+    let udp_local_addr = udp.local_addr().map_err(map_io)?;
+    let map_ipv4_peers = matches!(udp_local_addr, SocketAddr::V6(_));
+    let local_addr_storage = socket_addr_to_storage(udp_local_addr);
     warn_overlapping_domains(&config.domains);
     let domains: Vec<&str> = config.domains.iter().map(String::as_str).collect();
     if domains.is_empty() {
@@ -317,7 +320,11 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 rcode,
             })
             .map_err(|err| ServerError::new(err.to_string()))?;
-            let peer = normalize_dual_stack_addr(slot.peer);
+            let peer = if map_ipv4_peers {
+                normalize_dual_stack_addr(slot.peer)
+            } else {
+                slot.peer
+            };
             if let Err(err) = udp.send_to(&response, peer).await {
                 if !is_transient_udp_error(&err) {
                     return Err(map_io(err));
@@ -367,7 +374,7 @@ fn decode_slot(
                 slipstream_disable_ack_delay(first_cnx);
             }
             Ok(Some(Slot {
-                peer: normalize_dual_stack_addr(peer),
+                peer,
                 id: query.id,
                 rd: query.rd,
                 cd: query.cd,
@@ -390,7 +397,7 @@ fn decode_slot(
                 None => return Ok(None),
             };
             Ok(Some(Slot {
-                peer: normalize_dual_stack_addr(peer),
+                peer,
                 id,
                 rd,
                 cd,
@@ -403,9 +410,8 @@ fn decode_slot(
     }
 }
 
-async fn bind_udp_socket(port: u16) -> Result<TokioUdpSocket, ServerError> {
-    let addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0));
-    TokioUdpSocket::bind(addr).await.map_err(map_io)
+async fn bind_udp_socket(host: &str, port: u16) -> Result<TokioUdpSocket, ServerError> {
+    TokioUdpSocket::bind((host, port)).await.map_err(map_io)
 }
 
 fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {

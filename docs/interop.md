@@ -95,6 +95,17 @@ cargo run -p slipstream-client -- \
   --domain test.com
 ```
 
+## IPv4 listener validation
+
+For a quick check that the DNS listener behaves correctly when bound to IPv4,
+run:
+
+```
+./scripts/verify_ipv4_listener.sh
+```
+
+Override ports or certificates with `DNS_PORT`, `TCP_PORT`, `CERT`, and `KEY`.
+
 ## CI
 
 The GitHub Actions workflow .github/workflows/interop-smoke.yml runs the Rust
