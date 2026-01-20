@@ -16,6 +16,7 @@ use crate::server::{map_io, normalize_dual_stack_addr, ServerError, Slot};
 pub(crate) const MAX_UDP_PACKET_SIZE: usize = 65535;
 const FALLBACK_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 const FALLBACK_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+const NON_DNS_STREAK_THRESHOLD: usize = 16;
 
 enum DecodeSlotOutcome {
     Slot(Slot),
@@ -30,6 +31,11 @@ struct FallbackSession {
     reply_task: JoinHandle<()>,
 }
 
+struct DnsPeerState {
+    last_seen: Instant,
+    non_dns_streak: usize,
+}
+
 pub(crate) struct PacketContext<'a> {
     pub(crate) domains: &'a [&'a str],
     pub(crate) quic: *mut picoquic_quic_t,
@@ -39,20 +45,18 @@ pub(crate) struct PacketContext<'a> {
 
 /// Tracks per-peer routing for UDP fallback based on DNS decoding outcomes.
 ///
-/// Peers are classified by their first packet:
-/// - If a packet decodes as a DNS query for the configured domains (including
-///   DNS error replies we generate), the peer is treated as DNS-only and any
-///   later non-DNS packets from that address are dropped.
-/// - If a packet fails DNS decoding and is dropped, the peer is treated as a
-///   fallback peer and all subsequent packets from that address (DNS or not)
-///   are forwarded to the fallback endpoint.
+/// The first packet sets the initial classification:
+/// - Packets that decode as DNS (including DNS error replies we generate) mark the peer as DNS-only.
+/// - Packets that fail DNS decoding are forwarded to fallback and create a fallback session.
 ///
-/// Classification is per source address and expires after idle timeout.
+/// For DNS-only peers, a streak of non-DNS packets can switch the peer to fallback once it
+/// reaches the non-DNS streak threshold. Classification is per source address and expires after
+/// idle timeout.
 pub(crate) struct FallbackManager {
     fallback_addr: SocketAddr,
     main_socket: Arc<TokioUdpSocket>,
     map_ipv4_peers: bool,
-    dns_peers: HashMap<SocketAddr, Instant>,
+    dns_peers: HashMap<SocketAddr, DnsPeerState>,
     sessions: HashMap<SocketAddr, FallbackSession>,
     last_cleanup: Instant,
 }
@@ -82,7 +86,7 @@ impl FallbackManager {
         self.last_cleanup = now;
 
         self.dns_peers
-            .retain(|_, last_seen| now.duration_since(*last_seen) <= FALLBACK_IDLE_TIMEOUT);
+            .retain(|_, state| now.duration_since(state.last_seen) <= FALLBACK_IDLE_TIMEOUT);
 
         let mut expired = Vec::new();
         for (peer, session) in &self.sessions {
@@ -111,7 +115,17 @@ impl FallbackManager {
     }
 
     fn mark_dns(&mut self, peer: SocketAddr) {
-        self.dns_peers.insert(peer, Instant::now());
+        let now = Instant::now();
+        self.dns_peers
+            .entry(peer)
+            .and_modify(|state| {
+                state.last_seen = now;
+                state.non_dns_streak = 0;
+            })
+            .or_insert(DnsPeerState {
+                last_seen: now,
+                non_dns_streak: 0,
+            });
     }
 
     fn is_fallback_peer(&self, peer: SocketAddr) -> bool {
@@ -123,7 +137,20 @@ impl FallbackManager {
     }
 
     async fn handle_non_dns(&mut self, packet: &[u8], peer: SocketAddr) {
-        if self.dns_peers.contains_key(&peer) {
+        let mut should_forward = true;
+        let mut should_remove = false;
+        if let Some(state) = self.dns_peers.get_mut(&peer) {
+            state.non_dns_streak = state.non_dns_streak.saturating_add(1);
+            if state.non_dns_streak < NON_DNS_STREAK_THRESHOLD {
+                should_forward = false;
+            } else {
+                should_remove = true;
+            }
+        }
+        if should_remove {
+            self.dns_peers.remove(&peer);
+        }
+        if !should_forward {
             return;
         }
         self.forward_packet(packet, peer).await;
@@ -154,10 +181,7 @@ impl FallbackManager {
             .unwrap_or(false);
         if reset_session {
             self.sessions.remove(&peer);
-            tracing::debug!(
-                "fallback reply loop ended for {}; recreating session",
-                peer
-            );
+            tracing::debug!("fallback reply loop ended for {}; recreating session", peer);
         }
         if !self.sessions.contains_key(&peer) {
             if let Err(err) = self.create_session(peer).await {
@@ -529,7 +553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_ignores_non_dns_after_dns() {
+    async fn fallback_switches_after_non_dns_streak() {
         let main_socket = Arc::new(TokioUdpSocket::bind("127.0.0.1:0").await.unwrap());
         let main_addr = main_socket.local_addr().unwrap();
         let client_socket = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -572,6 +596,23 @@ mod tests {
         }
 
         let non_dns = b"nope";
+        for _ in 0..(NON_DNS_STREAK_THRESHOLD - 1) {
+            client_socket.send_to(non_dns, main_addr).await.unwrap();
+            let (size, peer) = recv_with_timeout(&main_socket, &mut recv_buf).await;
+            let mut slots = Vec::new();
+            handle_packet(
+                &mut slots,
+                &recv_buf[..size],
+                peer,
+                &context,
+                &mut fallback_mgr,
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(notify_rx.try_recv().is_err());
+
         client_socket.send_to(non_dns, main_addr).await.unwrap();
         let (size, peer) = recv_with_timeout(&main_socket, &mut recv_buf).await;
         let mut slots = Vec::new();
@@ -585,9 +626,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(timeout(Duration::from_millis(200), notify_rx.recv())
+        let echoed = timeout(Duration::from_secs(1), notify_rx.recv())
             .await
-            .is_err());
+            .expect("fallback receive timeout")
+            .expect("fallback receive");
+        assert_eq!(echoed, non_dns);
 
         if let Some(manager) = fallback_mgr.as_mut() {
             for session in manager.sessions.values() {
