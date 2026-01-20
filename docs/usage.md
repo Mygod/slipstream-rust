@@ -64,7 +64,7 @@ Common flags:
 - --target-address <HOST:PORT> (default: 127.0.0.1:5201)
 - --fallback <HOST:PORT> (optional; forward non-DNS packets to this UDP endpoint)
 - When binding to ::, slipstream attempts to enable dual-stack (IPV6_V6ONLY=0); if your OS disallows it, IPv4 DNS clients require sysctl changes or binding to an IPv4 address.
-- With --fallback enabled, peers that have already sent DNS only switch to fallback after 16 consecutive non-DNS packets to avoid diverting DNS on stray traffic.
+- With --fallback enabled, peers that have recently sent DNS stay DNS-only; while active they switch to fallback only after 16 consecutive non-DNS packets to avoid diverting DNS on stray traffic. DNS-only classification expires after an idle timeout without DNS traffic.
 
 Example:
 
