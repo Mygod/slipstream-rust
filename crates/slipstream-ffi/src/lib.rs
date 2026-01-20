@@ -1,3 +1,4 @@
+#[cfg(feature = "openssl-vendored")]
 #[allow(unused_imports)]
 use openssl_sys as _;
 use slipstream_core::HostPort;

@@ -16,12 +16,23 @@ CMAKE_ARGS=(
   "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
   "-DPICOQUIC_FETCH_PTLS=${FETCH_PTLS}"
   "-DCMAKE_POSITION_INDEPENDENT_CODE=ON"
-  "-DBUILD_DEMO=OFF"
-  "-DBUILD_HTTP=OFF"
-  "-DBUILD_LOGLIB=OFF"
-  "-DBUILD_LOGREADER=OFF"
-  "-Dpicoquic_BUILD_TESTS=OFF"
 )
+
+BUILD_TARGET=()
+if [[ -n "${PICOQUIC_MINIMAL_BUILD:-}" ]]; then
+  case "${PICOQUIC_MINIMAL_BUILD,,}" in
+    1|true|yes|on)
+      CMAKE_ARGS+=(
+        "-DBUILD_DEMO=OFF"
+        "-DBUILD_HTTP=OFF"
+        "-DBUILD_LOGLIB=OFF"
+        "-DBUILD_LOGREADER=OFF"
+        "-Dpicoquic_BUILD_TESTS=OFF"
+      )
+      BUILD_TARGET=(--target picoquic-core)
+      ;;
+  esac
+fi
 
 if [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
   TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake"
@@ -59,4 +70,4 @@ if [[ -n "${OPENSSL_USE_STATIC_LIBS:-}" ]]; then
 fi
 
 cmake -S "${PICOQUIC_DIR}" -B "${BUILD_DIR}" "${CMAKE_ARGS[@]}"
-cmake --build "${BUILD_DIR}" --target picoquic-core
+cmake --build "${BUILD_DIR}" "${BUILD_TARGET[@]}"

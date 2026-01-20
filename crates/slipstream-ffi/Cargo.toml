@@ -9,5 +9,11 @@ readme = "../../README.md"
 
 [dependencies]
 libc = "0.2"
-openssl-sys = { version = "0.9", features = ["vendored"] }
+openssl-sys = { version = "0.9", optional = true, features = ["vendored"] }
 slipstream-core = { path = "../slipstream-core" }
+
+[features]
+default = []
+openssl-vendored = ["dep:openssl-sys", "openssl-sys/vendored", "openssl-static"]
+openssl-static = []
+picoquic-minimal-build = []

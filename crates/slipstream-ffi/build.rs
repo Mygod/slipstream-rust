@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=PICOQUIC_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=PICOQUIC_LIB_DIR");
     println!("cargo:rerun-if-env-changed=PICOQUIC_AUTO_BUILD");
+    println!("cargo:rerun-if-env-changed=PICOQUIC_MINIMAL_BUILD");
     println!("cargo:rerun-if-env-changed=PICOTLS_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_ROOT_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_DIR");
@@ -77,7 +78,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     object_paths.push(poll_obj);
 
     let test_helpers_obj = out_dir.join("slipstream_test_helpers.c.o");
-    compile_cc(&cc, &test_helpers_src, &test_helpers_obj, &picoquic_include_dir)?;
+    compile_cc(
+        &cc,
+        &test_helpers_src,
+        &test_helpers_obj,
+        &picoquic_include_dir,
+    )?;
     object_paths.push(test_helpers_obj);
 
     let picotls_layout_obj = out_dir.join("picotls_layout.c.o");
@@ -151,22 +157,32 @@ fn resolve_openssl_paths() -> OpenSslPaths {
     if root.is_some() || include.is_some() || lib.is_some() {
         let lib = lib.or_else(|| root.as_ref().and_then(|root| openssl_lib_dir(root)));
         let mut resolved = OpenSslPaths { root, include, lib };
-        if let (Some(target), Some(root)) = (env::var("TARGET").ok(), resolved.root.as_ref()) {
-            let root_str = root.to_string_lossy();
-            if !root_str.contains(&target) {
-                if let Some(target_paths) = resolve_openssl_from_build_output() {
-                    resolved = target_paths;
+        if cfg!(feature = "openssl-vendored") {
+            if let (Some(target), Some(root)) = (env::var("TARGET").ok(), resolved.root.as_ref()) {
+                let root_str = root.to_string_lossy();
+                if !root_str.contains(&target) {
+                    if let Some(target_paths) = resolve_openssl_from_build_output() {
+                        resolved = target_paths;
+                    }
                 }
             }
         }
         return resolved;
     }
 
-    resolve_openssl_from_build_output().unwrap_or(OpenSslPaths {
-        root: None,
-        include: None,
-        lib: None,
-    })
+    if cfg!(feature = "openssl-vendored") {
+        resolve_openssl_from_build_output().unwrap_or(OpenSslPaths {
+            root: None,
+            include: None,
+            lib: None,
+        })
+    } else {
+        OpenSslPaths {
+            root: None,
+            include: None,
+            lib: None,
+        }
+    }
 }
 
 fn resolve_openssl_from_build_output() -> Option<OpenSslPaths> {
@@ -231,11 +247,7 @@ fn find_openssl_sys_in_dir(build_dir: &Path) -> Option<OpenSslPaths> {
             .and_then(|meta| meta.modified())
             .or_else(|_| fs::metadata(&root_output).and_then(|meta| meta.modified()))
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        if best
-            .as_ref()
-            .map(|(time, _)| mtime > *time)
-            .unwrap_or(true)
-        {
+        if best.as_ref().map(|(time, _)| mtime > *time).unwrap_or(true) {
             best = Some((mtime, candidate));
         }
     }
@@ -327,9 +339,14 @@ fn build_picoquic(openssl_paths: &OpenSslPaths) -> Result<(), Box<dyn std::error
     if let Ok(value) = env::var("ANDROID_PLATFORM") {
         command.env("ANDROID_PLATFORM", value);
     }
+    if cfg!(feature = "picoquic-minimal-build") {
+        command.env("PICOQUIC_MINIMAL_BUILD", "1");
+    }
     if let Some(root) = &openssl_paths.root {
         command.env("OPENSSL_ROOT_DIR", root);
         command.env("OPENSSL_DIR", root);
+    }
+    if cfg!(feature = "openssl-static") {
         command.env("OPENSSL_USE_STATIC_LIBS", "TRUE");
     }
     if let Some(include) = &openssl_paths.include {
@@ -706,10 +723,7 @@ fn android_builtins_name(target: &str) -> Option<&'static str> {
 }
 
 fn clang_resource_dir(cc: &str) -> Option<PathBuf> {
-    let output = Command::new(cc)
-        .arg("-print-resource-dir")
-        .output()
-        .ok()?;
+    let output = Command::new(cc).arg("-print-resource-dir").output().ok()?;
     if !output.status.success() {
         return None;
     }
