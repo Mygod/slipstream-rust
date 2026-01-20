@@ -214,7 +214,11 @@ fn udp_fallback_e2e() {
     let (size, _) = client_dns.recv_from(&mut buf).expect("receive DNS reply");
     let response = &buf[..size];
     assert!(is_response(response), "expected DNS response");
-    assert_ne!(response, query.as_slice(), "expected DNS response, got echo");
+    assert_ne!(
+        response,
+        query.as_slice(),
+        "expected DNS response, got echo"
+    );
     assert!(
         echo.recv_timeout(Duration::from_millis(200)).is_err(),
         "fallback endpoint should not see DNS query"
