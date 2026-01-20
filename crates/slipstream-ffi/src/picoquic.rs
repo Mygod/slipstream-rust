@@ -313,6 +313,13 @@ extern "C" {
     pub fn picoquic_get_first_cnx(quic: *mut picoquic_quic_t) -> *mut picoquic_cnx_t;
     pub fn picoquic_get_next_cnx(cnx: *mut picoquic_cnx_t) -> *mut picoquic_cnx_t;
     pub fn picoquic_get_cnx_state(cnx: *mut picoquic_cnx_t) -> picoquic_state_enum;
+    pub fn picoquic_get_close_reasons(
+        cnx: *mut picoquic_cnx_t,
+        local_reason: *mut u64,
+        remote_reason: *mut u64,
+        local_application_reason: *mut u64,
+        remote_application_reason: *mut u64,
+    );
 
     pub fn picoquic_connection_disconnect(cnx: *mut picoquic_cnx_t);
 

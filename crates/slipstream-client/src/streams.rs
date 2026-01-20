@@ -1,8 +1,9 @@
 use slipstream_core::tcp::{stream_read_limit_chunks, tcp_send_buffer_bytes};
 use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
-    picoquic_get_next_local_stream_id, picoquic_mark_active_stream,
-    picoquic_provide_stream_data_buffer, picoquic_reset_stream, picoquic_stream_data_consumed,
+    picoquic_get_close_reasons, picoquic_get_cnx_state, picoquic_get_next_local_stream_id,
+    picoquic_mark_active_stream, picoquic_provide_stream_data_buffer, picoquic_reset_stream,
+    picoquic_stream_data_consumed,
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
@@ -66,6 +67,21 @@ impl ClientState {
     pub(crate) fn take_path_events(&mut self) -> Vec<PathEvent> {
         std::mem::take(&mut self.path_events)
     }
+
+    pub(crate) fn reset_for_reconnect(&mut self) {
+        let debug_streams = self.debug_streams;
+        for (stream_id, stream) in self.streams.drain() {
+            let _ = stream.write_tx.send(StreamWrite::Fin);
+            if debug_streams {
+                debug!("stream {}: closing due to reconnect", stream_id);
+            }
+        }
+        self.ready = false;
+        self.closing = false;
+        self.path_events.clear();
+        self.debug_enqueued_bytes = 0;
+        self.debug_last_enqueue_at = 0;
+    }
 }
 
 struct ClientStream {
@@ -96,6 +112,15 @@ pub(crate) enum Command {
 pub(crate) enum PathEvent {
     Available(u64),
     Deleted(u64),
+}
+
+fn close_event_label(event: picoquic_call_back_event_t) -> &'static str {
+    match event {
+        picoquic_call_back_event_t::picoquic_callback_close => "close",
+        picoquic_call_back_event_t::picoquic_callback_application_close => "application_close",
+        picoquic_call_back_event_t::picoquic_callback_stateless_reset => "stateless_reset",
+        _ => "unknown",
+    }
 }
 
 pub(crate) unsafe extern "C" fn client_callback(
@@ -161,7 +186,30 @@ pub(crate) unsafe extern "C" fn client_callback(
         | picoquic_call_back_event_t::picoquic_callback_application_close
         | picoquic_call_back_event_t::picoquic_callback_stateless_reset => {
             state.closing = true;
-            info!("Connection closed");
+            let mut local_reason = 0u64;
+            let mut remote_reason = 0u64;
+            let mut local_app_reason = 0u64;
+            let mut remote_app_reason = 0u64;
+            let cnx_state = unsafe { picoquic_get_cnx_state(cnx) };
+            unsafe {
+                picoquic_get_close_reasons(
+                    cnx,
+                    &mut local_reason,
+                    &mut remote_reason,
+                    &mut local_app_reason,
+                    &mut remote_app_reason,
+                );
+            }
+            warn!(
+                "Connection closed event={} state={:?} local_error=0x{:x} remote_error=0x{:x} local_app=0x{:x} remote_app=0x{:x} ready={}",
+                close_event_label(fin_or_event),
+                cnx_state,
+                local_reason,
+                remote_reason,
+                local_app_reason,
+                remote_app_reason,
+                state.ready
+            );
         }
         picoquic_call_back_event_t::picoquic_callback_prepare_to_send => {
             if !bytes.is_null() {
