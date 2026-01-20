@@ -62,7 +62,10 @@ Common flags:
 - --dns-listen-host <HOST> (default: ::)
 - --dns-listen-port <PORT> (default: 53)
 - --target-address <HOST:PORT> (default: 127.0.0.1:5201)
+- --fallback <HOST:PORT> (optional; forward non-DNS packets to this UDP endpoint)
 - When binding to ::, slipstream attempts to enable dual-stack (IPV6_V6ONLY=0); if your OS disallows it, IPv4 DNS clients require sysctl changes or binding to an IPv4 address.
+- With --fallback enabled, peers that have recently sent DNS stay DNS-only; while active they switch to fallback only after 16 consecutive non-DNS packets to avoid diverting DNS on stray traffic. DNS-only classification expires after an idle timeout without DNS traffic.
+- Fallback sessions are created per source address without a hard cap; untrusted or spoofed UDP traffic can consume file descriptors/CPU. Use network filtering or rate limiting when exposing fallback to the public Internet, or disable --fallback if this is a concern.
 
 Example:
 

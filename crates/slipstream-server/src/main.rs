@@ -1,6 +1,7 @@
 mod server;
 mod streams;
 mod target;
+mod udp_fallback;
 
 use clap::{parser::ValueSource, CommandFactory, FromArgMatches, Parser};
 use server::{run_server, ServerConfig};
@@ -27,6 +28,8 @@ struct Args {
         value_parser = parse_target_address
     )]
     target_address: HostPort,
+    #[arg(long = "fallback", value_name = "HOST:PORT", value_parser = parse_fallback_address)]
+    fallback: Option<HostPort>,
     #[arg(long = "cert", short = 'c', value_name = "PATH")]
     cert: Option<String>,
     #[arg(long = "key", short = 'k', value_name = "PATH")]
@@ -104,6 +107,16 @@ fn main() {
     } else {
         args.target_address.clone()
     };
+    let fallback_address = if cli_provided(&matches, "fallback") {
+        args.fallback.clone()
+    } else {
+        last_option_value(&sip003_env.plugin_options, "fallback").map(|value| {
+            parse_fallback_address(&value).unwrap_or_else(|err| {
+                tracing::error!("SIP003 env error: {}", err);
+                std::process::exit(2);
+            })
+        })
+    };
 
     let domains = if !args.domains.is_empty() {
         args.domains.clone()
@@ -142,6 +155,7 @@ fn main() {
         dns_listen_host,
         dns_listen_port,
         target_address,
+        fallback_address,
         cert,
         key,
         domains,
@@ -178,6 +192,14 @@ fn parse_domain(input: &str) -> Result<String, String> {
 
 fn parse_target_address(input: &str) -> Result<HostPort, String> {
     parse_host_port(input, 5201, AddressKind::Target).map_err(|err| err.to_string())
+}
+
+fn parse_fallback_address(input: &str) -> Result<HostPort, String> {
+    let parsed = parse_host_port(input, 0, AddressKind::Fallback).map_err(|err| err.to_string())?;
+    if parsed.port == 0 {
+        return Err("fallback address must include a port".to_string());
+    }
+    Ok(parsed)
 }
 
 fn cli_provided(matches: &clap::ArgMatches, id: &str) -> bool {

@@ -1,17 +1,15 @@
+use crate::udp_fallback::{handle_packet, FallbackManager, PacketContext, MAX_UDP_PACKET_SIZE};
 use slipstream_core::{net::is_transient_udp_error, resolve_host_port, HostPort};
-use slipstream_dns::{
-    decode_query_with_domains, encode_response, DecodeQueryError, Question, Rcode, ResponseParams,
-};
+use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
 use slipstream_ffi::picoquic::{
-    picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_incoming_packet_ex,
-    picoquic_prepare_packet_ex, picoquic_quic_t, slipstream_disable_ack_delay,
+    picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_prepare_packet_ex,
     slipstream_server_cc_algorithm, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
 use slipstream_ffi::{configure_quic_with_custom, socket_addr_to_storage, QuicGuard};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::ffi::CString;
 use std::fmt;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::net::{SocketAddr, SocketAddrV6};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,7 +44,7 @@ pub struct ServerError {
 }
 
 impl ServerError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -65,6 +63,7 @@ pub struct ServerConfig {
     pub dns_listen_host: String,
     pub dns_listen_port: u16,
     pub target_address: HostPort,
+    pub fallback_address: Option<HostPort>,
     pub cert: String,
     pub key: String,
     pub domains: Vec<String>,
@@ -119,20 +118,26 @@ pub(crate) enum Command {
     },
 }
 
-struct Slot {
-    peer: SocketAddr,
-    id: u16,
-    rd: bool,
-    cd: bool,
-    question: Question,
-    rcode: Option<Rcode>,
-    cnx: *mut picoquic_cnx_t,
-    path_id: libc::c_int,
+pub(crate) struct Slot {
+    pub(crate) peer: SocketAddr,
+    pub(crate) id: u16,
+    pub(crate) rd: bool,
+    pub(crate) cd: bool,
+    pub(crate) question: Question,
+    pub(crate) rcode: Option<Rcode>,
+    pub(crate) cnx: *mut picoquic_cnx_t,
+    pub(crate) path_id: libc::c_int,
 }
 
 pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let target_addr = resolve_host_port(&config.target_address)
         .map_err(|err| ServerError::new(err.to_string()))?;
+    let fallback_addr = match &config.fallback_address {
+        Some(address) => {
+            Some(resolve_host_port(address).map_err(|err| ServerError::new(err.to_string()))?)
+        }
+        None => None,
+    };
 
     let alpn = CString::new(SLIPSTREAM_ALPN)
         .map_err(|_| ServerError::new("ALPN contains an unexpected null byte"))?;
@@ -185,10 +190,21 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         configure_quic_with_custom(quic, slipstream_server_cc_algorithm, QUIC_MTU);
     }
 
-    let udp = bind_udp_socket(&config.dns_listen_host, config.dns_listen_port).await?;
+    let udp = Arc::new(bind_udp_socket(&config.dns_listen_host, config.dns_listen_port).await?);
     let udp_local_addr = udp.local_addr().map_err(map_io)?;
     let map_ipv4_peers = matches!(udp_local_addr, SocketAddr::V6(_));
     let local_addr_storage = socket_addr_to_storage(udp_local_addr);
+    if let Some(addr) = fallback_addr {
+        if addr == udp_local_addr {
+            tracing::warn!(
+                "Fallback address matches DNS listen address ({}); non-DNS packets will loop. \
+                 Configure a different fallback address.",
+                addr
+            );
+        }
+    }
+    let mut fallback_mgr =
+        fallback_addr.map(|addr| FallbackManager::new(udp.clone(), addr, map_ipv4_peers));
     warn_overlapping_domains(&config.domains);
     let domains: Vec<&str> = config.domains.iter().map(String::as_str).collect();
     if domains.is_empty() {
@@ -199,7 +215,12 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         libc::signal(libc::SIGTERM, handle_sigterm as usize);
     }
 
-    let mut recv_buf = vec![0u8; DNS_MAX_QUERY_SIZE];
+    let recv_buf_len = if fallback_mgr.is_some() {
+        MAX_UDP_PACKET_SIZE
+    } else {
+        DNS_MAX_QUERY_SIZE
+    };
+    let mut recv_buf = vec![0u8; recv_buf_len];
     let mut send_buf = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
 
     loop {
@@ -213,6 +234,9 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         }
 
         let mut slots = Vec::new();
+        if let Some(manager) = fallback_mgr.as_mut() {
+            manager.cleanup();
+        }
 
         tokio::select! {
             command = command_rx.recv() => {
@@ -224,29 +248,31 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 match recv {
                     Ok((size, peer)) => {
                         let loop_time = unsafe { picoquic_current_time() };
-                        if let Some(slot) = decode_slot(
+                        let context = PacketContext {
+                            domains: &domains,
+                            quic,
+                            current_time: loop_time,
+                            local_addr_storage: &local_addr_storage,
+                        };
+                        handle_packet(
+                            &mut slots,
                             &recv_buf[..size],
                             peer,
-                            &domains,
-                            quic,
-                            loop_time,
-                            &local_addr_storage,
-                        )? {
-                            slots.push(slot);
-                        }
+                            &context,
+                            &mut fallback_mgr,
+                        )
+                        .await?;
                         for _ in 1..PICOQUIC_PACKET_LOOP_RECV_MAX {
                             match udp.try_recv_from(&mut recv_buf) {
                                 Ok((size, peer)) => {
-                                    if let Some(slot) = decode_slot(
+                                    handle_packet(
+                                        &mut slots,
                                         &recv_buf[..size],
                                         peer,
-                                        &domains,
-                                        quic,
-                                        loop_time,
-                                        &local_addr_storage,
-                                    )? {
-                                        slots.push(slot);
-                                    }
+                                        &context,
+                                        &mut fallback_mgr,
+                                    )
+                                    .await?;
                                 }
                                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
                                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -337,80 +363,6 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     Ok(0)
 }
 
-fn decode_slot(
-    packet: &[u8],
-    peer: SocketAddr,
-    domains: &[&str],
-    quic: *mut picoquic_quic_t,
-    current_time: u64,
-    local_addr_storage: &libc::sockaddr_storage,
-) -> Result<Option<Slot>, ServerError> {
-    match decode_query_with_domains(packet, domains) {
-        Ok(query) => {
-            let mut peer_storage = dummy_sockaddr_storage();
-            let mut local_storage = unsafe { std::ptr::read(local_addr_storage) };
-            let mut first_cnx: *mut picoquic_cnx_t = std::ptr::null_mut();
-            let mut first_path: libc::c_int = -1;
-            let ret = unsafe {
-                picoquic_incoming_packet_ex(
-                    quic,
-                    query.payload.as_ptr() as *mut u8,
-                    query.payload.len(),
-                    &mut peer_storage as *mut _ as *mut libc::sockaddr,
-                    &mut local_storage as *mut _ as *mut libc::sockaddr,
-                    0,
-                    0,
-                    &mut first_cnx,
-                    &mut first_path,
-                    current_time,
-                )
-            };
-            if ret < 0 {
-                return Err(ServerError::new("Failed to process QUIC packet"));
-            }
-            if first_cnx.is_null() {
-                return Ok(None);
-            }
-            unsafe {
-                slipstream_disable_ack_delay(first_cnx);
-            }
-            Ok(Some(Slot {
-                peer,
-                id: query.id,
-                rd: query.rd,
-                cd: query.cd,
-                question: query.question,
-                rcode: None,
-                cnx: first_cnx,
-                path_id: first_path,
-            }))
-        }
-        Err(DecodeQueryError::Drop) => Ok(None),
-        Err(DecodeQueryError::Reply {
-            id,
-            rd,
-            cd,
-            question,
-            rcode,
-        }) => {
-            let question = match question {
-                Some(question) => question,
-                None => return Ok(None),
-            };
-            Ok(Some(Slot {
-                peer,
-                id,
-                rd,
-                cd,
-                question,
-                rcode: Some(rcode),
-                cnx: std::ptr::null_mut(),
-                path_id: -1,
-            }))
-        }
-    }
-}
-
 async fn bind_udp_socket(host: &str, port: u16) -> Result<TokioUdpSocket, ServerError> {
     let addrs: Vec<SocketAddr> = lookup_host((host, port)).await.map_err(map_io)?.collect();
     if addrs.is_empty() {
@@ -453,7 +405,7 @@ fn bind_udp_socket_addr(addr: SocketAddr) -> Result<TokioUdpSocket, ServerError>
     TokioUdpSocket::from_std(std_socket).map_err(map_io)
 }
 
-fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
+pub(crate) fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
     match addr {
         SocketAddr::V4(v4) => {
             SocketAddr::V6(SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0))
@@ -462,24 +414,7 @@ fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
     }
 }
 
-fn dummy_sockaddr_storage() -> libc::sockaddr_storage {
-    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let sockaddr = libc::sockaddr_in6 {
-        sin6_family: libc::AF_INET6 as libc::sa_family_t,
-        sin6_port: 12345u16.to_be(),
-        sin6_flowinfo: 0,
-        sin6_addr: libc::in6_addr {
-            s6_addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets(),
-        },
-        sin6_scope_id: 0,
-    };
-    unsafe {
-        std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in6, sockaddr);
-    }
-    storage
-}
-
-fn map_io(err: std::io::Error) -> ServerError {
+pub(crate) fn map_io(err: std::io::Error) -> ServerError {
     ServerError::new(err.to_string())
 }
 
