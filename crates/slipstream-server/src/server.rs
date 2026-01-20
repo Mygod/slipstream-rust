@@ -2,30 +2,33 @@ use crate::udp_fallback::{handle_packet, FallbackManager, PacketContext, MAX_UDP
 use slipstream_core::{net::is_transient_udp_error, resolve_host_port, HostPort};
 use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
 use slipstream_ffi::picoquic::{
-    picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_prepare_packet_ex,
+    picoquic_close_immediate, picoquic_cnx_t, picoquic_create, picoquic_current_time,
+    picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_prepare_packet_ex, picoquic_quic_t,
     slipstream_server_cc_algorithm, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
 use slipstream_ffi::{configure_quic_with_custom, socket_addr_to_storage, QuicGuard};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt;
 use std::net::{SocketAddr, SocketAddrV6};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::{lookup_host, UdpSocket as TokioUdpSocket};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use crate::streams::{
-    drain_commands, handle_command, handle_shutdown, maybe_report_command_stats, server_callback,
-    ServerState,
+    drain_commands, handle_command, handle_shutdown, maybe_report_command_stats,
+    remove_connection_streams, server_callback, ServerState,
 };
 
 // Protocol defaults; see docs/config.md for details.
 const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const DNS_MAX_QUERY_SIZE: usize = 512;
 const IDLE_SLEEP_MS: u64 = 10;
+const IDLE_GC_INTERVAL: Duration = Duration::from_secs(1);
 // Default QUIC MTU for server packets; see docs/config.md for details.
 const QUIC_MTU: u32 = 900;
 pub(crate) const STREAM_READ_CHUNK_BYTES: usize = 4096;
@@ -67,6 +70,7 @@ pub struct ServerConfig {
     pub cert: String,
     pub key: String,
     pub domains: Vec<String>,
+    pub idle_timeout_seconds: u64,
     pub debug_streams: bool,
     pub debug_commands: bool,
 }
@@ -148,6 +152,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let debug_streams = config.debug_streams;
     let debug_commands = config.debug_commands;
+    let idle_timeout = Duration::from_secs(config.idle_timeout_seconds);
     let mut state = Box::new(ServerState::new(
         target_addr,
         command_tx,
@@ -222,6 +227,8 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     };
     let mut recv_buf = vec![0u8; recv_buf_len];
     let mut send_buf = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
+    let mut last_seen = HashMap::new();
+    let mut last_idle_gc = Instant::now();
 
     loop {
         drain_commands(state_ptr, &mut command_rx);
@@ -293,6 +300,19 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 }
             }
             _ = sleep(Duration::from_millis(IDLE_SLEEP_MS)) => {}
+        }
+
+        let now = Instant::now();
+        note_active_connections(&mut last_seen, &slots, now);
+        if idle_timeout != Duration::ZERO {
+            maybe_gc_idle_connections(
+                quic,
+                state_ptr,
+                &mut last_seen,
+                idle_timeout,
+                &mut last_idle_gc,
+                now,
+            );
         }
 
         drain_commands(state_ptr, &mut command_rx);
@@ -416,6 +436,72 @@ pub(crate) fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
 
 pub(crate) fn map_io(err: std::io::Error) -> ServerError {
     ServerError::new(err.to_string())
+}
+
+fn note_active_connections(last_seen: &mut HashMap<usize, Instant>, slots: &[Slot], now: Instant) {
+    for slot in slots {
+        if !slot.cnx.is_null() {
+            last_seen.insert(slot.cnx as usize, now);
+        }
+    }
+}
+
+fn collect_active_connections(quic: *mut picoquic_quic_t) -> HashMap<usize, *mut picoquic_cnx_t> {
+    let mut active = HashMap::new();
+    let mut cnx = unsafe { picoquic_get_first_cnx(quic) };
+    while !cnx.is_null() {
+        active.insert(cnx as usize, cnx);
+        cnx = unsafe { picoquic_get_next_cnx(cnx) };
+    }
+    active
+}
+
+fn maybe_gc_idle_connections(
+    quic: *mut picoquic_quic_t,
+    state_ptr: *mut ServerState,
+    last_seen: &mut HashMap<usize, Instant>,
+    idle_timeout: Duration,
+    last_gc: &mut Instant,
+    now: Instant,
+) {
+    if last_seen.is_empty() {
+        return;
+    }
+    if now.duration_since(*last_gc) < IDLE_GC_INTERVAL {
+        return;
+    }
+
+    let active = collect_active_connections(quic);
+    if active.is_empty() {
+        last_seen.clear();
+        *last_gc = now;
+        return;
+    }
+
+    last_seen.retain(|cnx_id, _| active.contains_key(cnx_id));
+    let mut idle = Vec::new();
+    for (cnx_id, last) in last_seen.iter() {
+        if now.duration_since(*last) >= idle_timeout {
+            idle.push(*cnx_id);
+        }
+    }
+
+    if idle.is_empty() {
+        *last_gc = now;
+        return;
+    }
+
+    let state = unsafe { &mut *state_ptr };
+    for cnx_id in idle {
+        if let Some(&cnx) = active.get(&cnx_id) {
+            remove_connection_streams(state, cnx_id);
+            unsafe {
+                picoquic_close_immediate(cnx);
+            }
+            last_seen.remove(&cnx_id);
+        }
+    }
+    *last_gc = now;
 }
 
 fn warn_overlapping_domains(domains: &[String]) {
