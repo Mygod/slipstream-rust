@@ -1,0 +1,90 @@
+mod support;
+
+use std::thread;
+use std::time::Duration;
+
+use support::{
+    ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, server_bin_path, spawn_client,
+    spawn_server, wait_for_log, workspace_root, ClientArgs, ServerArgs,
+};
+
+#[test]
+fn idle_gc_closes_connection() {
+    let root = workspace_root();
+    let client_bin = ensure_client_bin(&root);
+    let server_bin = server_bin_path();
+
+    let cert = root.join("fixtures/certs/cert.pem");
+    let key = root.join("fixtures/certs/key.pem");
+    assert!(cert.exists(), "missing fixtures/certs/cert.pem");
+    assert!(key.exists(), "missing fixtures/certs/key.pem");
+
+    let dns_port = match pick_udp_port() {
+        Ok(port) => port,
+        Err(err) => {
+            eprintln!("skipping idle gc e2e test: {}", err);
+            return;
+        }
+    };
+    let tcp_port = match pick_tcp_port() {
+        Ok(port) => port,
+        Err(err) => {
+            eprintln!("skipping idle gc e2e test: {}", err);
+            return;
+        }
+    };
+    let domain = "test.example.com";
+
+    let (mut server, server_logs) = spawn_server(ServerArgs {
+        server_bin: &server_bin,
+        dns_listen_host: Some("127.0.0.1"),
+        dns_port,
+        target_address: "127.0.0.1:1",
+        domains: &[domain],
+        cert: &cert,
+        key: &key,
+        fallback_addr: None,
+        idle_timeout_seconds: Some(1),
+        rust_log: "debug",
+        capture_logs: true,
+    });
+    let server_logs = server_logs.expect("server logs");
+    thread::sleep(Duration::from_millis(200));
+    if server.has_exited() {
+        eprintln!("skipping idle gc e2e test: server failed to start");
+        return;
+    }
+
+    let (_client, client_logs) = spawn_client(ClientArgs {
+        client_bin: &client_bin,
+        dns_port,
+        tcp_port,
+        domain,
+        cert: Some(&cert),
+        keep_alive_interval: Some(0),
+        rust_log: "info",
+        capture_logs: true,
+    });
+    let client_logs = client_logs.expect("client logs");
+    if !wait_for_log(
+        &client_logs,
+        "Listening on TCP port",
+        Duration::from_secs(5),
+    ) {
+        let snapshot = log_snapshot(&client_logs);
+        panic!("client did not start listening\n{}", snapshot);
+    }
+    if !wait_for_log(&client_logs, "Connection ready", Duration::from_secs(10)) {
+        let snapshot = log_snapshot(&client_logs);
+        panic!("client did not become ready\n{}", snapshot);
+    }
+
+    if !wait_for_log(
+        &server_logs,
+        "idle gc: closing connection",
+        Duration::from_secs(5),
+    ) {
+        let snapshot = log_snapshot(&server_logs);
+        panic!("expected idle gc close log\n{}", snapshot);
+    }
+}

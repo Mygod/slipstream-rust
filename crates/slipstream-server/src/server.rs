@@ -456,6 +456,22 @@ fn collect_active_connections(quic: *mut picoquic_quic_t) -> HashMap<usize, *mut
     active
 }
 
+fn prune_and_collect_idle<T>(
+    last_seen: &mut HashMap<usize, Instant>,
+    active: &HashMap<usize, T>,
+    idle_timeout: Duration,
+    now: Instant,
+) -> Vec<usize> {
+    last_seen.retain(|cnx_id, _| active.contains_key(cnx_id));
+    let mut idle = Vec::new();
+    for (cnx_id, last) in last_seen.iter() {
+        if now.duration_since(*last) >= idle_timeout {
+            idle.push(*cnx_id);
+        }
+    }
+    idle
+}
+
 fn maybe_gc_idle_connections(
     quic: *mut picoquic_quic_t,
     state_ptr: *mut ServerState,
@@ -473,18 +489,11 @@ fn maybe_gc_idle_connections(
 
     let active = collect_active_connections(quic);
     if active.is_empty() {
-        last_seen.clear();
         *last_gc = now;
         return;
     }
 
-    last_seen.retain(|cnx_id, _| active.contains_key(cnx_id));
-    let mut idle = Vec::new();
-    for (cnx_id, last) in last_seen.iter() {
-        if now.duration_since(*last) >= idle_timeout {
-            idle.push(*cnx_id);
-        }
-    }
+    let idle = prune_and_collect_idle(last_seen, &active, idle_timeout, now);
 
     if idle.is_empty() {
         *last_gc = now;
@@ -495,6 +504,13 @@ fn maybe_gc_idle_connections(
     for cnx_id in idle {
         if let Some(&cnx) = active.get(&cnx_id) {
             remove_connection_streams(state, cnx_id);
+            if let Some(last) = last_seen.get(&cnx_id) {
+                tracing::debug!(
+                    "idle gc: closing connection cnx_id={} idle_for_ms={}",
+                    cnx_id,
+                    now.duration_since(*last).as_millis()
+                );
+            }
             unsafe {
                 picoquic_close_immediate(cnx);
             }
@@ -547,4 +563,31 @@ fn is_label_suffix(domain: &str, suffix: &str) -> bool {
         return false;
     }
     domain.as_bytes()[domain.len() - suffix.len() - 1] == b'.'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_and_collect_idle_prunes_and_collects() {
+        let now = Instant::now();
+        let idle_timeout = Duration::from_secs(10);
+        let mut last_seen = HashMap::new();
+        last_seen.insert(1, now - Duration::from_secs(11));
+        last_seen.insert(2, now - Duration::from_secs(5));
+        last_seen.insert(3, now - Duration::from_secs(12));
+
+        let mut active = HashMap::new();
+        active.insert(1, ());
+        active.insert(2, ());
+
+        let mut idle = prune_and_collect_idle(&mut last_seen, &active, idle_timeout, now);
+        idle.sort_unstable();
+
+        assert_eq!(idle, vec![1]);
+        assert!(last_seen.contains_key(&1));
+        assert!(last_seen.contains_key(&2));
+        assert!(!last_seen.contains_key(&3));
+    }
 }
