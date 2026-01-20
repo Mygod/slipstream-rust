@@ -369,7 +369,8 @@ fn decode_slot(
             rcode,
         }) => {
             let Some(question) = question else {
-                return Ok(DecodeSlotOutcome::DnsOnly);
+                // Treat empty-question queries (QDCOUNT=0) as non-DNS for fallback.
+                return Ok(DecodeSlotOutcome::Drop);
             };
             Ok(DecodeSlotOutcome::Slot(Slot {
                 peer,
@@ -499,6 +500,17 @@ mod tests {
         });
     }
 
+    fn build_empty_question_query() -> Vec<u8> {
+        let mut out = Vec::with_capacity(12);
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&0x0100u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out
+    }
+
     async fn recv_with_timeout(socket: &TokioUdpSocket, buf: &mut [u8]) -> (usize, SocketAddr) {
         timeout(Duration::from_secs(1), socket.recv_from(buf))
             .await
@@ -575,6 +587,64 @@ mod tests {
             .expect("fallback receive timeout")
             .expect("fallback receive");
         assert_eq!(echoed, dns_packet);
+
+        if let Some(manager) = fallback_mgr.as_mut() {
+            for session in manager.sessions.values() {
+                let _ = session.shutdown_tx.send(true);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_forwards_empty_question_query() {
+        let main_socket = Arc::new(TokioUdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let main_addr = main_socket.local_addr().unwrap();
+        let client_socket = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let fallback_socket = Arc::new(TokioUdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let fallback_addr = fallback_socket.local_addr().unwrap();
+        let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+        spawn_fallback_echo(fallback_socket, notify_tx);
+
+        let mut fallback_mgr = Some(FallbackManager::new(
+            main_socket.clone(),
+            fallback_addr,
+            false,
+        ));
+        let domains = vec!["example.com"];
+        let local_addr_storage = dummy_sockaddr_storage();
+        let context = PacketContext {
+            domains: &domains,
+            quic: std::ptr::null_mut(),
+            current_time: 0,
+            local_addr_storage: &local_addr_storage,
+        };
+
+        let qdcount_zero = build_empty_question_query();
+        client_socket
+            .send_to(&qdcount_zero, main_addr)
+            .await
+            .unwrap();
+        let mut recv_buf = [0u8; 64];
+        let (size, peer) = recv_with_timeout(&main_socket, &mut recv_buf).await;
+        let mut slots = Vec::new();
+        handle_packet(
+            &mut slots,
+            &recv_buf[..size],
+            peer,
+            &context,
+            &mut fallback_mgr,
+        )
+        .await
+        .unwrap();
+
+        let mut client_buf = [0u8; 64];
+        let (size, _) = recv_with_timeout(&client_socket, &mut client_buf).await;
+        assert_eq!(&client_buf[..size], qdcount_zero.as_slice());
+        let echoed = timeout(Duration::from_secs(1), notify_rx.recv())
+            .await
+            .expect("fallback receive timeout")
+            .expect("fallback receive");
+        assert_eq!(echoed, qdcount_zero);
 
         if let Some(manager) = fallback_mgr.as_mut() {
             for session in manager.sessions.values() {
