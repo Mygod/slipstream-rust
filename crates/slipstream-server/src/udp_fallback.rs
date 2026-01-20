@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket as TokioUdpSocket;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::server::{map_io, normalize_dual_stack_addr, ServerError, Slot};
 
@@ -26,6 +27,7 @@ struct FallbackSession {
     socket: Arc<TokioUdpSocket>,
     last_seen: Arc<Mutex<Instant>>,
     shutdown_tx: watch::Sender<bool>,
+    reply_task: JoinHandle<()>,
 }
 
 pub(crate) struct PacketContext<'a> {
@@ -145,6 +147,18 @@ impl FallbackManager {
     }
 
     async fn ensure_session(&mut self, peer: SocketAddr) -> Option<Arc<TokioUdpSocket>> {
+        let reset_session = self
+            .sessions
+            .get(&peer)
+            .map(|session| session.reply_task.is_finished())
+            .unwrap_or(false);
+        if reset_session {
+            self.sessions.remove(&peer);
+            tracing::debug!(
+                "fallback reply loop ended for {}; recreating session",
+                peer
+            );
+        }
         if !self.sessions.contains_key(&peer) {
             if let Err(err) = self.create_session(peer).await {
                 tracing::warn!("failed to create fallback session for {}: {}", peer, err);
@@ -175,7 +189,7 @@ impl FallbackManager {
         let main_socket = self.main_socket.clone();
         let last_seen_update = last_seen.clone();
         let map_ipv4_peers = self.map_ipv4_peers;
-        tokio::spawn(async move {
+        let reply_task = tokio::spawn(async move {
             forward_fallback_replies(
                 proxy_socket,
                 main_socket,
@@ -192,6 +206,7 @@ impl FallbackManager {
                 socket,
                 last_seen,
                 shutdown_tx,
+                reply_task,
             },
         );
         tracing::debug!("created fallback session for {}", peer);
