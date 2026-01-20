@@ -20,6 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=OPENSSL_SSL_LIBRARY");
     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_ROOT");
     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_INCLUDE");
+    println!("cargo:rerun-if-env-changed=RUST_ANDROID_GRADLE_CC");
+    println!("cargo:rerun-if-env-changed=RUST_ANDROID_GRADLE_AR");
+    println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=AR");
 
     let openssl_paths = resolve_openssl_paths();
     let target = env::var("TARGET").unwrap_or_default();
@@ -112,8 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !cfg!(feature = "openssl-vendored") {
-        println!("cargo:rustc-link-lib=dylib=ssl");
-        println!("cargo:rustc-link-lib=dylib=crypto");
+        if cfg!(feature = "openssl-static") {
+            println!("cargo:rustc-link-lib=static=ssl");
+            println!("cargo:rustc-link-lib=static=crypto");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=ssl");
+            println!("cargo:rustc-link-lib=dylib=crypto");
+        }
     }
 
     if !target.contains("android") {
