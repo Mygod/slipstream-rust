@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use crate::server::{map_io, normalize_dual_stack_addr, ServerError, Slot};
 
 pub(crate) const MAX_UDP_PACKET_SIZE: usize = 65535;
-const FALLBACK_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const FALLBACK_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 const FALLBACK_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
 enum DecodeSlotOutcome {
