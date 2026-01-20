@@ -58,6 +58,29 @@ jobs:
       - name: Run cargo audit
         run: cargo audit
 
+  rust-clippy-features:
+    name: Rust Clippy (features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out slipstream-rust
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libssl-dev python3
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust clippy (features)
+        env:
+          PICOQUIC_BUILD_DIR: .picoquic-build/minimal
+        run: cargo clippy -p slipstream-client -p slipstream-server --features openssl-vendored,picoquic-minimal-build -- -D warnings
+
   interop:
     name: Interop (${{ matrix.name }})
     runs-on: ubuntu-latest
