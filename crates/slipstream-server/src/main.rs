@@ -185,17 +185,22 @@ fn cli_provided(matches: &clap::ArgMatches, id: &str) -> bool {
 }
 
 fn parse_domains_from_options(options: &[sip003::Sip003Option]) -> Result<Vec<String>, String> {
-    let mut domains = Vec::new();
+    let mut domains = None;
     for option in options {
         if option.key == "domain" {
+            if domains.is_some() {
+                return Err("SIP003 domain option must not be repeated".to_string());
+            }
             let entries = sip003::split_list(&option.value).map_err(|err| err.to_string())?;
+            let mut parsed = Vec::new();
             for entry in entries {
                 let normalized = normalize_domain(&entry).map_err(|err| err.to_string())?;
-                domains.push(normalized);
+                parsed.push(normalized);
             }
+            domains = Some(parsed);
         }
     }
-    Ok(domains)
+    Ok(domains.unwrap_or_default())
 }
 
 fn last_option_value(options: &[sip003::Sip003Option], key: &str) -> Option<String> {

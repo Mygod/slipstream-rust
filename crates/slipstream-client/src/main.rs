@@ -285,17 +285,26 @@ fn has_cli_resolvers(matches: &clap::ArgMatches) -> bool {
 }
 
 fn parse_domain_option(options: &[sip003::Sip003Option]) -> Result<Option<String>, String> {
-    let mut last = None;
+    let mut domain = None;
+    let mut saw_domain = false;
     for option in options {
         if option.key == "domain" {
-            let entries = sip003::split_list(&option.value).map_err(|err| err.to_string())?;
-            for entry in entries {
-                let normalized = normalize_domain(&entry).map_err(|err| err.to_string())?;
-                last = Some(normalized);
+            if saw_domain {
+                return Err("SIP003 domain option must not be repeated".to_string());
             }
+            saw_domain = true;
+            let mut entries = sip003::split_list(&option.value).map_err(|err| err.to_string())?;
+            if entries.len() > 1 {
+                return Err("SIP003 domain option must contain a single value".to_string());
+            }
+            let entry = entries
+                .pop()
+                .ok_or_else(|| "SIP003 domain option must contain a single value".to_string())?;
+            let normalized = normalize_domain(&entry).map_err(|err| err.to_string())?;
+            domain = Some(normalized);
         }
     }
-    Ok(last)
+    Ok(domain)
 }
 
 struct ResolverOptions {
@@ -453,7 +462,19 @@ mod tests {
     }
 
     #[test]
-    fn plugin_domain_last_wins() {
+    fn plugin_domain_single_entry() {
+        let options = vec![sip003::Sip003Option {
+            key: "domain".to_string(),
+            value: "example.com".to_string(),
+        }];
+        let domain = parse_domain_option(&options)
+            .expect("options should parse")
+            .expect("domain should exist");
+        assert_eq!(domain, "example.com");
+    }
+
+    #[test]
+    fn plugin_domain_rejects_repeated_option() {
         let options = vec![
             sip003::Sip003Option {
                 key: "domain".to_string(),
@@ -464,10 +485,16 @@ mod tests {
                 value: "example.net".to_string(),
             },
         ];
-        let domain = parse_domain_option(&options)
-            .expect("options should parse")
-            .expect("domain should exist");
-        assert_eq!(domain, "example.net");
+        assert!(parse_domain_option(&options).is_err());
+    }
+
+    #[test]
+    fn plugin_domain_rejects_multiple_entries() {
+        let options = vec![sip003::Sip003Option {
+            key: "domain".to_string(),
+            value: "example.com,example.net".to_string(),
+        }];
+        assert!(parse_domain_option(&options).is_err());
     }
 
     #[test]
