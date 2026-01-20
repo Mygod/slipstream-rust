@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use openssl_sys as _;
 use slipstream_core::HostPort;
 
 pub mod picoquic;
