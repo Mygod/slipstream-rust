@@ -47,16 +47,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let openssl_paths = resolve_openssl_paths();
     let target = env::var("TARGET").unwrap_or_default();
     let auto_build = env_flag("PICOQUIC_AUTO_BUILD", true);
-    let explicit_picoquic_paths = env::var_os("PICOQUIC_DIR").is_some()
-        || env::var_os("PICOQUIC_BUILD_DIR").is_some()
-        || env::var_os("PICOQUIC_INCLUDE_DIR").is_some()
-        || env::var_os("PICOQUIC_LIB_DIR").is_some();
+    let explicit_picoquic_include = env::var_os("PICOQUIC_INCLUDE_DIR").is_some();
+    let explicit_picoquic_lib = env::var_os("PICOQUIC_LIB_DIR").is_some();
+    let explicit_picoquic_include_lib = explicit_picoquic_include || explicit_picoquic_lib;
     let mut picoquic_include_dir = locate_picoquic_include_dir();
     let mut picoquic_lib_dir = locate_picoquic_lib_dir();
     let mut picotls_include_dir = locate_picotls_include_dir();
 
     if auto_build
-        && !explicit_picoquic_paths
+        && !explicit_picoquic_include_lib
         && (picoquic_include_dir.is_none() || picoquic_lib_dir.is_none())
     {
         build_picoquic(&openssl_paths, &target)?;
@@ -65,17 +64,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         picotls_include_dir = locate_picotls_include_dir();
     }
 
-    if explicit_picoquic_paths {
+    if explicit_picoquic_include_lib {
         if picoquic_include_dir.is_none() {
             return Err(
-                "Explicit picoquic paths set; missing headers. Set PICOQUIC_INCLUDE_DIR to match your libs."
-                    .into(),
+                "Explicit PICOQUIC_INCLUDE_DIR/PICOQUIC_LIB_DIR set; missing headers. Set PICOQUIC_INCLUDE_DIR to match your libs."
+                .into(),
             );
         }
         if picoquic_lib_dir.is_none() {
             return Err(
-                "Explicit picoquic paths set; missing libs. Set PICOQUIC_LIB_DIR or PICOQUIC_BUILD_DIR to match your headers."
-                    .into(),
+                "Explicit PICOQUIC_INCLUDE_DIR/PICOQUIC_LIB_DIR set; missing libs. Set PICOQUIC_LIB_DIR to match your headers."
+                .into(),
             );
         }
     }
