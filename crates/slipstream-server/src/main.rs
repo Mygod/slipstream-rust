@@ -197,7 +197,7 @@ fn parse_target_address(input: &str) -> Result<HostPort, String> {
 fn parse_fallback_address(input: &str) -> Result<HostPort, String> {
     let parsed = parse_host_port(input, 0, AddressKind::Fallback).map_err(|err| err.to_string())?;
     if parsed.port == 0 {
-        return Err("Fallback address must include a port".to_string());
+        return Err("fallback address must include a port".to_string());
     }
     Ok(parsed)
 }

@@ -194,6 +194,11 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let udp_local_addr = udp.local_addr().map_err(map_io)?;
     let map_ipv4_peers = matches!(udp_local_addr, SocketAddr::V6(_));
     let local_addr_storage = socket_addr_to_storage(udp_local_addr);
+    if let Some(addr) = fallback_addr {
+        if addr == udp_local_addr {
+            tracing::warn!("Fallback address matches DNS listen address; non-DNS packets may loop");
+        }
+    }
     let mut fallback_mgr =
         fallback_addr.map(|addr| FallbackManager::new(udp.clone(), addr, map_ipv4_peers));
     warn_overlapping_domains(&config.domains);

@@ -76,6 +76,10 @@ impl FallbackManager {
             let last_seen = match session.last_seen.lock() {
                 Ok(last_seen) => *last_seen,
                 Err(_) => {
+                    tracing::warn!(
+                        "fallback session for {} has poisoned mutex, marking for cleanup",
+                        peer
+                    );
                     expired.push(*peer);
                     continue;
                 }
