@@ -70,7 +70,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let tcp_host = config.tcp_listen_host;
     let tcp_port = config.tcp_listen_port;
     let mut bound_host = tcp_host.to_string();
-    let listener = match bind_tcp_listener(tcp_host, tcp_port) {
+    let listener = match bind_tcp_listener(tcp_host, tcp_port).await {
         Ok(listener) => listener,
         Err(err) => {
             if is_ipv6_unspecified(tcp_host) {
@@ -78,7 +78,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     "Failed to bind TCP listener on {}:{} ({}); falling back to 0.0.0.0",
                     tcp_host, tcp_port, err
                 );
-                match bind_tcp_listener("0.0.0.0", tcp_port) {
+                match bind_tcp_listener("0.0.0.0", tcp_port).await {
                     Ok(listener) => {
                         bound_host = "0.0.0.0".to_string();
                         listener

@@ -11,11 +11,11 @@ use slipstream_ffi::{configure_quic_with_custom, socket_addr_to_storage, QuicGua
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::ffi::CString;
 use std::fmt;
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket as TokioUdpSocket;
+use tokio::net::{lookup_host, UdpSocket as TokioUdpSocket};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
@@ -412,7 +412,7 @@ fn decode_slot(
 }
 
 async fn bind_udp_socket(host: &str, port: u16) -> Result<TokioUdpSocket, ServerError> {
-    let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs().map_err(map_io)?.collect();
+    let addrs: Vec<SocketAddr> = lookup_host((host, port)).await.map_err(map_io)?.collect();
     if addrs.is_empty() {
         return Err(ServerError::new(format!(
             "No addresses resolved for {}:{}",

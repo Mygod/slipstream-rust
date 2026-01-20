@@ -1,7 +1,7 @@
 use crate::error::ClientError;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs};
-use tokio::net::{TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
+use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+use tokio::net::{lookup_host, TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
 use tracing::warn;
 
 pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
@@ -24,8 +24,11 @@ pub(crate) async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {
     bind_udp_socket_addr(bind_addr)
 }
 
-pub(crate) fn bind_tcp_listener(host: &str, port: u16) -> Result<TokioTcpListener, ClientError> {
-    let addrs: Vec<SocketAddr> = (host, port).to_socket_addrs().map_err(map_io)?.collect();
+pub(crate) async fn bind_tcp_listener(
+    host: &str,
+    port: u16,
+) -> Result<TokioTcpListener, ClientError> {
+    let addrs: Vec<SocketAddr> = lookup_host((host, port)).await.map_err(map_io)?.collect();
     if addrs.is_empty() {
         return Err(ClientError::new(format!(
             "No addresses resolved for {}:{}",
