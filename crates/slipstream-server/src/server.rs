@@ -303,8 +303,8 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         }
 
         let now = Instant::now();
-        note_active_connections(&mut last_seen, &slots, now);
         if idle_timeout != Duration::ZERO {
+            note_active_connections(&mut last_seen, &slots, now);
             maybe_gc_idle_connections(
                 quic,
                 state_ptr,
@@ -489,6 +489,7 @@ fn maybe_gc_idle_connections(
 
     let active = collect_active_connections(quic);
     if active.is_empty() {
+        last_seen.clear();
         *last_gc = now;
         return;
     }
