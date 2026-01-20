@@ -366,7 +366,8 @@ fn build_picoquic(
         command.env("OPENSSL_ROOT_DIR", root);
         command.env("OPENSSL_DIR", root);
     }
-    if cfg!(feature = "openssl-static") {
+    let prefer_static_openssl = cfg!(feature = "openssl-static");
+    if prefer_static_openssl {
         command.env("OPENSSL_USE_STATIC_LIBS", "TRUE");
     }
     if let Some(include) = &openssl_paths.include {
@@ -374,10 +375,20 @@ fn build_picoquic(
     }
     if let Some(lib) = &openssl_paths.lib {
         command.env("OPENSSL_LIB_DIR", lib);
-        if let Some(crypto) = resolve_openssl_library(lib, &["libcrypto.a", "libcrypto.so"]) {
+        let crypto_names = if prefer_static_openssl {
+            ["libcrypto.a", "libcrypto.so"]
+        } else {
+            ["libcrypto.so", "libcrypto.a"]
+        };
+        if let Some(crypto) = resolve_openssl_library(lib, &crypto_names) {
             command.env("OPENSSL_CRYPTO_LIBRARY", crypto);
         }
-        if let Some(ssl) = resolve_openssl_library(lib, &["libssl.a", "libssl.so"]) {
+        let ssl_names = if prefer_static_openssl {
+            ["libssl.a", "libssl.so"]
+        } else {
+            ["libssl.so", "libssl.a"]
+        };
+        if let Some(ssl) = resolve_openssl_library(lib, &ssl_names) {
             command.env("OPENSSL_SSL_LIBRARY", ssl);
         }
     }
