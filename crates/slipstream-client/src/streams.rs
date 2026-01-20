@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{debug, info, warn};
 
 const STREAM_READ_CHUNK_BYTES: usize = 4096;
@@ -70,7 +70,10 @@ impl ClientState {
 
     pub(crate) fn reset_for_reconnect(&mut self) {
         let debug_streams = self.debug_streams;
-        for (stream_id, stream) in self.streams.drain() {
+        for (stream_id, mut stream) in self.streams.drain() {
+            if let Some(read_abort_tx) = stream.read_abort_tx.take() {
+                let _ = read_abort_tx.send(());
+            }
             let _ = stream.write_tx.send(StreamWrite::Fin);
             if debug_streams {
                 debug!("stream {}: closing due to reconnect", stream_id);
@@ -86,6 +89,7 @@ impl ClientState {
 
 struct ClientStream {
     write_tx: mpsc::UnboundedSender<StreamWrite>,
+    read_abort_tx: Option<oneshot::Sender<()>>,
     data_rx: Option<mpsc::Receiver<Vec<u8>>>,
     queued_bytes: usize,
     rx_bytes: u64,
@@ -380,9 +384,11 @@ pub(crate) fn handle_command(
             let (read_half, write_half) = stream.into_split();
             let (write_tx, write_rx) = mpsc::unbounded_channel();
             let command_tx = state.command_tx.clone();
+            let (read_abort_tx, read_abort_rx) = oneshot::channel();
             spawn_client_reader(
                 stream_id,
                 read_half,
+                read_abort_rx,
                 command_tx.clone(),
                 data_tx,
                 data_notify,
@@ -398,6 +404,7 @@ pub(crate) fn handle_command(
                 stream_id,
                 ClientStream {
                     write_tx,
+                    read_abort_tx: Some(read_abort_tx),
                     data_rx: Some(data_rx),
                     queued_bytes: 0,
                     rx_bytes: 0,
@@ -513,6 +520,7 @@ pub(crate) fn handle_command(
 fn spawn_client_reader(
     stream_id: u64,
     mut read_half: tokio::net::tcp::OwnedReadHalf,
+    mut read_abort_rx: oneshot::Receiver<()>,
     command_tx: mpsc::UnboundedSender<Command>,
     data_tx: mpsc::Sender<Vec<u8>>,
     data_notify: Arc<Notify>,
@@ -520,23 +528,30 @@ fn spawn_client_reader(
     tokio::spawn(async move {
         let mut buf = vec![0u8; STREAM_READ_CHUNK_BYTES];
         loop {
-            match read_half.read(&mut buf).await {
-                Ok(0) => {
+            tokio::select! {
+                _ = &mut read_abort_rx => {
                     break;
                 }
-                Ok(n) => {
-                    let data = buf[..n].to_vec();
-                    if data_tx.send(data).await.is_err() {
-                        break;
+                read_result = read_half.read(&mut buf) => {
+                    match read_result {
+                        Ok(0) => {
+                            break;
+                        }
+                        Ok(n) => {
+                            let data = buf[..n].to_vec();
+                            if data_tx.send(data).await.is_err() {
+                                break;
+                            }
+                            data_notify.notify_one();
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                            continue;
+                        }
+                        Err(_) => {
+                            let _ = command_tx.send(Command::StreamReadError { stream_id });
+                            break;
+                        }
                     }
-                    data_notify.notify_one();
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
-                    continue;
-                }
-                Err(_) => {
-                    let _ = command_tx.send(Command::StreamReadError { stream_id });
-                    break;
                 }
             }
         }

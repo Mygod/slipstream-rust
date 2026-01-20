@@ -563,7 +563,14 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             "Connection closed; reconnecting in {}ms",
             reconnect_delay.as_millis()
         );
-        sleep(reconnect_delay).await;
+        // Sleep in small chunks and drop commands that arrive while disconnected.
+        let mut remaining_sleep = reconnect_delay;
+        while remaining_sleep > Duration::ZERO {
+            let chunk = remaining_sleep.min(Duration::from_millis(100));
+            sleep(chunk).await;
+            remaining_sleep -= chunk;
+            let _ = drain_disconnected_commands(&mut command_rx);
+        }
         reconnect_delay = (reconnect_delay * 2).min(Duration::from_millis(RECONNECT_SLEEP_MAX_MS));
     }
 }
