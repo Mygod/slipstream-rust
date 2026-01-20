@@ -22,13 +22,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_INCLUDE");
 
     let openssl_paths = resolve_openssl_paths();
+    let target = env::var("TARGET").unwrap_or_default();
     let auto_build = env_flag("PICOQUIC_AUTO_BUILD", true);
     let mut picoquic_include_dir = locate_picoquic_include_dir();
     let mut picoquic_lib_dir = locate_picoquic_lib_dir();
     let mut picotls_include_dir = locate_picotls_include_dir();
 
     if auto_build && (picoquic_include_dir.is_none() || picoquic_lib_dir.is_none()) {
-        build_picoquic(&openssl_paths)?;
+        build_picoquic(&openssl_paths, &target)?;
         picoquic_include_dir = locate_picoquic_include_dir();
         picoquic_lib_dir = locate_picoquic_lib_dir();
         picotls_include_dir = locate_picotls_include_dir();
@@ -44,8 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Missing picotls headers; set PICOTLS_INCLUDE_DIR or build picoquic with PICOQUIC_FETCH_PTLS=ON.",
     )?;
 
-    let cc = resolve_cc();
-    let ar = resolve_ar(&cc);
+    let cc = resolve_cc(&target);
+    let ar = resolve_ar(&target, &cc);
     let mut object_paths = Vec::with_capacity(1);
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
@@ -110,7 +111,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
 
-    let target = env::var("TARGET").unwrap_or_default();
     if !target.contains("android") {
         println!("cargo:rustc-link-lib=dylib=pthread");
     } else {
@@ -310,7 +310,10 @@ fn openssl_lib_dir(root: &Path) -> Option<PathBuf> {
     None
 }
 
-fn build_picoquic(openssl_paths: &OpenSslPaths) -> Result<(), Box<dyn std::error::Error>> {
+fn build_picoquic(
+    openssl_paths: &OpenSslPaths,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = locate_repo_root().ok_or("Could not locate repository root for picoquic build")?;
     let script = root.join("scripts").join("build_picoquic.sh");
     if !script.exists() {
@@ -330,14 +333,16 @@ fn build_picoquic(openssl_paths: &OpenSslPaths) -> Result<(), Box<dyn std::error
     command
         .env("PICOQUIC_DIR", picoquic_dir)
         .env("PICOQUIC_BUILD_DIR", build_dir);
-    if let Ok(value) = env::var("ANDROID_NDK_HOME") {
-        command.env("ANDROID_NDK_HOME", value);
-    }
-    if let Ok(value) = env::var("ANDROID_ABI") {
-        command.env("ANDROID_ABI", value);
-    }
-    if let Ok(value) = env::var("ANDROID_PLATFORM") {
-        command.env("ANDROID_PLATFORM", value);
+    if target.contains("android") {
+        if let Ok(value) = env::var("ANDROID_NDK_HOME") {
+            command.env("ANDROID_NDK_HOME", value);
+        }
+        if let Ok(value) = env::var("ANDROID_ABI") {
+            command.env("ANDROID_ABI", value);
+        }
+        if let Ok(value) = env::var("ANDROID_PLATFORM") {
+            command.env("ANDROID_PLATFORM", value);
+        }
     }
     if cfg!(feature = "picoquic-minimal-build") {
         command.env("PICOQUIC_MINIMAL_BUILD", "1");
@@ -603,15 +608,21 @@ fn find_lib_variant<'a>(dir: &Path, underscored: &'a str, hyphenated: &'a str) -
     None
 }
 
-fn resolve_cc() -> String {
-    env::var("RUST_ANDROID_GRADLE_CC")
-        .or_else(|_| env::var("CC"))
-        .unwrap_or_else(|_| "cc".to_string())
+fn resolve_cc(target: &str) -> String {
+    if target.contains("android") {
+        env::var("RUST_ANDROID_GRADLE_CC")
+            .or_else(|_| env::var("CC"))
+            .unwrap_or_else(|_| "cc".to_string())
+    } else {
+        env::var("CC").unwrap_or_else(|_| "cc".to_string())
+    }
 }
 
-fn resolve_ar(cc: &str) -> String {
-    if let Ok(ar) = env::var("RUST_ANDROID_GRADLE_AR") {
-        return ar;
+fn resolve_ar(target: &str, cc: &str) -> String {
+    if target.contains("android") {
+        if let Ok(ar) = env::var("RUST_ANDROID_GRADLE_AR") {
+            return ar;
+        }
     }
     if let Ok(ar) = env::var("AR") {
         return ar;
