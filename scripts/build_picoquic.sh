@@ -49,6 +49,10 @@ if [[ -n "${ANDROID_REQUESTED}" ]]; then
     exit 1
   fi
   TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake"
+  if [[ ! -f "${TOOLCHAIN_FILE}" ]]; then
+    echo "Android NDK toolchain file not found at ${TOOLCHAIN_FILE}" >&2
+    exit 1
+  fi
   CMAKE_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE}")
   CMAKE_ARGS+=("-DPTLS_WITH_FUSION=OFF")
   CMAKE_ARGS+=("-DWITH_FUSION=OFF")

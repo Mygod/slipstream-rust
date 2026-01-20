@@ -20,6 +20,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=OPENSSL_SSL_LIBRARY");
     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_ROOT");
     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_INCLUDE");
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+    println!("cargo:rerun-if-env-changed=ANDROID_ABI");
+    println!("cargo:rerun-if-env-changed=ANDROID_PLATFORM");
     println!("cargo:rerun-if-env-changed=RUST_ANDROID_GRADLE_CC");
     println!("cargo:rerun-if-env-changed=RUST_ANDROID_GRADLE_AR");
     println!("cargo:rerun-if-env-changed=CC");
