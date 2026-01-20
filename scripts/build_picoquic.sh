@@ -34,7 +34,20 @@ if [[ -n "${PICOQUIC_MINIMAL_BUILD:-}" ]]; then
   esac
 fi
 
-if [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
+ANDROID_REQUESTED=""
+if [[ -n "${PICOQUIC_ANDROID:-}" ]]; then
+  ANDROID_REQUESTED=1
+elif [[ -n "${PICOQUIC_TARGET:-}" && "${PICOQUIC_TARGET}" == *android* ]]; then
+  ANDROID_REQUESTED=1
+elif [[ -n "${TARGET:-}" && "${TARGET}" == *android* ]]; then
+  ANDROID_REQUESTED=1
+fi
+
+if [[ -n "${ANDROID_REQUESTED}" ]]; then
+  if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
+    echo "ANDROID_NDK_HOME must be set when building for Android." >&2
+    exit 1
+  fi
   TOOLCHAIN_FILE="${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake"
   CMAKE_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_FILE}")
   CMAKE_ARGS+=("-DPTLS_WITH_FUSION=OFF")

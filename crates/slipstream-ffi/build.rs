@@ -111,6 +111,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
 
+    if !cfg!(feature = "openssl-vendored") {
+        println!("cargo:rustc-link-lib=dylib=ssl");
+        println!("cargo:rustc-link-lib=dylib=crypto");
+    }
+
     if !target.contains("android") {
         println!("cargo:rustc-link-lib=dylib=pthread");
     } else {
@@ -332,7 +337,8 @@ fn build_picoquic(
     let mut command = Command::new(script);
     command
         .env("PICOQUIC_DIR", picoquic_dir)
-        .env("PICOQUIC_BUILD_DIR", build_dir);
+        .env("PICOQUIC_BUILD_DIR", build_dir)
+        .env("PICOQUIC_TARGET", target);
     if target.contains("android") {
         if let Ok(value) = env::var("ANDROID_NDK_HOME") {
             command.env("ANDROID_NDK_HOME", value);
