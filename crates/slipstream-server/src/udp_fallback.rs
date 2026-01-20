@@ -133,7 +133,6 @@ impl FallbackManager {
     }
 
     fn is_active_fallback_peer(&mut self, peer: SocketAddr) -> bool {
-        let now = Instant::now();
         let mut should_end = false;
         let last_seen = match self.sessions.get(&peer) {
             Some(session) => match session.last_seen.lock() {
@@ -144,13 +143,19 @@ impl FallbackManager {
                         peer
                     );
                     should_end = true;
-                    now
+                    Instant::now()
                 }
             },
             None => return false,
         };
 
-        if should_end || now.duration_since(last_seen) > FALLBACK_IDLE_TIMEOUT {
+        if should_end {
+            self.end_session(peer);
+            return false;
+        }
+
+        let now = Instant::now();
+        if now.duration_since(last_seen) > FALLBACK_IDLE_TIMEOUT {
             self.end_session(peer);
             return false;
         }
