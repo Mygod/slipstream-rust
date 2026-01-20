@@ -45,6 +45,7 @@ impl std::error::Error for ConfigError {}
 pub enum AddressKind {
     Resolver,
     Target,
+    Fallback,
 }
 
 impl AddressKind {
@@ -52,6 +53,7 @@ impl AddressKind {
         match self {
             AddressKind::Resolver => "resolver",
             AddressKind::Target => "target",
+            AddressKind::Fallback => "fallback",
         }
     }
 }
