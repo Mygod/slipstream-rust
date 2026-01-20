@@ -11,21 +11,32 @@ pub(crate) struct OpenSslPaths {
 }
 
 pub(crate) fn resolve_openssl_paths() -> OpenSslPaths {
-    let root = env::var("OPENSSL_ROOT_DIR")
-        .or_else(|_| env::var("OPENSSL_DIR"))
-        .or_else(|_| env::var("DEP_OPENSSL_ROOT"))
-        .ok()
-        .map(PathBuf::from);
-    let include = env::var("OPENSSL_INCLUDE_DIR")
-        .or_else(|_| env::var("DEP_OPENSSL_INCLUDE"))
-        .ok()
-        .map(PathBuf::from);
-    let lib = env::var("OPENSSL_LIB_DIR").ok().map(PathBuf::from);
+    let allow_env_overrides =
+        !cfg!(feature = "openssl-vendored") || env::var_os("OPENSSL_NO_VENDOR").is_some();
+    let mut root = None;
+    let mut include = None;
+    let mut lib = None;
+
+    if allow_env_overrides {
+        root = env::var("OPENSSL_ROOT_DIR")
+            .or_else(|_| env::var("OPENSSL_DIR"))
+            .ok()
+            .map(PathBuf::from);
+        include = env::var("OPENSSL_INCLUDE_DIR").ok().map(PathBuf::from);
+        lib = env::var("OPENSSL_LIB_DIR").ok().map(PathBuf::from);
+    }
+
+    if root.is_none() {
+        root = env::var("DEP_OPENSSL_ROOT").ok().map(PathBuf::from);
+    }
+    if include.is_none() {
+        include = env::var("DEP_OPENSSL_INCLUDE").ok().map(PathBuf::from);
+    }
 
     if root.is_some() || include.is_some() || lib.is_some() {
         let lib = lib.or_else(|| root.as_ref().and_then(|root| openssl_lib_dir(root)));
         let mut resolved = OpenSslPaths { root, include, lib };
-        if cfg!(feature = "openssl-vendored") {
+        if cfg!(feature = "openssl-vendored") && !allow_env_overrides {
             if let (Some(target), Some(root)) = (env::var("TARGET").ok(), resolved.root.as_ref()) {
                 let root_str = root.to_string_lossy();
                 if !root_str.contains(&target) {
