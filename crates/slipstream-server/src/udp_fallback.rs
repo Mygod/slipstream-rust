@@ -35,6 +35,17 @@ pub(crate) struct PacketContext<'a> {
     pub(crate) local_addr_storage: &'a libc::sockaddr_storage,
 }
 
+/// Tracks per-peer routing for UDP fallback based on DNS decoding outcomes.
+///
+/// Peers are classified by their first packet:
+/// - If a packet decodes as a DNS query for the configured domains (including
+///   DNS error replies we generate), the peer is treated as DNS-only and any
+///   later non-DNS packets from that address are dropped.
+/// - If a packet fails DNS decoding and is dropped, the peer is treated as a
+///   fallback peer and all subsequent packets from that address (DNS or not)
+///   are forwarded to the fallback endpoint.
+///
+/// Classification is per source address and expires after idle timeout.
 pub(crate) struct FallbackManager {
     fallback_addr: SocketAddr,
     main_socket: Arc<TokioUdpSocket>,

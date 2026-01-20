@@ -196,7 +196,11 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let local_addr_storage = socket_addr_to_storage(udp_local_addr);
     if let Some(addr) = fallback_addr {
         if addr == udp_local_addr {
-            tracing::warn!("Fallback address matches DNS listen address; non-DNS packets may loop");
+            tracing::warn!(
+                "Fallback address matches DNS listen address ({}); non-DNS packets will loop. \
+                 Configure a different fallback address.",
+                addr
+            );
         }
     }
     let mut fallback_mgr =
