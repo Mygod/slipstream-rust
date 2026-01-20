@@ -160,12 +160,12 @@ if ! wait_for_log "${LOG_DIR}/client.log" "Listening on TCP port" 5; then
   exit 1
 fi
 
-TCP_HOST="${TCP_HOST}" TCP_PORT="${TCP_PORT}" python3 - <<'PY'
+TCP_PORT="${TCP_PORT}" python3 - <<'PY'
 import os
 import socket
 import time
 
-host = os.environ.get("TCP_HOST", "127.0.0.1")
+host = "127.0.0.1"
 port = int(os.environ["TCP_PORT"])
 s = socket.socket()
 s.settimeout(1)
