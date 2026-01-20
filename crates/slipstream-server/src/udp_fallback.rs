@@ -107,10 +107,14 @@ impl FallbackManager {
         }
 
         for peer in expired {
-            if let Some(session) = self.sessions.remove(&peer) {
-                let _ = session.shutdown_tx.send(true);
-                tracing::debug!("ending fallback session for {}", peer);
-            }
+            self.end_session(peer);
+        }
+    }
+
+    fn end_session(&mut self, peer: SocketAddr) {
+        if let Some(session) = self.sessions.remove(&peer) {
+            let _ = session.shutdown_tx.send(true);
+            tracing::debug!("ending fallback session for {}", peer);
         }
     }
 
@@ -128,8 +132,30 @@ impl FallbackManager {
             });
     }
 
-    fn is_fallback_peer(&self, peer: SocketAddr) -> bool {
-        self.sessions.contains_key(&peer)
+    fn is_active_fallback_peer(&mut self, peer: SocketAddr) -> bool {
+        let now = Instant::now();
+        let mut should_end = false;
+        let last_seen = match self.sessions.get(&peer) {
+            Some(session) => match session.last_seen.lock() {
+                Ok(last_seen) => *last_seen,
+                Err(_) => {
+                    tracing::warn!(
+                        "fallback session for {} has poisoned mutex, marking for cleanup",
+                        peer
+                    );
+                    should_end = true;
+                    now
+                }
+            },
+            None => return false,
+        };
+
+        if should_end || now.duration_since(last_seen) > FALLBACK_IDLE_TIMEOUT {
+            self.end_session(peer);
+            return false;
+        }
+
+        true
     }
 
     async fn forward_existing(&mut self, packet: &[u8], peer: SocketAddr) {
@@ -246,7 +272,7 @@ pub(crate) async fn handle_packet(
     fallback_mgr: &mut Option<FallbackManager>,
 ) -> Result<(), ServerError> {
     if let Some(manager) = fallback_mgr.as_mut() {
-        if manager.is_fallback_peer(peer) {
+        if manager.is_active_fallback_peer(peer) {
             manager.forward_existing(packet, peer).await;
             return Ok(());
         }
@@ -631,6 +657,87 @@ mod tests {
             .expect("fallback receive timeout")
             .expect("fallback receive");
         assert_eq!(echoed, non_dns);
+
+        if let Some(manager) = fallback_mgr.as_mut() {
+            for session in manager.sessions.values() {
+                let _ = session.shutdown_tx.send(true);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_session_expires_before_forwarding() {
+        let main_socket = Arc::new(TokioUdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let main_addr = main_socket.local_addr().unwrap();
+        let client_socket = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let fallback_socket = Arc::new(TokioUdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let fallback_addr = fallback_socket.local_addr().unwrap();
+        let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
+        spawn_fallback_echo(fallback_socket, notify_tx);
+
+        let mut fallback_mgr = Some(FallbackManager::new(
+            main_socket.clone(),
+            fallback_addr,
+            false,
+        ));
+        let domains = vec!["example.com"];
+        let local_addr_storage = dummy_sockaddr_storage();
+        let context = PacketContext {
+            domains: &domains,
+            quic: std::ptr::null_mut(),
+            current_time: 0,
+            local_addr_storage: &local_addr_storage,
+        };
+
+        let non_dns = b"nope";
+        client_socket.send_to(non_dns, main_addr).await.unwrap();
+        let mut recv_buf = [0u8; 64];
+        let (size, peer) = recv_with_timeout(&main_socket, &mut recv_buf).await;
+        let mut slots = Vec::new();
+        handle_packet(
+            &mut slots,
+            &recv_buf[..size],
+            peer,
+            &context,
+            &mut fallback_mgr,
+        )
+        .await
+        .unwrap();
+
+        let echoed = timeout(Duration::from_secs(1), notify_rx.recv())
+            .await
+            .expect("fallback receive timeout")
+            .expect("fallback receive");
+        assert_eq!(echoed, non_dns);
+
+        if let Some(manager) = fallback_mgr.as_mut() {
+            if let Some(session) = manager.sessions.get(&peer) {
+                if let Ok(mut last_seen) = session.last_seen.lock() {
+                    *last_seen = Instant::now() - FALLBACK_IDLE_TIMEOUT - Duration::from_secs(1);
+                }
+            }
+        }
+
+        let dns_packet = build_dns_query("example.com");
+        client_socket.send_to(&dns_packet, main_addr).await.unwrap();
+        let (size, peer) = recv_with_timeout(&main_socket, &mut recv_buf).await;
+        let mut slots = Vec::new();
+        handle_packet(
+            &mut slots,
+            &recv_buf[..size],
+            peer,
+            &context,
+            &mut fallback_mgr,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            timeout(Duration::from_millis(200), notify_rx.recv())
+                .await
+                .is_err(),
+            "fallback endpoint should not see DNS query after idle"
+        );
 
         if let Some(manager) = fallback_mgr.as_mut() {
             for session in manager.sessions.values() {
