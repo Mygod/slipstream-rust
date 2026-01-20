@@ -64,16 +64,6 @@ pub(crate) fn resolve_openssl_paths() -> OpenSslPaths {
     }
 }
 
-pub(crate) fn resolve_openssl_library(lib_dir: &Path, names: &[&str]) -> Option<PathBuf> {
-    for name in names {
-        let candidate = lib_dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 fn resolve_openssl_from_build_output() -> Option<OpenSslPaths> {
     let mut build_dirs = candidate_build_dirs();
     if let Some(dir) = locate_cargo_build_dir() {

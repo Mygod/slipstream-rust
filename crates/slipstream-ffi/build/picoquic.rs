@@ -1,4 +1,4 @@
-use crate::openssl::{resolve_openssl_library, OpenSslPaths};
+use crate::openssl::OpenSslPaths;
 use crate::util::locate_repo_root;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -60,22 +60,6 @@ pub(crate) fn build_picoquic(
     }
     if let Some(lib) = &openssl_paths.lib {
         command.env("OPENSSL_LIB_DIR", lib);
-        let crypto_names = if prefer_static_openssl {
-            ["libcrypto.a", "libcrypto.so"]
-        } else {
-            ["libcrypto.so", "libcrypto.a"]
-        };
-        if let Some(crypto) = resolve_openssl_library(lib, &crypto_names) {
-            command.env("OPENSSL_CRYPTO_LIBRARY", crypto);
-        }
-        let ssl_names = if prefer_static_openssl {
-            ["libssl.a", "libssl.so"]
-        } else {
-            ["libssl.so", "libssl.a"]
-        };
-        if let Some(ssl) = resolve_openssl_library(lib, &ssl_names) {
-            command.env("OPENSSL_SSL_LIBRARY", ssl);
-        }
     }
     let status = command.status()?;
     if !status.success() {
