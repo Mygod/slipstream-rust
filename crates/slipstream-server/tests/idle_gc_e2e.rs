@@ -4,8 +4,9 @@ use std::thread;
 use std::time::Duration;
 
 use support::{
-    ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, server_bin_path, spawn_client,
-    spawn_server, wait_for_log, workspace_root, ClientArgs, ServerArgs,
+    ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, poke_client_with_payload,
+    server_bin_path, spawn_client, spawn_server, wait_for_log, workspace_root, ClientArgs,
+    ServerArgs,
 };
 
 #[test]
@@ -86,5 +87,15 @@ fn idle_gc_closes_connection() {
     ) {
         let snapshot = log_snapshot(&server_logs);
         panic!("expected idle gc close log\n{}", snapshot);
+    }
+
+    let payload = [0u8; 128];
+    if !poke_client_with_payload(tcp_port, Duration::from_secs(2), &payload) {
+        let snapshot = log_snapshot(&client_logs);
+        panic!("client did not accept TCP connection\n{}", snapshot);
+    }
+    if !wait_for_log(&client_logs, "stateless_reset", Duration::from_secs(5)) {
+        let snapshot = log_snapshot(&client_logs);
+        panic!("expected stateless reset close\n{}", snapshot);
     }
 }

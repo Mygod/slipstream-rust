@@ -180,13 +180,17 @@ pub fn wait_for_log(logs: &LogCapture, needle: &str, timeout: Duration) -> bool 
 }
 
 pub fn poke_client(port: u16, timeout: Duration) -> bool {
+    poke_client_with_payload(port, timeout, b"ping")
+}
+
+pub fn poke_client_with_payload(port: u16, timeout: Duration, payload: &[u8]) -> bool {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
             Ok(mut stream) => {
                 let _ = stream.set_nodelay(true);
-                let _ = stream.write_all(b"ping");
+                let _ = stream.write_all(payload);
                 return true;
             }
             Err(err)

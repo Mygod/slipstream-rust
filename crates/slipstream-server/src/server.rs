@@ -2,7 +2,7 @@ use crate::udp_fallback::{handle_packet, FallbackManager, PacketContext, MAX_UDP
 use slipstream_core::{net::is_transient_udp_error, resolve_host_port, HostPort};
 use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
 use slipstream_ffi::picoquic::{
-    picoquic_close_immediate, picoquic_cnx_t, picoquic_create, picoquic_current_time,
+    picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_delete_cnx,
     picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_prepare_packet_ex, picoquic_quic_t,
     slipstream_server_cc_algorithm, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
@@ -131,6 +131,7 @@ pub(crate) struct Slot {
     pub(crate) rcode: Option<Rcode>,
     pub(crate) cnx: *mut picoquic_cnx_t,
     pub(crate) path_id: libc::c_int,
+    pub(crate) payload_override: Option<Vec<u8>>,
 }
 
 pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
@@ -330,7 +331,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
             let mut if_index: libc::c_int = 0;
 
-            if slot.rcode.is_none() && !slot.cnx.is_null() {
+            if slot.payload_override.is_none() && slot.rcode.is_none() && !slot.cnx.is_null() {
                 let ret = unsafe {
                     picoquic_prepare_packet_ex(
                         slot.cnx,
@@ -350,7 +351,10 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 }
             }
 
-            let (payload, rcode) = if send_length > 0 {
+            let payload_override = slot.payload_override.as_deref();
+            let (payload, rcode) = if let Some(payload) = payload_override {
+                (Some(payload), slot.rcode)
+            } else if send_length > 0 {
                 (Some(&send_buf[..send_length]), slot.rcode)
             } else if slot.rcode.is_none() {
                 // No QUIC payload ready; still answer the poll with NOERROR and empty payload to clear it.
@@ -513,7 +517,7 @@ fn maybe_gc_idle_connections(
                 );
             }
             unsafe {
-                picoquic_close_immediate(cnx);
+                picoquic_delete_cnx(cnx);
             }
             last_seen.remove(&cnx_id);
         }
