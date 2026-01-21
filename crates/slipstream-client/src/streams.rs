@@ -338,8 +338,11 @@ fn handle_auth_response(
     data: &[u8],
     fin: bool,
 ) {
-    // If already authenticated or failed, ignore further responses
-    if state.auth_state == AuthState::Authenticated || state.auth_state == AuthState::Failed {
+    // If auth not required, already authenticated, or failed, ignore responses
+    if state.auth_state == AuthState::NotRequired
+        || state.auth_state == AuthState::Authenticated
+        || state.auth_state == AuthState::Failed
+    {
         return;
     }
 
