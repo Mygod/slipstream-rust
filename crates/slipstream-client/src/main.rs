@@ -58,6 +58,8 @@ struct Args {
     debug_poll: bool,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
+    #[arg(long = "auth-token", value_name = "TOKEN")]
+    auth_token: Option<String>,
 }
 
 fn main() {
@@ -176,6 +178,12 @@ fn main() {
         last_option_value(&sip003_env.plugin_options, "cert")
     };
 
+    let auth_token = if args.auth_token.is_some() {
+        args.auth_token.clone()
+    } else {
+        last_option_value(&sip003_env.plugin_options, "auth-token")
+    };
+
     let keep_alive_interval = if cli_provided(&matches, "keep_alive_interval") {
         args.keep_alive_interval
     } else {
@@ -198,6 +206,7 @@ fn main() {
         keep_alive_interval: keep_alive_interval as usize,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
+        auth_token: auth_token.as_deref(),
     };
 
     let runtime = Builder::new_current_thread()

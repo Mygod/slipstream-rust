@@ -1,8 +1,12 @@
 use crate::server::{Command, StreamKey, StreamWrite};
 use crate::target::spawn_target_connector;
+use slipstream_core::auth::{
+    build_auth_response, parse_auth_request, validate_token_hash, AuthStatus, AUTH_REQUEST_SIZE,
+    AUTH_STREAM_ID,
+};
 use slipstream_ffi::picoquic::{
-    picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
-    picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_mark_active_stream,
+    picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate,
+    picoquic_cnx_t, picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_mark_active_stream,
     picoquic_provide_stream_data_buffer, picoquic_quic_t, picoquic_reset_stream,
     picoquic_stream_data_consumed,
 };
@@ -13,12 +17,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
+
+/// Per-connection authentication state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionAuthState {
+    /// Server has no auth configured, all connections allowed
+    NotRequired,
+    /// Waiting for auth request on stream 0
+    AwaitingAuth,
+    /// Authentication successful
+    Authenticated,
+}
+
+/// Tracks per-connection state including auth buffer
+struct ConnectionState {
+    auth_state: ConnectionAuthState,
+    auth_buffer: Vec<u8>,
+}
 
 pub(crate) struct ServerState {
     target_addr: SocketAddr,
     streams: HashMap<StreamKey, ServerStream>,
+    connections: HashMap<usize, ConnectionState>,
     command_tx: mpsc::UnboundedSender<Command>,
+    auth_token: Option<String>,
     debug_streams: bool,
     debug_commands: bool,
     command_counts: CommandCounts,
@@ -31,15 +54,39 @@ impl ServerState {
         command_tx: mpsc::UnboundedSender<Command>,
         debug_streams: bool,
         debug_commands: bool,
+        auth_token: Option<String>,
     ) -> Self {
         Self {
             target_addr,
             streams: HashMap::new(),
+            connections: HashMap::new(),
             command_tx,
+            auth_token,
             debug_streams,
             debug_commands,
             command_counts: CommandCounts::default(),
             last_command_report: Instant::now(),
+        }
+    }
+
+    fn get_or_create_connection(&mut self, cnx: usize) -> &mut ConnectionState {
+        self.connections.entry(cnx).or_insert_with(|| ConnectionState {
+            auth_state: if self.auth_token.is_some() {
+                ConnectionAuthState::AwaitingAuth
+            } else {
+                ConnectionAuthState::NotRequired
+            },
+            auth_buffer: Vec::new(),
+        })
+    }
+
+    fn is_authenticated(&self, cnx: usize) -> bool {
+        match self.connections.get(&cnx) {
+            Some(conn) => matches!(
+                conn.auth_state,
+                ConnectionAuthState::NotRequired | ConnectionAuthState::Authenticated
+            ),
+            None => self.auth_token.is_none(),
         }
     }
 }
@@ -127,7 +174,15 @@ pub(crate) unsafe extern "C" fn server_callback(
             } else {
                 &[]
             };
-            handle_stream_data(cnx, state, stream_id, fin, data);
+            // Stream 0 is reserved for authentication; never use it for data
+            if stream_id == AUTH_STREAM_ID {
+                if state.auth_token.is_some() {
+                    handle_auth_stream(cnx, state, data, fin);
+                }
+                // If no auth configured, silently ignore stream 0 data
+            } else {
+                handle_stream_data(cnx, state, stream_id, fin, data);
+            }
         }
         picoquic_call_back_event_t::picoquic_callback_stream_reset
         | picoquic_call_back_event_t::picoquic_callback_stop_sending => {
@@ -288,6 +343,98 @@ pub(crate) unsafe extern "C" fn server_callback(
     0
 }
 
+fn handle_auth_stream(cnx: *mut picoquic_cnx_t, state: &mut ServerState, data: &[u8], fin: bool) {
+    let cnx_id = cnx as usize;
+    let conn = state.get_or_create_connection(cnx_id);
+
+    // If auth not required, ignore stream 0 data
+    if conn.auth_state == ConnectionAuthState::NotRequired {
+        return;
+    }
+
+    // If already authenticated, ignore further auth data
+    if conn.auth_state == ConnectionAuthState::Authenticated {
+        return;
+    }
+
+    // Limit buffer size to prevent memory exhaustion from malicious clients
+    let remaining_capacity = AUTH_REQUEST_SIZE.saturating_sub(conn.auth_buffer.len());
+    let bytes_to_add = data.len().min(remaining_capacity);
+    conn.auth_buffer.extend_from_slice(&data[..bytes_to_add]);
+
+    // Check if we have a complete auth request
+    if conn.auth_buffer.len() >= AUTH_REQUEST_SIZE {
+        let auth_data = &conn.auth_buffer[..AUTH_REQUEST_SIZE];
+        let status = if let Some(received_hash) = parse_auth_request(auth_data) {
+            if let Some(token) = &state.auth_token {
+                if validate_token_hash(&received_hash, token) {
+                    info!("Authentication successful");
+                    AuthStatus::Success
+                } else {
+                    warn!("Authentication failed: invalid token");
+                    AuthStatus::Invalid
+                }
+            } else {
+                // No token configured but auth stream used
+                AuthStatus::Success
+            }
+        } else {
+            warn!("Authentication failed: malformed request");
+            AuthStatus::Invalid
+        };
+
+        // Update connection state
+        if let Some(conn) = state.connections.get_mut(&cnx_id) {
+            conn.auth_state = if status == AuthStatus::Success {
+                ConnectionAuthState::Authenticated
+            } else {
+                ConnectionAuthState::AwaitingAuth
+            };
+            conn.auth_buffer.clear();
+        }
+
+        // Send auth response
+        let response = build_auth_response(status);
+        let ret = unsafe {
+            picoquic_add_to_stream(
+                cnx,
+                AUTH_STREAM_ID,
+                response.as_ptr(),
+                response.len(),
+                1, // set fin flag
+            )
+        };
+        if ret < 0 {
+            error!("Failed to send auth response: ret={}", ret);
+        }
+
+        // If auth failed, close the connection
+        if status != AuthStatus::Success {
+            unsafe {
+                let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR as u64);
+            }
+        }
+    } else if fin {
+        // Client closed stream 0 before sending complete auth request
+        warn!("Authentication failed: incomplete request (received {} bytes)", conn.auth_buffer.len());
+        conn.auth_buffer.clear();
+
+        let response = build_auth_response(AuthStatus::Invalid);
+        let _ = unsafe {
+            picoquic_add_to_stream(
+                cnx,
+                AUTH_STREAM_ID,
+                response.as_ptr(),
+                response.len(),
+                1,
+            )
+        };
+        unsafe {
+            let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR as u64);
+        }
+    }
+}
+
 fn handle_stream_data(
     cnx: *mut picoquic_cnx_t,
     state: &mut ServerState,
@@ -295,8 +442,39 @@ fn handle_stream_data(
     fin: bool,
     data: &[u8],
 ) {
+    let cnx_id = cnx as usize;
+
+    // Check if connection is authenticated
+    if !state.is_authenticated(cnx_id) {
+        // Ensure connection state exists
+        state.get_or_create_connection(cnx_id);
+
+        // Send auth required response on stream 0
+        let response = build_auth_response(AuthStatus::Required);
+        let _ = unsafe {
+            picoquic_add_to_stream(
+                cnx,
+                AUTH_STREAM_ID,
+                response.as_ptr(),
+                response.len(),
+                1,
+            )
+        };
+
+        // Reset the stream that tried to send data
+        warn!(
+            "stream {}: rejected - authentication required",
+            stream_id
+        );
+        unsafe {
+            let _ = picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
+            let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR as u64);
+        }
+        return;
+    }
+
     let key = StreamKey {
-        cnx: cnx as usize,
+        cnx: cnx_id,
         stream_id,
     };
     let debug_streams = state.debug_streams;
@@ -391,6 +569,8 @@ fn remove_connection_streams(state: &mut ServerState, cnx: usize) {
     for key in keys {
         shutdown_stream(state, key);
     }
+    // Clean up connection auth state
+    state.connections.remove(&cnx);
 }
 
 fn shutdown_stream(state: &mut ServerState, key: StreamKey) -> Option<ServerStream> {

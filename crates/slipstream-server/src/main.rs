@@ -40,6 +40,8 @@ struct Args {
     debug_streams: bool,
     #[arg(long = "debug-commands")]
     debug_commands: bool,
+    #[arg(long = "auth-token", value_name = "TOKEN")]
+    auth_token: Option<String>,
 }
 
 fn main() {
@@ -151,6 +153,12 @@ fn main() {
         std::process::exit(2);
     };
 
+    let auth_token = if args.auth_token.is_some() {
+        args.auth_token.clone()
+    } else {
+        last_option_value(&sip003_env.plugin_options, "auth-token")
+    };
+
     let config = ServerConfig {
         dns_listen_host,
         dns_listen_port,
@@ -161,6 +169,7 @@ fn main() {
         domains,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
+        auth_token,
     };
 
     let runtime = Builder::new_current_thread()

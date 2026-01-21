@@ -1,3 +1,6 @@
+use slipstream_core::auth::{
+    build_auth_request, parse_auth_response, AuthStatus, AUTH_RESPONSE_SIZE, AUTH_STREAM_ID,
+};
 use slipstream_core::tcp::{stream_read_limit_chunks, tcp_send_buffer_bytes};
 use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
@@ -11,11 +14,24 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const STREAM_READ_CHUNK_BYTES: usize = 4096;
 const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;
 const CLIENT_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
+
+/// Client authentication state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthState {
+    /// No authentication configured
+    NotRequired,
+    /// Auth request sent, waiting for response
+    Pending,
+    /// Authentication successful
+    Authenticated,
+    /// Authentication failed
+    Failed,
+}
 
 pub(crate) struct ClientState {
     ready: bool,
@@ -27,6 +43,11 @@ pub(crate) struct ClientState {
     debug_streams: bool,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
+    // Authentication fields
+    auth_state: AuthState,
+    auth_token: Option<String>,
+    auth_response_buffer: Vec<u8>,
+    pending_tcp_streams: Vec<TokioTcpStream>,
 }
 
 impl ClientState {
@@ -34,7 +55,13 @@ impl ClientState {
         command_tx: mpsc::UnboundedSender<Command>,
         data_notify: Arc<Notify>,
         debug_streams: bool,
+        auth_token: Option<String>,
     ) -> Self {
+        let auth_state = if auth_token.is_some() {
+            AuthState::Pending
+        } else {
+            AuthState::NotRequired
+        };
         Self {
             ready: false,
             closing: false,
@@ -45,6 +72,10 @@ impl ClientState {
             debug_streams,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
+            auth_state,
+            auth_token,
+            auth_response_buffer: Vec::new(),
+            pending_tcp_streams: Vec::new(),
         }
     }
 
@@ -84,6 +115,14 @@ impl ClientState {
         self.path_events.clear();
         self.debug_enqueued_bytes = 0;
         self.debug_last_enqueue_at = 0;
+        // Reset auth state for reconnection
+        self.auth_state = if self.auth_token.is_some() {
+            AuthState::Pending
+        } else {
+            AuthState::NotRequired
+        };
+        self.auth_response_buffer.clear();
+        self.pending_tcp_streams.clear();
     }
 }
 
@@ -145,6 +184,32 @@ pub(crate) unsafe extern "C" fn client_callback(
         picoquic_call_back_event_t::picoquic_callback_ready => {
             state.ready = true;
             info!("Connection ready");
+            // Send authentication request if token is configured
+            if let Some(token) = &state.auth_token {
+                let auth_request = build_auth_request(token);
+                let ret = picoquic_add_to_stream(
+                    cnx,
+                    AUTH_STREAM_ID,
+                    auth_request.as_ptr(),
+                    auth_request.len(),
+                    1, // set fin flag
+                );
+                if ret < 0 {
+                    error!("Failed to send auth request: ret={}", ret);
+                    state.auth_state = AuthState::Failed;
+                }
+                // auth_state is already Pending from constructor
+            } else {
+                // Reserve stream 0 even without auth so data streams start from stream 4
+                // This ensures stream 0 is never used for regular data
+                let _ = picoquic_add_to_stream(
+                    cnx,
+                    AUTH_STREAM_ID,
+                    std::ptr::null(),
+                    0,
+                    1, // set fin flag to close the stream immediately
+                );
+            }
         }
         picoquic_call_back_event_t::picoquic_callback_stream_data
         | picoquic_call_back_event_t::picoquic_callback_stream_fin => {
@@ -157,7 +222,12 @@ pub(crate) unsafe extern "C" fn client_callback(
             } else {
                 &[]
             };
-            handle_stream_data(cnx, state, stream_id, fin, data);
+            // Check if this is stream 0 (auth stream)
+            if stream_id == AUTH_STREAM_ID {
+                handle_auth_response(cnx, state, data, fin);
+            } else {
+                handle_stream_data(cnx, state, stream_id, fin, data);
+            }
         }
         picoquic_call_back_event_t::picoquic_callback_stream_reset
         | picoquic_call_back_event_t::picoquic_callback_stop_sending => {
@@ -166,6 +236,22 @@ pub(crate) unsafe extern "C" fn client_callback(
                 picoquic_call_back_event_t::picoquic_callback_stop_sending => "stop_sending",
                 _ => "unknown",
             };
+            // Check if this is a reset on the auth stream while waiting for auth response
+            if stream_id == AUTH_STREAM_ID && state.auth_state == AuthState::Pending {
+                // Server doesn't support auth - fall back to no auth
+                info!(
+                    "Auth stream reset: server may not support authentication, continuing without auth"
+                );
+                state.auth_state = AuthState::Authenticated;
+                state.auth_response_buffer.clear();
+                // Process any pending TCP streams
+                let pending = std::mem::take(&mut state.pending_tcp_streams);
+                for stream in pending {
+                    let _ = state.command_tx.send(Command::NewStream(stream));
+                }
+                state.data_notify.notify_one();
+                return 0;
+            }
             if let Some(stream) = state.streams.remove(&stream_id) {
                 warn!(
                     "stream {}: reset event={} rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?} fin_enqueued={}",
@@ -230,6 +316,68 @@ pub(crate) unsafe extern "C" fn client_callback(
     }
 
     0
+}
+
+fn handle_auth_response(
+    _cnx: *mut picoquic_cnx_t,
+    state: &mut ClientState,
+    data: &[u8],
+    fin: bool,
+) {
+    // If we're not expecting an auth response, ignore it
+    if state.auth_state != AuthState::Pending {
+        return;
+    }
+
+    // Accumulate data until we have enough
+    state.auth_response_buffer.extend_from_slice(data);
+
+    // Check if we have a complete auth response
+    if state.auth_response_buffer.len() >= AUTH_RESPONSE_SIZE {
+        let response_data = &state.auth_response_buffer[..AUTH_RESPONSE_SIZE];
+        if let Some(status) = parse_auth_response(response_data) {
+            match status {
+                AuthStatus::Success => {
+                    info!("Authentication successful");
+                    state.auth_state = AuthState::Authenticated;
+                    // Process any pending TCP streams
+                    let pending = std::mem::take(&mut state.pending_tcp_streams);
+                    for stream in pending {
+                        let _ = state.command_tx.send(Command::NewStream(stream));
+                    }
+                    state.data_notify.notify_one();
+                }
+                AuthStatus::Invalid => {
+                    error!("Authentication failed: invalid token");
+                    state.auth_state = AuthState::Failed;
+                    state.pending_tcp_streams.clear();
+                    state.closing = true;
+                }
+                AuthStatus::Required => {
+                    error!("Authentication failed: server requires authentication");
+                    state.auth_state = AuthState::Failed;
+                    state.pending_tcp_streams.clear();
+                    state.closing = true;
+                }
+            }
+        } else {
+            warn!("Received malformed auth response");
+            state.auth_state = AuthState::Failed;
+            state.pending_tcp_streams.clear();
+            state.closing = true;
+        }
+        state.auth_response_buffer.clear();
+    } else if fin {
+        // Server closed stream 0 before sending complete response
+        warn!(
+            "Auth stream closed before complete response (received {} bytes)",
+            state.auth_response_buffer.len()
+        );
+        state.auth_state = AuthState::Failed;
+        state.pending_tcp_streams.clear();
+        state.auth_response_buffer.clear();
+        state.closing = true;
+    }
 }
 
 fn handle_stream_data(
@@ -369,6 +517,28 @@ pub(crate) fn handle_command(
     let state = unsafe { &mut *state_ptr };
     match command {
         Command::NewStream(stream) => {
+            // Check authentication state before accepting new streams
+            match state.auth_state {
+                AuthState::Pending => {
+                    // Queue the stream until authentication completes
+                    state.pending_tcp_streams.push(stream);
+                    if state.debug_streams {
+                        debug!("TCP stream queued pending authentication");
+                    }
+                    return;
+                }
+                AuthState::Failed => {
+                    // Reject streams when auth has failed
+                    warn!("TCP stream rejected: authentication failed");
+                    // Drop the stream to close it
+                    drop(stream);
+                    return;
+                }
+                AuthState::NotRequired | AuthState::Authenticated => {
+                    // Continue with normal stream handling
+                }
+            }
+
             let _ = stream.set_nodelay(true);
             let read_limit = stream_read_limit_chunks(
                 &stream,

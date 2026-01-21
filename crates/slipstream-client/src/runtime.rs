@@ -117,10 +117,15 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         None => None,
     };
 
+    let auth_token = config.auth_token.map(|s| s.to_string());
+    if auth_token.is_some() {
+        info!("Authentication enabled");
+    }
     let mut state = Box::new(ClientState::new(
         command_tx,
         data_notify.clone(),
         debug_streams,
+        auth_token,
     ));
     let state_ptr: *mut ClientState = &mut *state;
     let _state = state;

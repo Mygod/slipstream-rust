@@ -69,6 +69,7 @@ pub struct ServerConfig {
     pub domains: Vec<String>,
     pub debug_streams: bool,
     pub debug_commands: bool,
+    pub auth_token: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -148,11 +149,16 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let debug_streams = config.debug_streams;
     let debug_commands = config.debug_commands;
+    let auth_token = config.auth_token.clone();
+    if auth_token.is_some() {
+        tracing::info!("Authentication enabled");
+    }
     let mut state = Box::new(ServerState::new(
         target_addr,
         command_tx,
         debug_streams,
         debug_commands,
+        auth_token,
     ));
     let state_ptr: *mut ServerState = &mut *state;
     let _state = state;

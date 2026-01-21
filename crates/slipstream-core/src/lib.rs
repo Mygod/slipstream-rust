@@ -1,5 +1,6 @@
 use std::fmt;
 
+pub mod auth;
 mod macros;
 pub mod net;
 pub mod sip003;
