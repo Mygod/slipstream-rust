@@ -248,8 +248,10 @@ extern "C" {
     // Test helpers defined in cc/slipstream_test_helpers.c.
     pub fn slipstream_test_get_max_data_limit(quic: *mut picoquic_quic_t) -> u64;
     pub fn slipstream_test_get_defer_stream_data_consumption(quic: *mut picoquic_quic_t) -> c_int;
-    pub fn slipstream_take_stateless_packet(
+    pub fn slipstream_take_stateless_packet_for_cid(
         quic: *mut picoquic_quic_t,
+        packet: *const u8,
+        packet_len: size_t,
         out_bytes: *mut u8,
         out_capacity: size_t,
         out_len: *mut size_t,

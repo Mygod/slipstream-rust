@@ -3,7 +3,7 @@ use slipstream_dns::{decode_query_with_domains, DecodeQueryError};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_incoming_packet_ex, picoquic_quic_t, slipstream_disable_ack_delay,
 };
-use slipstream_ffi::take_stateless_packet;
+use slipstream_ffi::take_stateless_packet_for_cid;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -345,7 +345,9 @@ fn decode_slot(
                 return Err(ServerError::new("Failed to process QUIC packet"));
             }
             if first_cnx.is_null() {
-                if let Some(payload) = unsafe { take_stateless_packet(quic) } {
+                if let Some(payload) =
+                    unsafe { take_stateless_packet_for_cid(quic, &query.payload) }
+                {
                     if !payload.is_empty() {
                         return Ok(DecodeSlotOutcome::Slot(Slot {
                             peer,
