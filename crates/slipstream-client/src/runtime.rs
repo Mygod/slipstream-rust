@@ -557,6 +557,17 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             picoquic_close(cnx, 0);
         }
 
+        // Check if connection closed due to auth failure - don't reconnect
+        let auth_failed = unsafe { (*state_ptr).is_auth_failed() };
+        if auth_failed {
+            let msg = if config.auth_token.is_some() {
+                "Authentication failed: invalid token"
+            } else {
+                "Authentication failed: server requires --auth-token"
+            };
+            return Err(ClientError::new(msg));
+        }
+
         unsafe {
             (*state_ptr).reset_for_reconnect();
         }

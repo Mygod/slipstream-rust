@@ -87,6 +87,10 @@ impl ClientState {
         self.closing
     }
 
+    pub(crate) fn is_auth_failed(&self) -> bool {
+        self.auth_state == AuthState::Failed
+    }
+
     pub(crate) fn streams_len(&self) -> usize {
         self.streams.len()
     }
@@ -290,6 +294,16 @@ pub(crate) unsafe extern "C" fn client_callback(
                     &mut remote_app_reason,
                 );
             }
+            // If connection closes while auth is pending, treat as auth failure
+            // Also check if server closed with INTERNAL_ERROR when we had no token
+            // (indicates server requires auth but client didn't provide it)
+            let server_rejected =
+                remote_app_reason == SLIPSTREAM_INTERNAL_ERROR || remote_reason != 0;
+            if state.auth_state == AuthState::Pending
+                || (state.auth_state == AuthState::NotRequired && server_rejected)
+            {
+                state.auth_state = AuthState::Failed;
+            }
             warn!(
                 "Connection closed event={} state={:?} local_error=0x{:x} remote_error=0x{:x} local_app=0x{:x} remote_app=0x{:x} ready={}",
                 close_event_label(fin_or_event),
@@ -324,8 +338,8 @@ fn handle_auth_response(
     data: &[u8],
     fin: bool,
 ) {
-    // If we're not expecting an auth response, ignore it
-    if state.auth_state != AuthState::Pending {
+    // If already authenticated or failed, ignore further responses
+    if state.auth_state == AuthState::Authenticated || state.auth_state == AuthState::Failed {
         return;
     }
 

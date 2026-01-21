@@ -178,8 +178,20 @@ pub(crate) unsafe extern "C" fn server_callback(
             if stream_id == AUTH_STREAM_ID {
                 if state.auth_token.is_some() {
                     handle_auth_stream(cnx, state, data, fin);
+                } else if fin {
+                    // No auth configured but client sent auth request - respond with success
+                    // to indicate auth is not required
+                    let response = build_auth_response(AuthStatus::Success);
+                    let _ = unsafe {
+                        picoquic_add_to_stream(
+                            cnx,
+                            AUTH_STREAM_ID,
+                            response.as_ptr(),
+                            response.len(),
+                            1, // fin
+                        )
+                    };
                 }
-                // If no auth configured, silently ignore stream 0 data
             } else {
                 handle_stream_data(cnx, state, stream_id, fin, data);
             }
@@ -416,10 +428,21 @@ fn handle_auth_stream(cnx: *mut picoquic_cnx_t, state: &mut ServerState, data: &
         }
     } else if fin {
         // Client closed stream 0 before sending complete auth request
-        warn!("Authentication failed: incomplete request (received {} bytes)", conn.auth_buffer.len());
+        let status = if conn.auth_buffer.is_empty() {
+            // No auth data at all - client doesn't have a token configured
+            warn!("Authentication failed: no token provided");
+            AuthStatus::Required
+        } else {
+            // Partial auth data - malformed request
+            warn!(
+                "Authentication failed: incomplete request (received {} bytes)",
+                conn.auth_buffer.len()
+            );
+            AuthStatus::Invalid
+        };
         conn.auth_buffer.clear();
 
-        let response = build_auth_response(AuthStatus::Invalid);
+        let response = build_auth_response(status);
         let _ = unsafe {
             picoquic_add_to_stream(
                 cnx,
