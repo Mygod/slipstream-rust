@@ -93,6 +93,13 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
     Dynamic path mode changes are not supported.
   - Note: Per-path quality data is fetched via the public `picoquic_get_path_quality` API in Rust.
 
+- `quic->pending_stateless_packet`, `picoquic_stateless_packet_t`, `picoquic_parse_packet_header`,
+  and `picoquic_create_cnxid_reset_secret`
+  - Wrapper: `slipstream_take_stateless_packet_for_cid` in
+    `crates/slipstream-ffi/cc/slipstream_stateless_packet.c`.
+  - Why: DNS fallback must dequeue and route queued stateless packets (retry, server busy,
+    stateless reset) to the matching peer without misrouting.
+
 ## Public picoquic APIs relied on by slipstream
 
 - `picoquic_get_pacing_rate`
