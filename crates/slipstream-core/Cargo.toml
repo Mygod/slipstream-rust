@@ -9,3 +9,4 @@ readme = "../../README.md"
 
 [dependencies]
 libc = "0.2"
+zstd = "0.13"

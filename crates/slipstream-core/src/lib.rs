@@ -1,5 +1,6 @@
 use std::fmt;
 
+pub mod compression;
 mod macros;
 pub mod stream;
 pub mod tcp;

@@ -1,4 +1,5 @@
 use crate::error::ClientError;
+use slipstream_core::compression::decompress;
 use slipstream_dns::decode_response;
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_incoming_packet_ex, picoquic_quic_t,
@@ -24,7 +25,9 @@ pub(crate) fn handle_dns_response(
 ) -> Result<(), ClientError> {
     let peer = normalize_dual_stack_addr(peer);
     let response_id = dns_response_id(buf);
-    if let Some(payload) = decode_response(buf) {
+    if let Some(encoded_payload) = decode_response(buf) {
+        let payload =
+            decompress(&encoded_payload).map_err(|err| ClientError::new(err.to_string()))?;
         let resolver_index = ctx
             .resolvers
             .iter()

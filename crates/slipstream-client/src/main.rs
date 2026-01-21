@@ -55,6 +55,8 @@ struct Args {
     debug_poll: bool,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
+    #[arg(long = "zstd")]
+    zstd: bool,
 }
 
 fn main() {
@@ -76,6 +78,7 @@ fn main() {
         keep_alive_interval: args.keep_alive_interval as usize,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
+        zstd: args.zstd,
     };
 
     let runtime = Builder::new_current_thread()

@@ -33,6 +33,8 @@ struct Args {
     debug_streams: bool,
     #[arg(long = "debug-commands")]
     debug_commands: bool,
+    #[arg(long = "zstd")]
+    zstd: bool,
 }
 
 fn main() {
@@ -47,6 +49,7 @@ fn main() {
         domains: args.domains,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
+        zstd: args.zstd,
     };
 
     let runtime = Builder::new_current_thread()

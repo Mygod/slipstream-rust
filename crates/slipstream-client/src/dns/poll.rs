@@ -1,4 +1,5 @@
 use crate::error::ClientError;
+use slipstream_core::compression::compress;
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_prepare_packet_ex, slipstream_request_poll,
@@ -85,7 +86,13 @@ pub(crate) async fn send_poll_queries(
         resolver.debug.polls_sent = resolver.debug.polls_sent.saturating_add(1);
 
         let poll_id = *dns_id;
-        let qname = build_qname(&send_buf[..send_length], config.domain)
+        let payload = if config.zstd {
+            compress(&send_buf[..send_length])
+                .map_err(|err| ClientError::new(err.to_string()))?
+        } else {
+            send_buf[..send_length].to_vec()
+        };
+        let qname = build_qname(&payload, config.domain)
             .map_err(|err| ClientError::new(err.to_string()))?;
         let params = QueryParams {
             id: poll_id,

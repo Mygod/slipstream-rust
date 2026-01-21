@@ -17,6 +17,7 @@ use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
     client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor, ClientState,
 };
+use slipstream_core::compression::compress;
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
     configure_quic_with_custom,
@@ -342,7 +343,13 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
             }
 
-            let qname = build_qname(&send_buf[..send_length], config.domain)
+            let payload = if config.zstd {
+                compress(&send_buf[..send_length])
+                    .map_err(|err| ClientError::new(err.to_string()))?
+            } else {
+                send_buf[..send_length].to_vec()
+            };
+            let qname = build_qname(&payload, config.domain)
                 .map_err(|err| ClientError::new(err.to_string()))?;
             let params = QueryParams {
                 id: dns_id,

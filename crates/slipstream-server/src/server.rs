@@ -1,3 +1,4 @@
+use slipstream_core::compression::{compress, decompress};
 use slipstream_core::{resolve_host_port, HostPort};
 use slipstream_dns::{
     decode_query_with_domains, encode_response, DecodeQueryError, Question, Rcode, ResponseParams,
@@ -68,6 +69,7 @@ pub struct ServerConfig {
     pub domains: Vec<String>,
     pub debug_streams: bool,
     pub debug_commands: bool,
+    pub zstd: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -288,7 +290,13 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             }
 
             let (payload, rcode) = if send_length > 0 {
-                (Some(&send_buf[..send_length]), slot.rcode)
+                let data = if config.zstd {
+                    compress(&send_buf[..send_length])
+                        .map_err(|err| ServerError::new(err.to_string()))?
+                } else {
+                    send_buf[..send_length].to_vec()
+                };
+                (Some(data), slot.rcode)
             } else if slot.rcode.is_none() {
                 // No QUIC payload ready; still answer the poll with NOERROR and empty payload to clear it.
                 (None, Some(slipstream_dns::Rcode::Ok))
@@ -300,7 +308,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 rd: slot.rd,
                 cd: slot.cd,
                 question: &slot.question,
-                payload,
+                payload: payload.as_deref(),
                 rcode,
             })
             .map_err(|err| ServerError::new(err.to_string()))?;
@@ -322,6 +330,8 @@ fn decode_slot(
 ) -> Result<Option<Slot>, ServerError> {
     match decode_query_with_domains(packet, domains) {
         Ok(query) => {
+            let payload =
+                decompress(&query.payload).map_err(|err| ServerError::new(err.to_string()))?;
             let mut peer_storage = dummy_sockaddr_storage();
             let mut local_storage = unsafe { std::ptr::read(local_addr_storage) };
             let mut first_cnx: *mut picoquic_cnx_t = std::ptr::null_mut();
@@ -329,8 +339,8 @@ fn decode_slot(
             let ret = unsafe {
                 picoquic_incoming_packet_ex(
                     quic,
-                    query.payload.as_ptr() as *mut u8,
-                    query.payload.len(),
+                    payload.as_ptr() as *mut u8,
+                    payload.len(),
                     &mut peer_storage as *mut _ as *mut libc::sockaddr,
                     &mut local_storage as *mut _ as *mut libc::sockaddr,
                     0,

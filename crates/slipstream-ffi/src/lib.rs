@@ -30,6 +30,7 @@ pub struct ClientConfig<'a> {
     pub keep_alive_interval: usize,
     pub debug_poll: bool,
     pub debug_streams: bool,
+    pub zstd: bool,
 }
 
 pub use runtime::{
