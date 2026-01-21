@@ -7,7 +7,6 @@ use std::time::SystemTime;
 pub(crate) struct OpenSslPaths {
     pub(crate) root: Option<PathBuf>,
     pub(crate) include: Option<PathBuf>,
-    pub(crate) lib: Option<PathBuf>,
 }
 
 pub(crate) fn resolve_openssl_paths() -> OpenSslPaths {
@@ -15,15 +14,10 @@ pub(crate) fn resolve_openssl_paths() -> OpenSslPaths {
         !cfg!(feature = "openssl-vendored") || env::var_os("OPENSSL_NO_VENDOR").is_some();
     let mut root = None;
     let mut include = None;
-    let mut lib = None;
 
     if allow_env_overrides {
-        root = env::var("OPENSSL_ROOT_DIR")
-            .or_else(|_| env::var("OPENSSL_DIR"))
-            .ok()
-            .map(PathBuf::from);
+        root = env::var("OPENSSL_ROOT_DIR").ok().map(PathBuf::from);
         include = env::var("OPENSSL_INCLUDE_DIR").ok().map(PathBuf::from);
-        lib = env::var("OPENSSL_LIB_DIR").ok().map(PathBuf::from);
     }
 
     if root.is_none() {
@@ -33,9 +27,8 @@ pub(crate) fn resolve_openssl_paths() -> OpenSslPaths {
         include = env::var("DEP_OPENSSL_INCLUDE").ok().map(PathBuf::from);
     }
 
-    if root.is_some() || include.is_some() || lib.is_some() {
-        let lib = lib.or_else(|| root.as_ref().and_then(|root| openssl_lib_dir(root)));
-        let mut resolved = OpenSslPaths { root, include, lib };
+    if root.is_some() || include.is_some() {
+        let mut resolved = OpenSslPaths { root, include };
         if cfg!(feature = "openssl-vendored") && !allow_env_overrides {
             if let (Some(target), Some(root)) = (env::var("TARGET").ok(), resolved.root.as_ref()) {
                 let root_str = root.to_string_lossy();
@@ -53,13 +46,11 @@ pub(crate) fn resolve_openssl_paths() -> OpenSslPaths {
         resolve_openssl_from_build_output().unwrap_or(OpenSslPaths {
             root: None,
             include: None,
-            lib: None,
         })
     } else {
         OpenSslPaths {
             root: None,
             include: None,
-            lib: None,
         }
     }
 }
@@ -155,11 +146,9 @@ fn parse_openssl_output(path: &Path) -> Option<OpenSslPaths> {
         }
     }
     let root = root?;
-    let lib = openssl_lib_dir(&root);
     Some(OpenSslPaths {
         root: Some(root),
         include,
-        lib,
     })
 }
 
@@ -169,22 +158,8 @@ fn openssl_paths_from_install(build_dir: &Path) -> Option<OpenSslPaths> {
     if !include.join("openssl").exists() {
         return None;
     }
-    let lib = openssl_lib_dir(&root);
     Some(OpenSslPaths {
         root: Some(root),
         include: Some(include),
-        lib,
     })
-}
-
-fn openssl_lib_dir(root: &Path) -> Option<PathBuf> {
-    let candidate = root.join("lib");
-    if candidate.exists() {
-        return Some(candidate);
-    }
-    let candidate = root.join("lib64");
-    if candidate.exists() {
-        return Some(candidate);
-    }
-    None
 }

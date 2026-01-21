@@ -29,9 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=PICOQUIC_MINIMAL_BUILD");
     println!("cargo:rerun-if-env-changed=PICOTLS_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_ROOT_DIR");
-    println!("cargo:rerun-if-env-changed=OPENSSL_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR");
-    println!("cargo:rerun-if-env-changed=OPENSSL_LIB_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_CRYPTO_LIBRARY");
     println!("cargo:rerun-if-env-changed=OPENSSL_SSL_LIBRARY");
     println!("cargo:rerun-if-env-changed=OPENSSL_NO_VENDOR");
@@ -44,6 +42,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=ANDROID_PLATFORM");
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=AR");
+
+    let allow_openssl_env_overrides =
+        !cfg!(feature = "openssl-vendored") || env::var_os("OPENSSL_NO_VENDOR").is_some();
+    if allow_openssl_env_overrides {
+        let openssl_root = env::var_os("OPENSSL_ROOT_DIR");
+        let openssl_include = env::var_os("OPENSSL_INCLUDE_DIR");
+        let openssl_ssl_lib = env::var_os("OPENSSL_SSL_LIBRARY");
+        let openssl_crypto_lib = env::var_os("OPENSSL_CRYPTO_LIBRARY");
+
+        let has_root = openssl_root.is_some();
+        let has_include = openssl_include.is_some();
+        let has_ssl = openssl_ssl_lib.is_some();
+        let has_crypto = openssl_crypto_lib.is_some();
+
+        if has_ssl ^ has_crypto {
+            return Err(
+                "OPENSSL_SSL_LIBRARY and OPENSSL_CRYPTO_LIBRARY must be set together.".into(),
+            );
+        }
+
+        let has_explicit_libs = has_ssl && has_crypto;
+        if has_include && !has_root && !has_explicit_libs {
+            return Err(
+                "OPENSSL_INCLUDE_DIR without OPENSSL_ROOT_DIR is unsupported; set OPENSSL_ROOT_DIR or both OPENSSL_SSL_LIBRARY and OPENSSL_CRYPTO_LIBRARY (with OPENSSL_INCLUDE_DIR)."
+                    .into(),
+            );
+        }
+
+        if has_explicit_libs && !has_root && !has_include {
+            return Err(
+                "OPENSSL_SSL_LIBRARY/OPENSSL_CRYPTO_LIBRARY require OPENSSL_INCLUDE_DIR when OPENSSL_ROOT_DIR is not set."
+                    .into(),
+            );
+        }
+    }
 
     let openssl_paths = resolve_openssl_paths();
     let target = env::var("TARGET").unwrap_or_default();

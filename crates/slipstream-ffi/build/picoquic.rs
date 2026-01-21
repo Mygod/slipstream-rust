@@ -49,7 +49,6 @@ pub(crate) fn build_picoquic(
     }
     if let Some(root) = &openssl_paths.root {
         command.env("OPENSSL_ROOT_DIR", root);
-        command.env("OPENSSL_DIR", root);
     }
     let prefer_static_openssl = cfg!(feature = "openssl-static");
     if prefer_static_openssl {
@@ -57,9 +56,6 @@ pub(crate) fn build_picoquic(
     }
     if let Some(include) = &openssl_paths.include {
         command.env("OPENSSL_INCLUDE_DIR", include);
-    }
-    if let Some(lib) = &openssl_paths.lib {
-        command.env("OPENSSL_LIB_DIR", lib);
     }
     let status = command.status()?;
     if !status.success() {
