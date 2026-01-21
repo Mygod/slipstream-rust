@@ -70,14 +70,16 @@ impl ServerState {
     }
 
     fn get_or_create_connection(&mut self, cnx: usize) -> &mut ConnectionState {
-        self.connections.entry(cnx).or_insert_with(|| ConnectionState {
-            auth_state: if self.auth_token.is_some() {
-                ConnectionAuthState::AwaitingAuth
-            } else {
-                ConnectionAuthState::NotRequired
-            },
-            auth_buffer: Vec::new(),
-        })
+        self.connections
+            .entry(cnx)
+            .or_insert_with(|| ConnectionState {
+                auth_state: if self.auth_token.is_some() {
+                    ConnectionAuthState::AwaitingAuth
+                } else {
+                    ConnectionAuthState::NotRequired
+                },
+                auth_buffer: Vec::new(),
+            })
     }
 
     fn is_authenticated(&self, cnx: usize) -> bool {
@@ -444,13 +446,7 @@ fn handle_auth_stream(cnx: *mut picoquic_cnx_t, state: &mut ServerState, data: &
 
         let response = build_auth_response(status);
         let _ = unsafe {
-            picoquic_add_to_stream(
-                cnx,
-                AUTH_STREAM_ID,
-                response.as_ptr(),
-                response.len(),
-                1,
-            )
+            picoquic_add_to_stream(cnx, AUTH_STREAM_ID, response.as_ptr(), response.len(), 1)
         };
         unsafe {
             let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR as u64);
@@ -475,20 +471,11 @@ fn handle_stream_data(
         // Send auth required response on stream 0
         let response = build_auth_response(AuthStatus::Required);
         let _ = unsafe {
-            picoquic_add_to_stream(
-                cnx,
-                AUTH_STREAM_ID,
-                response.as_ptr(),
-                response.len(),
-                1,
-            )
+            picoquic_add_to_stream(cnx, AUTH_STREAM_ID, response.as_ptr(), response.len(), 1)
         };
 
         // Reset the stream that tried to send data
-        warn!(
-            "stream {}: rejected - authentication required",
-            stream_id
-        );
+        warn!("stream {}: rejected - authentication required", stream_id);
         unsafe {
             let _ = picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
             let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR as u64);

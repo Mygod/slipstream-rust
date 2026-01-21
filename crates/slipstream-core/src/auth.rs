@@ -157,22 +157,13 @@ mod tests {
     #[test]
     fn test_parse_auth_response_valid() {
         let response = build_auth_response(AuthStatus::Success);
-        assert_eq!(
-            parse_auth_response(&response),
-            Some(AuthStatus::Success)
-        );
+        assert_eq!(parse_auth_response(&response), Some(AuthStatus::Success));
 
         let response = build_auth_response(AuthStatus::Invalid);
-        assert_eq!(
-            parse_auth_response(&response),
-            Some(AuthStatus::Invalid)
-        );
+        assert_eq!(parse_auth_response(&response), Some(AuthStatus::Invalid));
 
         let response = build_auth_response(AuthStatus::Required);
-        assert_eq!(
-            parse_auth_response(&response),
-            Some(AuthStatus::Required)
-        );
+        assert_eq!(parse_auth_response(&response), Some(AuthStatus::Required));
     }
 
     #[test]
