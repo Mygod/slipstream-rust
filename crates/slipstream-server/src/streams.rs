@@ -425,7 +425,7 @@ fn handle_auth_stream(cnx: *mut picoquic_cnx_t, state: &mut ServerState, data: &
         // If auth failed, close the connection
         if status != AuthStatus::Success {
             unsafe {
-                let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR as u64);
+                let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR);
             }
         }
     } else if fin {
@@ -449,7 +449,7 @@ fn handle_auth_stream(cnx: *mut picoquic_cnx_t, state: &mut ServerState, data: &
             picoquic_add_to_stream(cnx, AUTH_STREAM_ID, response.as_ptr(), response.len(), 1)
         };
         unsafe {
-            let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR as u64);
+            let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR);
         }
     }
 }
@@ -478,7 +478,7 @@ fn handle_stream_data(
         warn!("stream {}: rejected - authentication required", stream_id);
         unsafe {
             let _ = picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
-            let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR as u64);
+            let _ = picoquic_close(cnx, SLIPSTREAM_INTERNAL_ERROR);
         }
         return;
     }
