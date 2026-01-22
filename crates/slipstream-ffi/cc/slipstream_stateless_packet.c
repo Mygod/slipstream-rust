@@ -50,7 +50,10 @@ int slipstream_take_stateless_packet_for_cid(picoquic_quic_t* quic,
      * for our current client SCID length (8 bytes) but can misroute if SCIDs are short, fixed,
      * or reused (including zero-length). If SCID length/policy changes, consider additional
      * disambiguation (e.g., original DCID tracking). */
-    if (out_len == NULL || out_bytes == NULL || packet == NULL) {
+    if (out_len == NULL || out_bytes == NULL || packet == NULL || quic == NULL) {
+        return -1;
+    }
+    if (packet_len == 0) {
         return -1;
     }
 
