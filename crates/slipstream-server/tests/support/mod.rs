@@ -202,13 +202,6 @@ pub fn wait_for_log(logs: &LogCapture, needle: &str, timeout: Duration) -> bool 
     }
 }
 
-pub fn clear_logs(logs: &LogCapture) {
-    while logs.rx.try_recv().is_ok() {}
-    if let Ok(mut buffer) = logs.lines.lock() {
-        buffer.clear();
-    }
-}
-
 pub fn wait_for_log_since(
     logs: &LogCapture,
     needle: &str,
