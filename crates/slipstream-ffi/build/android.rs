@@ -6,15 +6,14 @@ pub(crate) fn maybe_link_android_builtins(target: &str, cc: &str) {
         Some(name) => name,
         None => return,
     };
-    let resource_dir = match clang_resource_dir(cc) {
+    let builtins_path = match clang_builtins_path(cc, builtins) {
+        Some(path) => path,
+        None => return,
+    };
+    let builtins_dir = match builtins_path.parent() {
         Some(dir) => dir,
         None => return,
     };
-    let builtins_dir = resource_dir.join("lib").join("linux");
-    let builtins_path = builtins_dir.join(format!("lib{}.a", builtins));
-    if !builtins_path.exists() {
-        return;
-    }
     println!("cargo:rustc-link-search=native={}", builtins_dir.display());
     println!("cargo:rustc-link-lib=static={}", builtins);
 }
@@ -33,15 +32,26 @@ fn android_builtins_name(target: &str) -> Option<&'static str> {
     }
 }
 
-fn clang_resource_dir(cc: &str) -> Option<PathBuf> {
-    let output = Command::new(cc).arg("-print-resource-dir").output().ok()?;
+fn clang_builtins_path(cc: &str, builtins: &str) -> Option<PathBuf> {
+    let output = Command::new(cc)
+        .arg("-print-libgcc-file-name")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
-    let dir = String::from_utf8_lossy(&output.stdout);
-    let dir = dir.trim();
-    if dir.is_empty() {
+    let path = String::from_utf8_lossy(&output.stdout);
+    let path = path.trim();
+    if path.is_empty() {
         return None;
     }
-    Some(PathBuf::from(dir))
+    let path = PathBuf::from(path);
+    if !path.exists() {
+        return None;
+    }
+    let expected = format!("lib{}.a", builtins);
+    if path.file_name()?.to_string_lossy() != expected {
+        return None;
+    }
+    Some(path)
 }
