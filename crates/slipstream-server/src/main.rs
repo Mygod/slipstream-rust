@@ -1,3 +1,4 @@
+mod config;
 mod server;
 mod streams;
 mod target;
@@ -34,6 +35,8 @@ struct Args {
     cert: Option<String>,
     #[arg(long = "key", short = 'k', value_name = "PATH")]
     key: Option<String>,
+    #[arg(long = "reset-seed", value_name = "PATH")]
+    reset_seed: Option<String>,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
     domains: Vec<String>,
     #[arg(long = "max-connections", default_value_t = 256, value_parser = parse_max_connections)]
@@ -154,6 +157,11 @@ fn main() {
         tracing::error!("A key path is required");
         std::process::exit(2);
     };
+    let reset_seed_path = if let Some(path) = args.reset_seed.clone() {
+        Some(path)
+    } else {
+        last_option_value(&sip003_env.plugin_options, "reset-seed")
+    };
     let max_connections = if cli_provided(&matches, "max_connections") {
         args.max_connections
     } else if let Some(value) = last_option_value(&sip003_env.plugin_options, "max-connections") {
@@ -172,6 +180,7 @@ fn main() {
         fallback_address,
         cert,
         key,
+        reset_seed_path,
         domains,
         max_connections,
         idle_timeout_seconds: args.idle_timeout_seconds,

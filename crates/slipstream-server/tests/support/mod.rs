@@ -31,6 +31,25 @@ impl ChildGuard {
     }
 }
 
+pub fn terminate_process(child: &mut ChildGuard, timeout: Duration) {
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::kill(child.child.id() as i32, libc::SIGTERM);
+    }
+    #[cfg(windows)]
+    {
+        let _ = child.child.kill();
+    }
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if child.has_exited() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    child.kill();
+}
+
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         self.kill();
@@ -50,6 +69,7 @@ pub struct ServerArgs<'a> {
     pub domains: &'a [&'a str],
     pub cert: &'a Path,
     pub key: &'a Path,
+    pub reset_seed_path: Option<&'a Path>,
     pub fallback_addr: Option<SocketAddr>,
     pub idle_timeout_seconds: Option<u64>,
     pub rust_log: &'a str,
@@ -118,6 +138,9 @@ pub fn spawn_server(args: ServerArgs<'_>) -> (ChildGuard, Option<LogCapture>) {
     for domain in args.domains {
         cmd.arg("--domain").arg(domain);
     }
+    if let Some(seed_path) = args.reset_seed_path {
+        cmd.arg("--reset-seed").arg(seed_path);
+    }
     if let Some(fallback_addr) = args.fallback_addr {
         cmd.arg("--fallback").arg(fallback_addr.to_string());
     }
@@ -175,6 +198,38 @@ pub fn wait_for_log(logs: &LogCapture, needle: &str, timeout: Duration) -> bool 
             }
             Err(mpsc::RecvTimeoutError::Timeout) => return false,
             Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
+pub fn clear_logs(logs: &LogCapture) {
+    while logs.rx.try_recv().is_ok() {}
+    if let Ok(mut buffer) = logs.lines.lock() {
+        buffer.clear();
+    }
+}
+
+pub fn wait_for_log_since(
+    logs: &LogCapture,
+    needle: &str,
+    start: Instant,
+    timeout: Duration,
+) -> Option<Duration> {
+    let deadline = start + timeout;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        match logs.rx.recv_timeout(remaining) {
+            Ok(line) => {
+                if line.contains(needle) {
+                    return Some(Instant::now().saturating_duration_since(start));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => return None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
         }
     }
 }

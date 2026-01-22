@@ -120,6 +120,7 @@ fn udp_fallback_e2e() {
         domains: &[domain],
         cert: &cert,
         key: &key,
+        reset_seed_path: None,
         fallback_addr: Some(echo.addr),
         idle_timeout_seconds: None,
         rust_log: "info",

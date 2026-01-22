@@ -12,9 +12,12 @@ This page documents runtime knobs and environment variables.
 
 Sample certs live in `fixtures/certs/` for local testing only. The server
 requires explicit `--cert` and `--key` paths; provide your own cert/key pair
-for real deployments. The client can pass `--cert` to pin the server leaf
-certificate (PEM); CA bundles are not supported and the PEM must contain a
-single certificate. If omitted, server certificates are not verified.
+for real deployments. If the configured cert/key paths do not exist, the
+server auto-generates an ECDSA P-256 self-signed certificate (1000-year
+validity) and writes the key with 0600 permissions. The client can pass
+`--cert` to pin the server leaf certificate (PEM); CA bundles are not
+supported and the PEM must contain a single certificate. If omitted, server
+certificates are not verified.
 
 ## Logging and debug knobs
 
@@ -40,6 +43,11 @@ single certificate. If omitted, server certificates are not verified.
 - `--idle-timeout-seconds`
   Closes idle QUIC connections after the given number of seconds (default: 1200).
   Set to 0 to disable idle GC.
+- `--reset-seed`
+  Path to a 32-hex-char (16-byte) stateless reset seed. If the file does not
+  exist, the server generates one and writes it with 0600 permissions. If not
+  provided, the server uses an ephemeral seed and stateless resets will not
+  survive restarts.
 
 ## picoquic build environment
 

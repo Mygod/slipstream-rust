@@ -54,6 +54,7 @@ fn cert_pinning_e2e() {
         domains: &[domain, alt_domain],
         cert: &cert,
         key: &key,
+        reset_seed_path: None,
         fallback_addr: None,
         idle_timeout_seconds: None,
         rust_log: "info",

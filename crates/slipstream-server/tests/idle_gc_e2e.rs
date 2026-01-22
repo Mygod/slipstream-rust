@@ -62,6 +62,7 @@ fn idle_gc_closes_connection() {
         domains: &[domain],
         cert: &cert,
         key: &key,
+        reset_seed_path: None,
         fallback_addr: None,
         idle_timeout_seconds: Some(1),
         rust_log: "debug",

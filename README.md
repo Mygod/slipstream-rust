@@ -36,7 +36,7 @@ Build the Rust binaries:
 cargo build -p slipstream-client -p slipstream-server
 ```
 
-Generate a test TLS cert (example):
+Generate a test TLS cert (optional example):
 
 ```
 openssl req -x509 -newkey rsa:2048 -nodes \
@@ -52,8 +52,14 @@ cargo run -p slipstream-server -- \
   --target-address 127.0.0.1:5201 \
   --domain example.com \
   --cert ./cert.pem \
-  --key ./key.pem
+  --key ./key.pem \
+  --reset-seed ./reset-seed
 ```
+
+If the configured cert/key paths do not exist, the server auto-generates a
+self-signed ECDSA P-256 certificate (1000-year validity). If `--reset-seed`
+is omitted, the server will warn and stateless reset tokens will not persist
+across restarts.
 
 Run the client:
 
