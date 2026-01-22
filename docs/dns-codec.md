@@ -18,6 +18,8 @@ This document captures the DNS codec behavior and how it is validated.
   - Parse errors -> drop the message (no response).
 - Client decode rules: accept only QR=1, RCODE=OK, ANCOUNT=1, TXT answer;
   reassemble multi-part TXT payloads in order.
+- QUIC stateless reset packets, when generated, are carried as normal TXT payloads
+  with RCODE=OK.
 
 For the full protocol overview, see docs/protocol.md.
 

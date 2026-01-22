@@ -15,7 +15,8 @@ use crate::error::ClientError;
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
 use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
-    client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor, ClientState,
+    client_callback, drain_commands, drain_stream_data, handle_command, spawn_acceptor,
+    ClientState, Command,
 };
 use slipstream_core::net::is_transient_udp_error;
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
@@ -46,6 +47,8 @@ const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const SLIPSTREAM_SNI: &str = "test.example.com";
 const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
+const RECONNECT_SLEEP_MIN_MS: u64 = 250;
+const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
 
 fn is_ipv6_unspecified(host: &str) -> bool {
     host.parse::<Ipv6Addr>()
@@ -53,16 +56,21 @@ fn is_ipv6_unspecified(host: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
+    let mut dropped = 0usize;
+    while let Ok(command) = command_rx.try_recv() {
+        dropped += 1;
+        if let Command::NewStream(stream) = command {
+            drop(stream);
+        }
+    }
+    dropped
+}
+
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let domain_len = config.domain.len();
     let mtu = compute_mtu(domain_len)?;
-    let mut resolvers = resolve_resolvers(config.resolvers, mtu, config.debug_poll)?;
-    if resolvers.is_empty() {
-        return Err(ClientError::new("At least one resolver is required"));
-    }
-
     let udp = bind_udp_socket().await?;
-    let mut local_addr_storage = socket_addr_to_storage(udp.local_addr().map_err(map_io)?);
 
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let data_notify = Arc::new(Notify::new());
@@ -117,341 +125,338 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let state_ptr: *mut ClientState = &mut *state;
     let _state = state;
 
-    let current_time = unsafe { picoquic_current_time() };
-    let quic = unsafe {
-        picoquic_create(
-            8,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            alpn.as_ptr(),
-            Some(client_callback),
-            state_ptr as *mut _,
-            None,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            current_time,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        )
-    };
-    if quic.is_null() {
-        return Err(ClientError::new("Could not create QUIC context"));
-    }
-    let _quic_guard = QuicGuard::new(quic);
-    let mixed_cc = unsafe { slipstream_mixed_cc_algorithm };
-    if mixed_cc.is_null() {
-        return Err(ClientError::new("Could not load mixed congestion control"));
-    }
-    unsafe {
-        configure_quic_with_custom(quic, mixed_cc, mtu);
-        picoquic_enable_path_callbacks_default(quic, 1);
-        let override_ptr = cc_override
-            .as_ref()
-            .map(|value| value.as_ptr())
-            .unwrap_or(std::ptr::null());
-        slipstream_set_cc_override(override_ptr);
-    }
-    unsafe {
-        slipstream_set_default_path_mode(resolver_mode_to_c(resolvers[0].mode));
-    }
-    if let Some(cert) = config.cert {
-        configure_pinned_certificate(quic, cert).map_err(ClientError::new)?;
-    }
-    let mut server_storage = resolvers[0].storage;
-    // picoquic_create_client_cnx calls picoquic_start_client_cnx internally (see picoquic/quicctx.c).
-    let cnx = unsafe {
-        picoquic_create_client_cnx(
-            quic,
-            &mut server_storage as *mut _ as *mut libc::sockaddr,
-            current_time,
-            0,
-            sni.as_ptr(),
-            alpn.as_ptr(),
-            Some(client_callback),
-            state_ptr as *mut _,
-        )
-    };
-    if cnx.is_null() {
-        return Err(ClientError::new("Could not create QUIC connection"));
-    }
-
-    apply_path_mode(cnx, &mut resolvers[0])?;
-
-    unsafe {
-        picoquic_set_callback(cnx, Some(client_callback), state_ptr as *mut _);
-        picoquic_enable_path_callbacks(cnx, 1);
-        if config.keep_alive_interval > 0 {
-            picoquic_enable_keep_alive(cnx, config.keep_alive_interval as u64 * 1000);
-        } else {
-            picoquic_disable_keep_alive(cnx);
-        }
-    }
-
-    if config.gso {
-        warn!("GSO is not implemented in the Rust client loop yet.");
-    }
-
-    let mut dns_id = 1u16;
-    let mut recv_buf = vec![0u8; 4096];
-    let mut send_buf = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
-    let packet_loop_send_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_SEND_MAX);
-    let packet_loop_recv_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_RECV_MAX);
-    let mut zero_send_loops = 0u64;
-    let mut zero_send_with_streams = 0u64;
+    let mut reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
 
     loop {
+        let mut resolvers = resolve_resolvers(config.resolvers, mtu, config.debug_poll)?;
+        if resolvers.is_empty() {
+            return Err(ClientError::new("At least one resolver is required"));
+        }
+
+        let mut local_addr_storage = socket_addr_to_storage(udp.local_addr().map_err(map_io)?);
+
         let current_time = unsafe { picoquic_current_time() };
-        drain_commands(cnx, state_ptr, &mut command_rx);
-        drain_stream_data(cnx, state_ptr);
-        let closing = unsafe { (*state_ptr).is_closing() };
-        if closing {
-            break;
-        }
-
-        let ready = unsafe { (*state_ptr).is_ready() };
-        if ready {
-            add_paths(cnx, &mut resolvers)?;
-            for resolver in resolvers.iter_mut() {
-                if resolver.added {
-                    apply_path_mode(cnx, resolver)?;
-                }
-            }
-        }
-        drain_path_events(cnx, &mut resolvers, state_ptr);
-
-        for resolver in resolvers.iter_mut() {
-            if resolver.mode == ResolverMode::Authoritative {
-                expire_inflight_polls(&mut resolver.inflight_poll_ids, current_time);
-            }
-        }
-
-        let delay_us =
-            unsafe { picoquic_get_next_wake_delay(quic, current_time, DNS_WAKE_DELAY_MAX_US) };
-        let delay_us = if delay_us < 0 { 0 } else { delay_us as u64 };
-        let streams_len_for_sleep = unsafe { (*state_ptr).streams_len() };
-        let mut has_work = streams_len_for_sleep > 0;
-        for resolver in resolvers.iter_mut() {
-            if !refresh_resolver_path(cnx, resolver) {
-                continue;
-            }
-            let pending_for_sleep = match resolver.mode {
-                ResolverMode::Authoritative => {
-                    let quality = fetch_path_quality(cnx, resolver);
-                    let snapshot = resolver
-                        .pacing_budget
-                        .as_mut()
-                        .map(|budget| budget.target_inflight(&quality, delay_us.max(1)));
-                    resolver.last_pacing_snapshot = snapshot;
-                    let target = snapshot
-                        .map(|snapshot| snapshot.target_inflight)
-                        .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
-                    let inflight_packets = inflight_packet_estimate(quality.bytes_in_transit, mtu);
-                    target.saturating_sub(inflight_packets)
-                }
-                ResolverMode::Recursive => resolver.pending_polls,
-            };
-            if pending_for_sleep > 0 {
-                has_work = true;
-            }
-            if resolver.mode == ResolverMode::Authoritative
-                && !resolver.inflight_poll_ids.is_empty()
-            {
-                has_work = true;
-            }
-        }
-        // Avoid a tight poll loop when idle, but keep the short slice during active transfers.
-        let timeout_us = if has_work {
-            delay_us.clamp(1, DNS_POLL_SLICE_US)
-        } else {
-            delay_us.max(1)
+        let quic = unsafe {
+            picoquic_create(
+                8,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                alpn.as_ptr(),
+                Some(client_callback),
+                state_ptr as *mut _,
+                None,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                current_time,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            )
         };
-        let timeout = Duration::from_micros(timeout_us);
-
-        tokio::select! {
-            command = command_rx.recv() => {
-                if let Some(command) = command {
-                    handle_command(cnx, state_ptr, command);
-                }
-            }
-            _ = data_notify.notified() => {}
-            recv = udp.recv_from(&mut recv_buf) => {
-                match recv {
-                    Ok((size, peer)) => {
-                        let mut response_ctx = DnsResponseContext {
-                            quic,
-                            local_addr_storage: &local_addr_storage,
-                            resolvers: &mut resolvers,
-                        };
-                        handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
-                        for _ in 1..packet_loop_recv_max {
-                            match udp.try_recv_from(&mut recv_buf) {
-                                Ok((size, peer)) => {
-                                    handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
-                                }
-                                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
-                                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                                Err(err) => {
-                                    if is_transient_udp_error(&err) {
-                                        break;
-                                    }
-                                    return Err(map_io(err));
-                                }
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        if !is_transient_udp_error(&err) {
-                            return Err(map_io(err));
-                        }
-                    }
-                }
-            }
-            _ = sleep(timeout) => {}
+        if quic.is_null() {
+            return Err(ClientError::new("Could not create QUIC context"));
+        }
+        let _quic_guard = QuicGuard::new(quic);
+        let mixed_cc = unsafe { slipstream_mixed_cc_algorithm };
+        if mixed_cc.is_null() {
+            return Err(ClientError::new("Could not load mixed congestion control"));
+        }
+        unsafe {
+            configure_quic_with_custom(quic, mixed_cc, mtu);
+            picoquic_enable_path_callbacks_default(quic, 1);
+            let override_ptr = cc_override
+                .as_ref()
+                .map(|value| value.as_ptr())
+                .unwrap_or(std::ptr::null());
+            slipstream_set_cc_override(override_ptr);
+        }
+        unsafe {
+            slipstream_set_default_path_mode(resolver_mode_to_c(resolvers[0].mode));
+        }
+        if let Some(cert) = config.cert {
+            configure_pinned_certificate(quic, cert).map_err(ClientError::new)?;
+        }
+        let mut server_storage = resolvers[0].storage;
+        // picoquic_create_client_cnx calls picoquic_start_client_cnx internally (see picoquic/quicctx.c).
+        let cnx = unsafe {
+            picoquic_create_client_cnx(
+                quic,
+                &mut server_storage as *mut _ as *mut libc::sockaddr,
+                current_time,
+                0,
+                sni.as_ptr(),
+                alpn.as_ptr(),
+                Some(client_callback),
+                state_ptr as *mut _,
+            )
+        };
+        if cnx.is_null() {
+            return Err(ClientError::new("Could not create QUIC connection"));
         }
 
-        drain_commands(cnx, state_ptr, &mut command_rx);
-        drain_stream_data(cnx, state_ptr);
-        drain_path_events(cnx, &mut resolvers, state_ptr);
+        apply_path_mode(cnx, &mut resolvers[0])?;
 
-        for _ in 0..packet_loop_send_max {
+        unsafe {
+            picoquic_set_callback(cnx, Some(client_callback), state_ptr as *mut _);
+            picoquic_enable_path_callbacks(cnx, 1);
+            if config.keep_alive_interval > 0 {
+                picoquic_enable_keep_alive(cnx, config.keep_alive_interval as u64 * 1000);
+            } else {
+                picoquic_disable_keep_alive(cnx);
+            }
+        }
+
+        if config.gso {
+            warn!("GSO is not implemented in the Rust client loop yet.");
+        }
+
+        let mut dns_id = 1u16;
+        let mut recv_buf = vec![0u8; 4096];
+        let mut send_buf = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
+        let packet_loop_send_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_SEND_MAX);
+        let packet_loop_recv_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_RECV_MAX);
+        let mut zero_send_loops = 0u64;
+        let mut zero_send_with_streams = 0u64;
+
+        loop {
             let current_time = unsafe { picoquic_current_time() };
-            let mut send_length: libc::size_t = 0;
-            let mut addr_to: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-            let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-            let mut if_index: libc::c_int = 0;
-            let mut log_cid = picoquic_connection_id_t {
-                id: [0; PICOQUIC_CONNECTION_ID_MAX_SIZE],
-                id_len: 0,
-            };
-            let mut last_cnx: *mut picoquic_cnx_t = std::ptr::null_mut();
-
-            let ret = unsafe {
-                picoquic_prepare_next_packet_ex(
-                    quic,
-                    current_time,
-                    send_buf.as_mut_ptr(),
-                    send_buf.len(),
-                    &mut send_length,
-                    &mut addr_to,
-                    &mut addr_from,
-                    &mut if_index,
-                    &mut log_cid,
-                    &mut last_cnx,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ret < 0 {
-                return Err(ClientError::new("Failed preparing outbound QUIC packet"));
+            drain_commands(cnx, state_ptr, &mut command_rx);
+            drain_stream_data(cnx, state_ptr);
+            let closing = unsafe { (*state_ptr).is_closing() };
+            if closing {
+                break;
             }
-            if send_length == 0 {
-                zero_send_loops = zero_send_loops.saturating_add(1);
-                let streams_len = unsafe { (*state_ptr).streams_len() };
-                if streams_len > 0 {
-                    zero_send_with_streams = zero_send_with_streams.saturating_add(1);
-                    let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) } != 0;
-                    if flow_blocked {
-                        for resolver in resolvers.iter_mut() {
-                            if resolver.mode == ResolverMode::Recursive && resolver.added {
-                                resolver.pending_polls = resolver.pending_polls.max(1);
+
+            let ready = unsafe { (*state_ptr).is_ready() };
+            if ready {
+                if reconnect_delay != Duration::from_millis(RECONNECT_SLEEP_MIN_MS) {
+                    reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
+                }
+                add_paths(cnx, &mut resolvers)?;
+                for resolver in resolvers.iter_mut() {
+                    if resolver.added {
+                        apply_path_mode(cnx, resolver)?;
+                    }
+                }
+            }
+            drain_path_events(cnx, &mut resolvers, state_ptr);
+
+            for resolver in resolvers.iter_mut() {
+                if resolver.mode == ResolverMode::Authoritative {
+                    expire_inflight_polls(&mut resolver.inflight_poll_ids, current_time);
+                }
+            }
+
+            let delay_us =
+                unsafe { picoquic_get_next_wake_delay(quic, current_time, DNS_WAKE_DELAY_MAX_US) };
+            let delay_us = if delay_us < 0 { 0 } else { delay_us as u64 };
+            let streams_len_for_sleep = unsafe { (*state_ptr).streams_len() };
+            let mut has_work = streams_len_for_sleep > 0;
+            for resolver in resolvers.iter_mut() {
+                if !refresh_resolver_path(cnx, resolver) {
+                    continue;
+                }
+                let pending_for_sleep = match resolver.mode {
+                    ResolverMode::Authoritative => {
+                        let quality = fetch_path_quality(cnx, resolver);
+                        let snapshot = resolver
+                            .pacing_budget
+                            .as_mut()
+                            .map(|budget| budget.target_inflight(&quality, delay_us.max(1)));
+                        resolver.last_pacing_snapshot = snapshot;
+                        let target = snapshot
+                            .map(|snapshot| snapshot.target_inflight)
+                            .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
+                        let inflight_packets =
+                            inflight_packet_estimate(quality.bytes_in_transit, mtu);
+                        target.saturating_sub(inflight_packets)
+                    }
+                    ResolverMode::Recursive => resolver.pending_polls,
+                };
+                if pending_for_sleep > 0 {
+                    has_work = true;
+                }
+                if resolver.mode == ResolverMode::Authoritative
+                    && !resolver.inflight_poll_ids.is_empty()
+                {
+                    has_work = true;
+                }
+            }
+            // Avoid a tight poll loop when idle, but keep the short slice during active transfers.
+            let timeout_us = if has_work {
+                delay_us.clamp(1, DNS_POLL_SLICE_US)
+            } else {
+                delay_us.max(1)
+            };
+            let timeout = Duration::from_micros(timeout_us);
+
+            tokio::select! {
+                command = command_rx.recv() => {
+                    if let Some(command) = command {
+                        handle_command(cnx, state_ptr, command);
+                    }
+                }
+                _ = data_notify.notified() => {}
+                recv = udp.recv_from(&mut recv_buf) => {
+                    match recv {
+                        Ok((size, peer)) => {
+                            let mut response_ctx = DnsResponseContext {
+                                quic,
+                                local_addr_storage: &local_addr_storage,
+                                resolvers: &mut resolvers,
+                            };
+                            handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
+                            for _ in 1..packet_loop_recv_max {
+                                match udp.try_recv_from(&mut recv_buf) {
+                                    Ok((size, peer)) => {
+                                        handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
+                                    }
+                                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                                    Err(err) => {
+                                        if is_transient_udp_error(&err) {
+                                            break;
+                                        }
+                                        return Err(map_io(err));
+                                    }
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            if !is_transient_udp_error(&err) {
+                                return Err(map_io(err));
                             }
                         }
                     }
                 }
-                break;
+                _ = sleep(timeout) => {}
             }
 
-            if addr_to.ss_family == 0 {
-                break;
-            }
-            if let Ok(dest) = sockaddr_storage_to_socket_addr(&addr_to) {
+            drain_commands(cnx, state_ptr, &mut command_rx);
+            drain_stream_data(cnx, state_ptr);
+            drain_path_events(cnx, &mut resolvers, state_ptr);
+
+            for _ in 0..packet_loop_send_max {
+                let current_time = unsafe { picoquic_current_time() };
+                let mut send_length: libc::size_t = 0;
+                let mut addr_to: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+                let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+                let mut if_index: libc::c_int = 0;
+                let mut log_cid = picoquic_connection_id_t {
+                    id: [0; PICOQUIC_CONNECTION_ID_MAX_SIZE],
+                    id_len: 0,
+                };
+                let mut last_cnx: *mut picoquic_cnx_t = std::ptr::null_mut();
+
+                let ret = unsafe {
+                    picoquic_prepare_next_packet_ex(
+                        quic,
+                        current_time,
+                        send_buf.as_mut_ptr(),
+                        send_buf.len(),
+                        &mut send_length,
+                        &mut addr_to,
+                        &mut addr_from,
+                        &mut if_index,
+                        &mut log_cid,
+                        &mut last_cnx,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ret < 0 {
+                    return Err(ClientError::new("Failed preparing outbound QUIC packet"));
+                }
+                if send_length == 0 {
+                    zero_send_loops = zero_send_loops.saturating_add(1);
+                    let streams_len = unsafe { (*state_ptr).streams_len() };
+                    if streams_len > 0 {
+                        zero_send_with_streams = zero_send_with_streams.saturating_add(1);
+                        let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) } != 0;
+                        if flow_blocked {
+                            for resolver in resolvers.iter_mut() {
+                                if resolver.mode == ResolverMode::Recursive && resolver.added {
+                                    resolver.pending_polls = resolver.pending_polls.max(1);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                if addr_to.ss_family == 0 {
+                    break;
+                }
+                if let Ok(dest) = sockaddr_storage_to_socket_addr(&addr_to) {
+                    let dest = normalize_dual_stack_addr(dest);
+                    if let Some(resolver) = find_resolver_by_addr_mut(&mut resolvers, dest) {
+                        resolver.local_addr_storage = Some(unsafe { std::ptr::read(&addr_from) });
+                        resolver.debug.send_packets = resolver.debug.send_packets.saturating_add(1);
+                        resolver.debug.send_bytes =
+                            resolver.debug.send_bytes.saturating_add(send_length as u64);
+                    }
+                }
+
+                let qname = build_qname(&send_buf[..send_length], config.domain)
+                    .map_err(|err| ClientError::new(err.to_string()))?;
+                let params = QueryParams {
+                    id: dns_id,
+                    qname: &qname,
+                    qtype: RR_TXT,
+                    qclass: CLASS_IN,
+                    rd: true,
+                    cd: false,
+                    qdcount: 1,
+                    is_query: true,
+                };
+                dns_id = dns_id.wrapping_add(1);
+                let packet =
+                    encode_query(&params).map_err(|err| ClientError::new(err.to_string()))?;
+
+                let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
                 let dest = normalize_dual_stack_addr(dest);
-                if let Some(resolver) = find_resolver_by_addr_mut(&mut resolvers, dest) {
-                    resolver.local_addr_storage = Some(unsafe { std::ptr::read(&addr_from) });
-                    resolver.debug.send_packets = resolver.debug.send_packets.saturating_add(1);
-                    resolver.debug.send_bytes =
-                        resolver.debug.send_bytes.saturating_add(send_length as u64);
+                local_addr_storage = addr_from;
+                if let Err(err) = udp.send_to(&packet, dest).await {
+                    if !is_transient_udp_error(&err) {
+                        return Err(map_io(err));
+                    }
                 }
             }
 
-            let qname = build_qname(&send_buf[..send_length], config.domain)
-                .map_err(|err| ClientError::new(err.to_string()))?;
-            let params = QueryParams {
-                id: dns_id,
-                qname: &qname,
-                qtype: RR_TXT,
-                qclass: CLASS_IN,
-                rd: true,
-                cd: false,
-                qdcount: 1,
-                is_query: true,
-            };
-            dns_id = dns_id.wrapping_add(1);
-            let packet = encode_query(&params).map_err(|err| ClientError::new(err.to_string()))?;
-
-            let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
-            let dest = normalize_dual_stack_addr(dest);
-            local_addr_storage = addr_from;
-            if let Err(err) = udp.send_to(&packet, dest).await {
-                if !is_transient_udp_error(&err) {
-                    return Err(map_io(err));
+            let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
+            let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
+            for resolver in resolvers.iter_mut() {
+                if !refresh_resolver_path(cnx, resolver) {
+                    continue;
                 }
-            }
-        }
-
-        let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
-        let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
-        for resolver in resolvers.iter_mut() {
-            if !refresh_resolver_path(cnx, resolver) {
-                continue;
-            }
-            match resolver.mode {
-                ResolverMode::Authoritative => {
-                    let quality = fetch_path_quality(cnx, resolver);
-                    let snapshot = resolver.last_pacing_snapshot;
-                    let pacing_target = snapshot
-                        .map(|snapshot| snapshot.target_inflight)
-                        .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
-                    let inflight_packets = inflight_packet_estimate(quality.bytes_in_transit, mtu);
-                    let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
-                    if has_ready_stream && !flow_blocked {
-                        poll_deficit = 0;
-                    }
-                    if poll_deficit > 0 && resolver.debug.enabled {
-                        debug!(
-                            "cc_state: {} cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
-                            resolver.label(),
-                            quality.cwin,
-                            quality.bytes_in_transit,
-                            quality.rtt,
-                            flow_blocked,
-                            poll_deficit
-                        );
-                    }
-                    if poll_deficit > 0 {
-                        let burst_max = path_poll_burst_max(resolver);
-                        let mut to_send = poll_deficit.min(burst_max);
-                        send_poll_queries(
-                            cnx,
-                            &udp,
-                            config,
-                            &mut local_addr_storage,
-                            &mut dns_id,
-                            resolver,
-                            &mut to_send,
-                            &mut send_buf,
-                        )
-                        .await?;
-                    }
-                }
-                ResolverMode::Recursive => {
-                    resolver.last_pacing_snapshot = None;
-                    if resolver.pending_polls > 0 {
-                        let burst_max = path_poll_burst_max(resolver);
-                        if resolver.pending_polls > burst_max {
-                            let mut to_send = burst_max;
+                match resolver.mode {
+                    ResolverMode::Authoritative => {
+                        let quality = fetch_path_quality(cnx, resolver);
+                        let snapshot = resolver.last_pacing_snapshot;
+                        let pacing_target = snapshot
+                            .map(|snapshot| snapshot.target_inflight)
+                            .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
+                        let inflight_packets =
+                            inflight_packet_estimate(quality.bytes_in_transit, mtu);
+                        let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
+                        if has_ready_stream && !flow_blocked {
+                            poll_deficit = 0;
+                        }
+                        if poll_deficit > 0 && resolver.debug.enabled {
+                            debug!(
+                                "cc_state: {} cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
+                                resolver.label(),
+                                quality.cwin,
+                                quality.bytes_in_transit,
+                                quality.rtt,
+                                flow_blocked,
+                                poll_deficit
+                            );
+                        }
+                        if poll_deficit > 0 {
+                            let burst_max = path_poll_burst_max(resolver);
+                            let mut to_send = poll_deficit.min(burst_max);
                             send_poll_queries(
                                 cnx,
                                 &udp,
@@ -463,67 +468,109 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                                 &mut send_buf,
                             )
                             .await?;
-                            resolver.pending_polls = resolver
-                                .pending_polls
-                                .saturating_sub(burst_max)
-                                .saturating_add(to_send);
-                        } else {
-                            let mut pending = resolver.pending_polls;
-                            send_poll_queries(
-                                cnx,
-                                &udp,
-                                config,
-                                &mut local_addr_storage,
-                                &mut dns_id,
-                                resolver,
-                                &mut pending,
-                                &mut send_buf,
-                            )
-                            .await?;
-                            resolver.pending_polls = pending;
+                        }
+                    }
+                    ResolverMode::Recursive => {
+                        resolver.last_pacing_snapshot = None;
+                        if resolver.pending_polls > 0 {
+                            let burst_max = path_poll_burst_max(resolver);
+                            if resolver.pending_polls > burst_max {
+                                let mut to_send = burst_max;
+                                send_poll_queries(
+                                    cnx,
+                                    &udp,
+                                    config,
+                                    &mut local_addr_storage,
+                                    &mut dns_id,
+                                    resolver,
+                                    &mut to_send,
+                                    &mut send_buf,
+                                )
+                                .await?;
+                                resolver.pending_polls = resolver
+                                    .pending_polls
+                                    .saturating_sub(burst_max)
+                                    .saturating_add(to_send);
+                            } else {
+                                let mut pending = resolver.pending_polls;
+                                send_poll_queries(
+                                    cnx,
+                                    &udp,
+                                    config,
+                                    &mut local_addr_storage,
+                                    &mut dns_id,
+                                    resolver,
+                                    &mut pending,
+                                    &mut send_buf,
+                                )
+                                .await?;
+                                resolver.pending_polls = pending;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        let report_time = unsafe { picoquic_current_time() };
-        let streams_len = unsafe { (*state_ptr).streams_len() };
-        let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
-        for resolver in resolvers.iter_mut() {
-            resolver.debug.enqueued_bytes = enqueued_bytes;
-            resolver.debug.last_enqueue_at = last_enqueue_at;
-            resolver.debug.zero_send_loops = zero_send_loops;
-            resolver.debug.zero_send_with_streams = zero_send_with_streams;
-            if !refresh_resolver_path(cnx, resolver) {
-                continue;
-            }
-            let inflight_polls = resolver.inflight_poll_ids.len();
-            let pending_for_debug = match resolver.mode {
-                ResolverMode::Authoritative => {
-                    let quality = fetch_path_quality(cnx, resolver);
-                    let inflight_packets = inflight_packet_estimate(quality.bytes_in_transit, mtu);
-                    resolver
-                        .last_pacing_snapshot
-                        .map(|snapshot| snapshot.target_inflight.saturating_sub(inflight_packets))
-                        .unwrap_or(0)
+            let report_time = unsafe { picoquic_current_time() };
+            let streams_len = unsafe { (*state_ptr).streams_len() };
+            let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
+            for resolver in resolvers.iter_mut() {
+                resolver.debug.enqueued_bytes = enqueued_bytes;
+                resolver.debug.last_enqueue_at = last_enqueue_at;
+                resolver.debug.zero_send_loops = zero_send_loops;
+                resolver.debug.zero_send_with_streams = zero_send_with_streams;
+                if !refresh_resolver_path(cnx, resolver) {
+                    continue;
                 }
-                ResolverMode::Recursive => resolver.pending_polls,
-            };
-            maybe_report_debug(
-                resolver,
-                report_time,
-                streams_len,
-                pending_for_debug,
-                inflight_polls,
-                resolver.last_pacing_snapshot,
-            );
+                let inflight_polls = resolver.inflight_poll_ids.len();
+                let pending_for_debug = match resolver.mode {
+                    ResolverMode::Authoritative => {
+                        let quality = fetch_path_quality(cnx, resolver);
+                        let inflight_packets =
+                            inflight_packet_estimate(quality.bytes_in_transit, mtu);
+                        resolver
+                            .last_pacing_snapshot
+                            .map(|snapshot| {
+                                snapshot.target_inflight.saturating_sub(inflight_packets)
+                            })
+                            .unwrap_or(0)
+                    }
+                    ResolverMode::Recursive => resolver.pending_polls,
+                };
+                maybe_report_debug(
+                    resolver,
+                    report_time,
+                    streams_len,
+                    pending_for_debug,
+                    inflight_polls,
+                    resolver.last_pacing_snapshot,
+                );
+            }
         }
-    }
 
-    unsafe {
-        picoquic_close(cnx, 0);
-    }
+        unsafe {
+            picoquic_close(cnx, 0);
+        }
 
-    Ok(0)
+        unsafe {
+            (*state_ptr).reset_for_reconnect();
+        }
+        let dropped = drain_disconnected_commands(&mut command_rx);
+        if dropped > 0 {
+            warn!("Dropped {} queued commands while reconnecting", dropped);
+        }
+        warn!(
+            "Connection closed; reconnecting in {}ms",
+            reconnect_delay.as_millis()
+        );
+        // Sleep in small chunks and drop commands that arrive while disconnected.
+        let mut remaining_sleep = reconnect_delay;
+        while remaining_sleep > Duration::ZERO {
+            let chunk = remaining_sleep.min(Duration::from_millis(100));
+            sleep(chunk).await;
+            remaining_sleep -= chunk;
+            let _ = drain_disconnected_commands(&mut command_rx);
+        }
+        reconnect_delay = (reconnect_delay * 2).min(Duration::from_millis(RECONNECT_SLEEP_MAX_MS));
+    }
 }

@@ -1,15 +1,16 @@
 use slipstream_core::tcp::{stream_read_limit_chunks, tcp_send_buffer_bytes};
 use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
-    picoquic_get_next_local_stream_id, picoquic_mark_active_stream,
-    picoquic_provide_stream_data_buffer, picoquic_reset_stream, picoquic_stream_data_consumed,
+    picoquic_get_close_reasons, picoquic_get_cnx_state, picoquic_get_next_local_stream_id,
+    picoquic_mark_active_stream, picoquic_provide_stream_data_buffer, picoquic_reset_stream,
+    picoquic_stream_data_consumed,
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{debug, info, warn};
 
 const STREAM_READ_CHUNK_BYTES: usize = 4096;
@@ -66,10 +67,29 @@ impl ClientState {
     pub(crate) fn take_path_events(&mut self) -> Vec<PathEvent> {
         std::mem::take(&mut self.path_events)
     }
+
+    pub(crate) fn reset_for_reconnect(&mut self) {
+        let debug_streams = self.debug_streams;
+        for (stream_id, mut stream) in self.streams.drain() {
+            if let Some(read_abort_tx) = stream.read_abort_tx.take() {
+                let _ = read_abort_tx.send(());
+            }
+            let _ = stream.write_tx.send(StreamWrite::Fin);
+            if debug_streams {
+                debug!("stream {}: closing due to reconnect", stream_id);
+            }
+        }
+        self.ready = false;
+        self.closing = false;
+        self.path_events.clear();
+        self.debug_enqueued_bytes = 0;
+        self.debug_last_enqueue_at = 0;
+    }
 }
 
 struct ClientStream {
     write_tx: mpsc::UnboundedSender<StreamWrite>,
+    read_abort_tx: Option<oneshot::Sender<()>>,
     data_rx: Option<mpsc::Receiver<Vec<u8>>>,
     queued_bytes: usize,
     rx_bytes: u64,
@@ -96,6 +116,15 @@ pub(crate) enum Command {
 pub(crate) enum PathEvent {
     Available(u64),
     Deleted(u64),
+}
+
+fn close_event_label(event: picoquic_call_back_event_t) -> &'static str {
+    match event {
+        picoquic_call_back_event_t::picoquic_callback_close => "close",
+        picoquic_call_back_event_t::picoquic_callback_application_close => "application_close",
+        picoquic_call_back_event_t::picoquic_callback_stateless_reset => "stateless_reset",
+        _ => "unknown",
+    }
 }
 
 pub(crate) unsafe extern "C" fn client_callback(
@@ -161,7 +190,30 @@ pub(crate) unsafe extern "C" fn client_callback(
         | picoquic_call_back_event_t::picoquic_callback_application_close
         | picoquic_call_back_event_t::picoquic_callback_stateless_reset => {
             state.closing = true;
-            info!("Connection closed");
+            let mut local_reason = 0u64;
+            let mut remote_reason = 0u64;
+            let mut local_app_reason = 0u64;
+            let mut remote_app_reason = 0u64;
+            let cnx_state = unsafe { picoquic_get_cnx_state(cnx) };
+            unsafe {
+                picoquic_get_close_reasons(
+                    cnx,
+                    &mut local_reason,
+                    &mut remote_reason,
+                    &mut local_app_reason,
+                    &mut remote_app_reason,
+                );
+            }
+            warn!(
+                "Connection closed event={} state={:?} local_error=0x{:x} remote_error=0x{:x} local_app=0x{:x} remote_app=0x{:x} ready={}",
+                close_event_label(fin_or_event),
+                cnx_state,
+                local_reason,
+                remote_reason,
+                local_app_reason,
+                remote_app_reason,
+                state.ready
+            );
         }
         picoquic_call_back_event_t::picoquic_callback_prepare_to_send => {
             if !bytes.is_null() {
@@ -332,9 +384,11 @@ pub(crate) fn handle_command(
             let (read_half, write_half) = stream.into_split();
             let (write_tx, write_rx) = mpsc::unbounded_channel();
             let command_tx = state.command_tx.clone();
+            let (read_abort_tx, read_abort_rx) = oneshot::channel();
             spawn_client_reader(
                 stream_id,
                 read_half,
+                read_abort_rx,
                 command_tx.clone(),
                 data_tx,
                 data_notify,
@@ -350,6 +404,7 @@ pub(crate) fn handle_command(
                 stream_id,
                 ClientStream {
                     write_tx,
+                    read_abort_tx: Some(read_abort_tx),
                     data_rx: Some(data_rx),
                     queued_bytes: 0,
                     rx_bytes: 0,
@@ -465,6 +520,7 @@ pub(crate) fn handle_command(
 fn spawn_client_reader(
     stream_id: u64,
     mut read_half: tokio::net::tcp::OwnedReadHalf,
+    mut read_abort_rx: oneshot::Receiver<()>,
     command_tx: mpsc::UnboundedSender<Command>,
     data_tx: mpsc::Sender<Vec<u8>>,
     data_notify: Arc<Notify>,
@@ -472,23 +528,30 @@ fn spawn_client_reader(
     tokio::spawn(async move {
         let mut buf = vec![0u8; STREAM_READ_CHUNK_BYTES];
         loop {
-            match read_half.read(&mut buf).await {
-                Ok(0) => {
+            tokio::select! {
+                _ = &mut read_abort_rx => {
                     break;
                 }
-                Ok(n) => {
-                    let data = buf[..n].to_vec();
-                    if data_tx.send(data).await.is_err() {
-                        break;
+                read_result = read_half.read(&mut buf) => {
+                    match read_result {
+                        Ok(0) => {
+                            break;
+                        }
+                        Ok(n) => {
+                            let data = buf[..n].to_vec();
+                            if data_tx.send(data).await.is_err() {
+                                break;
+                            }
+                            data_notify.notify_one();
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                            continue;
+                        }
+                        Err(_) => {
+                            let _ = command_tx.send(Command::StreamReadError { stream_id });
+                            break;
+                        }
                     }
-                    data_notify.notify_one();
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
-                    continue;
-                }
-                Err(_) => {
-                    let _ = command_tx.send(Command::StreamReadError { stream_id });
-                    break;
                 }
             }
         }

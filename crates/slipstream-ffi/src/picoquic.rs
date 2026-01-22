@@ -248,6 +248,14 @@ extern "C" {
     // Test helpers defined in cc/slipstream_test_helpers.c.
     pub fn slipstream_test_get_max_data_limit(quic: *mut picoquic_quic_t) -> u64;
     pub fn slipstream_test_get_defer_stream_data_consumption(quic: *mut picoquic_quic_t) -> c_int;
+    pub fn slipstream_take_stateless_packet_for_cid(
+        quic: *mut picoquic_quic_t,
+        packet: *const u8,
+        packet_len: size_t,
+        out_bytes: *mut u8,
+        out_capacity: size_t,
+        out_len: *mut size_t,
+    ) -> c_int;
 
     pub static mut slipstream_server_cc_algorithm: *mut picoquic_congestion_algorithm_t;
     pub static mut slipstream_mixed_cc_algorithm: *mut picoquic_congestion_algorithm_t;
@@ -271,6 +279,7 @@ extern "C" {
     pub fn picoquic_enable_path_callbacks(cnx: *mut picoquic_cnx_t, are_enabled: c_int);
     pub fn picoquic_close(cnx: *mut picoquic_cnx_t, application_reason_code: u64) -> c_int;
     pub fn picoquic_close_immediate(cnx: *mut picoquic_cnx_t);
+    pub fn picoquic_delete_cnx(cnx: *mut picoquic_cnx_t);
 
     pub fn picoquic_enable_keep_alive(cnx: *mut picoquic_cnx_t, interval: u64);
     pub fn picoquic_disable_keep_alive(cnx: *mut picoquic_cnx_t);
@@ -313,6 +322,13 @@ extern "C" {
     pub fn picoquic_get_first_cnx(quic: *mut picoquic_quic_t) -> *mut picoquic_cnx_t;
     pub fn picoquic_get_next_cnx(cnx: *mut picoquic_cnx_t) -> *mut picoquic_cnx_t;
     pub fn picoquic_get_cnx_state(cnx: *mut picoquic_cnx_t) -> picoquic_state_enum;
+    pub fn picoquic_get_close_reasons(
+        cnx: *mut picoquic_cnx_t,
+        local_reason: *mut u64,
+        remote_reason: *mut u64,
+        local_application_reason: *mut u64,
+        remote_application_reason: *mut u64,
+    );
 
     pub fn picoquic_connection_disconnect(cnx: *mut picoquic_cnx_t);
 

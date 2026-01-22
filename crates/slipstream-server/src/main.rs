@@ -36,6 +36,8 @@ struct Args {
     key: Option<String>,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
     domains: Vec<String>,
+    #[arg(long = "idle-timeout-seconds", default_value_t = 1200)]
+    idle_timeout_seconds: u64,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
     #[arg(long = "debug-commands")]
@@ -159,6 +161,7 @@ fn main() {
         cert,
         key,
         domains,
+        idle_timeout_seconds: args.idle_timeout_seconds,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
     };
