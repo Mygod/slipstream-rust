@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_CRYPTO_LIBRARY");
     println!("cargo:rerun-if-env-changed=OPENSSL_SSL_LIBRARY");
+    println!("cargo:rerun-if-env-changed=OPENSSL_USE_STATIC_LIBS");
     println!("cargo:rerun-if-env-changed=OPENSSL_NO_VENDOR");
     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_ROOT");
     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_INCLUDE");

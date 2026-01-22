@@ -48,7 +48,9 @@ pub(crate) fn build_picoquic(
         command.env("OPENSSL_ROOT_DIR", root);
     }
     let prefer_static_openssl = cfg!(feature = "openssl-static");
-    if prefer_static_openssl {
+    let openssl_no_vendor = env::var_os("OPENSSL_NO_VENDOR").is_some();
+    let explicit_static = env::var_os("OPENSSL_USE_STATIC_LIBS").is_some();
+    if prefer_static_openssl && !openssl_no_vendor && !explicit_static {
         command.env("OPENSSL_USE_STATIC_LIBS", "TRUE");
     }
     if let Some(include) = &openssl_paths.include {

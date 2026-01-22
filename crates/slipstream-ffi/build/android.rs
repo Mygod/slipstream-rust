@@ -19,7 +19,7 @@ pub(crate) fn maybe_link_android_builtins(target: &str, cc: &str) {
 }
 
 fn android_builtins_name(target: &str) -> Option<&'static str> {
-    if target.contains("aarch64") {
+    if target.starts_with("aarch64") {
         Some("clang_rt.builtins-aarch64-android")
     } else if target.starts_with("arm") {
         Some("clang_rt.builtins-arm-android")
