@@ -106,8 +106,16 @@ pub(crate) fn ensure_cert_key(cert_path: &Path, key_path: &Path) -> Result<bool,
                     )
                 })?;
             }
-            generate_self_signed(cert_path, key_path)?;
-            Ok(true)
+            match generate_self_signed(cert_path, key_path) {
+                Ok(()) => Ok(true),
+                Err(err) => {
+                    if cert_path.exists() && key_path.exists() {
+                        Ok(false)
+                    } else {
+                        Err(err)
+                    }
+                }
+            }
         }
     }
 }
