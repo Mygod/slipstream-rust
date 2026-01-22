@@ -89,7 +89,7 @@ pub fn take_crypto_errors() -> Vec<String> {
             break;
         }
         let mut description = None;
-        let mut buffer = vec![0i8; 256];
+        let mut buffer = vec![0 as c_char; 256];
         unsafe {
             ERR_error_string_n(code as c_ulong, buffer.as_mut_ptr(), buffer.len());
         }
