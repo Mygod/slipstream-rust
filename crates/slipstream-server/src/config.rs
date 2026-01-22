@@ -126,6 +126,9 @@ fn parse_hex_seed(input: &str) -> Result<[u8; PICOQUIC_RESET_SECRET_SIZE], Strin
             trimmed.len()
         ));
     }
+    if !trimmed.is_ascii() {
+        return Err("Reset seed must be ASCII hex".to_string());
+    }
     let mut seed = [0u8; PICOQUIC_RESET_SECRET_SIZE];
     for (idx, slot) in seed.iter_mut().enumerate() {
         let offset = idx * 2;
