@@ -83,6 +83,7 @@ pub struct ClientArgs<'a> {
     pub domain: &'a str,
     pub cert: Option<&'a Path>,
     pub keep_alive_interval: Option<u16>,
+    pub random_src_port: Option<usize>,
     pub rust_log: &'a str,
     pub capture_logs: bool,
 }
@@ -170,6 +171,9 @@ pub fn spawn_client(args: ClientArgs<'_>) -> (ChildGuard, Option<LogCapture>) {
     }
     if let Some(interval) = args.keep_alive_interval {
         cmd.arg("--keep-alive-interval").arg(interval.to_string());
+    }
+    if let Some(workers) = args.random_src_port {
+        cmd.arg("--random-src-port").arg(workers.to_string());
     }
     spawn_process(&mut cmd, args.capture_logs, "slipstream-client")
 }

@@ -1,4 +1,5 @@
 use crate::error::ClientError;
+use crate::runtime::setup::map_io;
 use slipstream_core::net::is_transient_udp_error;
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::picoquic::{
@@ -6,9 +7,9 @@ use slipstream_ffi::picoquic::{
 };
 use slipstream_ffi::{ClientConfig, ResolverMode};
 use std::collections::HashMap;
-use tokio::net::UdpSocket as TokioUdpSocket;
 
 use super::path::refresh_resolver_path;
+use super::pool::DnsTransport;
 use super::resolver::{normalize_dual_stack_addr, sockaddr_storage_to_socket_addr, ResolverState};
 
 const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 5_000_000;
@@ -32,7 +33,7 @@ pub(crate) fn expire_inflight_polls(inflight_poll_ids: &mut HashMap<u16, u64>, n
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_poll_queries(
     cnx: *mut picoquic_cnx_t,
-    udp: &TokioUdpSocket,
+    transport: &DnsTransport,
     config: &ClientConfig<'_>,
     local_addr_storage: &mut libc::sockaddr_storage,
     dns_id: &mut u16,
@@ -79,7 +80,9 @@ pub(crate) async fn send_poll_queries(
         }
 
         remaining_count -= 1;
-        *local_addr_storage = addr_from;
+        if matches!(transport, DnsTransport::Shared { .. }) {
+            *local_addr_storage = addr_from;
+        }
         resolver.local_addr_storage = Some(unsafe { std::ptr::read(local_addr_storage) });
         resolver.debug.send_packets = resolver.debug.send_packets.saturating_add(1);
         resolver.debug.send_bytes = resolver.debug.send_bytes.saturating_add(send_length as u64);
@@ -103,13 +106,13 @@ pub(crate) async fn send_poll_queries(
 
         let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
         let dest = normalize_dual_stack_addr(dest);
-        if let Err(err) = udp.send_to(&packet, dest).await {
+        if let Err(err) = transport.send(&packet, dest).await {
             if is_transient_udp_error(&err) {
                 remaining_count = remaining_count.saturating_add(1);
                 *remaining = remaining_count;
                 break;
             }
-            return Err(ClientError::new(err.to_string()));
+            return Err(map_io(err));
         }
         if resolver.mode == ResolverMode::Authoritative {
             resolver.inflight_poll_ids.insert(poll_id, current_time);

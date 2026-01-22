@@ -82,9 +82,11 @@ fn idle_gc_closes_connection() {
         domain,
         cert: Some(&cert),
         keep_alive_interval: Some(0),
+        random_src_port: None,
         rust_log: "info",
         capture_logs: true,
     });
+
     let client_logs = client_logs.expect("client logs");
     if !wait_for_log(
         &client_logs,
@@ -115,9 +117,11 @@ fn idle_gc_closes_connection() {
         domain,
         cert: Some(&cert),
         keep_alive_interval: Some(0),
+        random_src_port: None,
         rust_log: "info",
         capture_logs: true,
     });
+
     let recovery_logs = recovery_logs.expect("recovery client logs");
     if !wait_for_log(
         &recovery_logs,

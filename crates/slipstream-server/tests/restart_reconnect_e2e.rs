@@ -65,6 +65,7 @@ fn restart_reconnects_idle_client() {
         domain,
         cert: Some(&cert),
         keep_alive_interval: Some(0),
+        random_src_port: None,
         rust_log: "info",
         capture_logs: true,
     });

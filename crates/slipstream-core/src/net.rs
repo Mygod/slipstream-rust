@@ -10,6 +10,6 @@ pub fn is_transient_udp_error(err: &Error) -> bool {
 
     matches!(
         err.raw_os_error(),
-        Some(code) if code == libc::ENETUNREACH || code == libc::EHOSTUNREACH
+        Some(code) if code == libc::ENETUNREACH || code == libc::EHOSTUNREACH || code == libc::ECONNREFUSED
     )
 }
