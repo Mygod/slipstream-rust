@@ -470,6 +470,8 @@ async fn forward_fallback_replies(
 fn dummy_sockaddr_storage() -> libc::sockaddr_storage {
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let sockaddr = libc::sockaddr_in6 {
+        #[cfg(target_os = "macos")]
+        sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
         sin6_family: libc::AF_INET6 as libc::sa_family_t,
         sin6_port: 12345u16.to_be(),
         sin6_flowinfo: 0,
