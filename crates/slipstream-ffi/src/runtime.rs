@@ -287,7 +287,7 @@ pub fn socket_addr_to_storage(addr: SocketAddr) -> sockaddr_storage {
                 let sockaddr_ptr = &mut storage as *mut _ as *mut SOCKADDR_IN;
                 (*sockaddr_ptr).sin_family = AF_INET as u16;
                 (*sockaddr_ptr).sin_port = addr.port().to_be();
-                *(*sockaddr_ptr).sin_addr.S_un.S_addr_mut() = u32::from_ne_bytes(addr.ip().octets());
+                *(*sockaddr_ptr).sin_addr.S_un.S_addr_mut() = u32::from_be_bytes(addr.ip().octets());
             }
             storage
         }
@@ -318,7 +318,7 @@ pub fn sockaddr_storage_to_socket_addr(storage: &sockaddr_storage) -> Result<Soc
         AF_INET => {
             let addr_in: &SOCKADDR_IN =
                 unsafe { &*(storage as *const _ as *const SOCKADDR_IN) };
-            let ip = Ipv4Addr::from(unsafe { addr_in.sin_addr.S_un.S_addr().to_ne_bytes() });
+            let ip = Ipv4Addr::from(addr_in.sin_addr.S_un.S_addr());
             let port = u16::from_be(addr_in.sin_port);
             Ok(SocketAddr::V4(SocketAddrV4::new(ip, port)))
         }
