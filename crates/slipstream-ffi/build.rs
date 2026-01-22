@@ -17,7 +17,7 @@ use picoquic::{
     locate_picotls_include_dir, resolve_picoquic_libs,
 };
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use util::env_flag;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -43,18 +43,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=AR");
 
+    let mut openssl_ssl_lib = None;
+    let mut openssl_crypto_lib = None;
     let allow_openssl_env_overrides =
         !cfg!(feature = "openssl-vendored") || env::var_os("OPENSSL_NO_VENDOR").is_some();
     if allow_openssl_env_overrides {
         let openssl_root = env::var_os("OPENSSL_ROOT_DIR");
         let openssl_include = env::var_os("OPENSSL_INCLUDE_DIR");
-        let openssl_ssl_lib = env::var_os("OPENSSL_SSL_LIBRARY");
-        let openssl_crypto_lib = env::var_os("OPENSSL_CRYPTO_LIBRARY");
+        let openssl_ssl_lib_env = env::var_os("OPENSSL_SSL_LIBRARY");
+        let openssl_crypto_lib_env = env::var_os("OPENSSL_CRYPTO_LIBRARY");
 
         let has_root = openssl_root.is_some();
         let has_include = openssl_include.is_some();
-        let has_ssl = openssl_ssl_lib.is_some();
-        let has_crypto = openssl_crypto_lib.is_some();
+        let has_ssl = openssl_ssl_lib_env.is_some();
+        let has_crypto = openssl_crypto_lib_env.is_some();
 
         if has_ssl ^ has_crypto {
             return Err(
@@ -76,6 +78,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .into(),
             );
         }
+
+        openssl_ssl_lib = openssl_ssl_lib_env.map(PathBuf::from);
+        openssl_crypto_lib = openssl_crypto_lib_env.map(PathBuf::from);
     }
 
     let openssl_paths = resolve_openssl_paths();
@@ -201,6 +206,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !cfg!(feature = "openssl-vendored") {
+        let mut openssl_search_dirs = Vec::new();
+        if let Some(lib) = &openssl_ssl_lib {
+            add_parent_dir(&mut openssl_search_dirs, lib);
+        }
+        if let Some(lib) = &openssl_crypto_lib {
+            add_parent_dir(&mut openssl_search_dirs, lib);
+        }
+        if openssl_search_dirs.is_empty() {
+            if let Some(root) = &openssl_paths.root {
+                push_unique_dir(&mut openssl_search_dirs, root.join("lib"));
+                push_unique_dir(&mut openssl_search_dirs, root.join("lib64"));
+            }
+        }
+        for dir in openssl_search_dirs {
+            println!("cargo:rustc-link-search=native={}", dir.display());
+        }
         if cfg!(feature = "openssl-static") {
             println!("cargo:rustc-link-lib=static=ssl");
             println!("cargo:rustc-link-lib=static=crypto");
@@ -217,4 +238,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dirs.iter().any(|existing| existing == &dir) {
+        dirs.push(dir);
+    }
+}
+
+fn add_parent_dir(dirs: &mut Vec<PathBuf>, path: &Path) {
+    if let Some(parent) = path.parent() {
+        push_unique_dir(dirs, parent.to_path_buf());
+    }
 }
