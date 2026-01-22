@@ -33,6 +33,12 @@ single certificate. If omitted, server certificates are not verified.
   Update `crates/slipstream-client/src/client.rs` and `crates/slipstream-server/src/server.rs`
   together to keep client/server ALPN in sync.
 
+## Server runtime knobs
+
+- `--idle-timeout-seconds`
+  Closes idle QUIC connections after the given number of seconds (default: 1200).
+  Set to 0 to disable idle GC.
+
 ## picoquic build environment
 
 These affect the build script in crates/slipstream-ffi:

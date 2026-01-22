@@ -1,7 +1,7 @@
+mod support;
+
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -10,30 +10,7 @@ use std::time::Duration;
 
 use slipstream_dns::{encode_query, is_response, QueryParams, CLASS_IN, RR_A};
 
-struct ChildGuard {
-    child: Child,
-}
-
-impl ChildGuard {
-    fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-
-    fn has_exited(&mut self) -> bool {
-        match self.child.try_wait() {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
-            Err(_) => true,
-        }
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        self.kill();
-    }
-}
+use support::{pick_udp_port, server_bin_path, spawn_server, workspace_root, ServerArgs};
 
 struct EchoServer {
     addr: SocketAddr,
@@ -95,45 +72,6 @@ impl Drop for EchoServer {
     }
 }
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
-}
-
-fn pick_udp_port() -> io::Result<u16> {
-    let socket = UdpSocket::bind("127.0.0.1:0")?;
-    Ok(socket.local_addr()?.port())
-}
-
-fn spawn_server(
-    server_bin: &Path,
-    dns_port: u16,
-    fallback_addr: SocketAddr,
-    domain: &str,
-    cert: &Path,
-    key: &Path,
-) -> ChildGuard {
-    let mut cmd = Command::new(server_bin);
-    cmd.arg("--dns-listen-host")
-        .arg("127.0.0.1")
-        .arg("--dns-listen-port")
-        .arg(dns_port.to_string())
-        .arg("--fallback")
-        .arg(fallback_addr.to_string())
-        .arg("--target-address")
-        .arg("127.0.0.1:1")
-        .arg("--domain")
-        .arg(domain)
-        .arg("--cert")
-        .arg(cert)
-        .arg("--key")
-        .arg(key)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let child = cmd.spawn().expect("start slipstream-server");
-    ChildGuard { child }
-}
-
 fn build_dns_query(qname: &str) -> Vec<u8> {
     encode_query(&QueryParams {
         id: 0x1234,
@@ -151,7 +89,7 @@ fn build_dns_query(qname: &str) -> Vec<u8> {
 #[test]
 fn udp_fallback_e2e() {
     let root = workspace_root();
-    let server_bin = PathBuf::from(env!("CARGO_BIN_EXE_slipstream-server"));
+    let server_bin = server_bin_path();
 
     let cert = root.join("fixtures/certs/cert.pem");
     let key = root.join("fixtures/certs/key.pem");
@@ -174,7 +112,19 @@ fn udp_fallback_e2e() {
     };
     let domain = "test.example.com";
 
-    let mut server = spawn_server(&server_bin, dns_port, echo.addr, domain, &cert, &key);
+    let (mut server, _server_logs) = spawn_server(ServerArgs {
+        server_bin: &server_bin,
+        dns_listen_host: Some("127.0.0.1"),
+        dns_port,
+        target_address: "127.0.0.1:1",
+        domains: &[domain],
+        cert: &cert,
+        key: &key,
+        fallback_addr: Some(echo.addr),
+        idle_timeout_seconds: None,
+        rust_log: "info",
+        capture_logs: false,
+    });
     thread::sleep(Duration::from_millis(200));
     if server.has_exited() {
         eprintln!("skipping udp fallback e2e test: server failed to start");

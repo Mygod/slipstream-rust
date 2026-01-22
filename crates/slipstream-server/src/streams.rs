@@ -381,7 +381,7 @@ fn handle_stream_data(
     }
 }
 
-fn remove_connection_streams(state: &mut ServerState, cnx: usize) {
+pub(crate) fn remove_connection_streams(state: &mut ServerState, cnx: usize) {
     let keys: Vec<StreamKey> = state
         .streams
         .keys()
@@ -518,6 +518,13 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             }
         }
         Command::StreamReadable { cnx_id, stream_id } => {
+            let key = StreamKey {
+                cnx: cnx_id,
+                stream_id,
+            };
+            if !state.streams.contains_key(&key) {
+                return;
+            }
             let cnx = cnx_id as *mut picoquic_cnx_t;
             let ret =
                 unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };

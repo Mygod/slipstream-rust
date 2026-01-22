@@ -5,9 +5,10 @@ use crate::picoquic::{
     picoquic_set_default_multipath_option, picoquic_set_default_priority,
     picoquic_set_initial_send_mtu, picoquic_set_key_log_file_from_env,
     picoquic_set_max_data_control, picoquic_set_mtu_max, picoquic_set_preemptive_repeat_policy,
-    picoquic_set_stream_data_consumption_mode,
+    picoquic_set_stream_data_consumption_mode, slipstream_take_stateless_packet_for_cid,
+    PICOQUIC_MAX_PACKET_SIZE,
 };
-use libc::{c_char, sockaddr_storage};
+use libc::{c_char, size_t, sockaddr_storage};
 use slipstream_core::tcp::stream_write_buffer_bytes;
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpStream};
@@ -138,6 +139,33 @@ pub fn sockaddr_storage_to_socket_addr(storage: &sockaddr_storage) -> Result<Soc
         }
         _ => Err("Unsupported sockaddr family".to_string()),
     }
+}
+
+/// # Safety
+/// Caller must ensure `quic` points to a valid picoquic context for the duration of the call.
+pub unsafe fn take_stateless_packet_for_cid(
+    quic: *mut picoquic_quic_t,
+    packet: &[u8],
+) -> Option<Vec<u8>> {
+    if quic.is_null() {
+        return None;
+    }
+
+    let mut buffer = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
+    let mut length: size_t = 0;
+    let ret = slipstream_take_stateless_packet_for_cid(
+        quic,
+        packet.as_ptr(),
+        packet.len(),
+        buffer.as_mut_ptr(),
+        buffer.len(),
+        &mut length,
+    );
+    if ret <= 0 {
+        return None;
+    }
+    buffer.truncate(length as usize);
+    Some(buffer)
 }
 
 /// # Safety

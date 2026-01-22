@@ -88,6 +88,9 @@ Otherwise, the response is ignored (including NAME_ERROR, which signals no data)
 - Poll frame type is 0x20 (single-byte frame with no payload).
 - Poll frames are only emitted when there is no other frame to send.
 - Poll frames are treated as non-ACK-eliciting but still influence congestion tracking.
+- If the server receives a 1-RTT packet for an unknown connection ID and picoquic has
+  queued a stateless reset for that ID, it returns that QUIC stateless reset payload
+  in the DNS response; otherwise it responds DNS-only.
 
 ## Backpressure and buffering
 

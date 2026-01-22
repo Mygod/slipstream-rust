@@ -45,11 +45,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cc_src = cc_dir.join("slipstream_server_cc.c");
     let mixed_cc_src = cc_dir.join("slipstream_mixed_cc.c");
     let poll_src = cc_dir.join("slipstream_poll.c");
+    let stateless_packet_src = cc_dir.join("slipstream_stateless_packet.c");
     let test_helpers_src = cc_dir.join("slipstream_test_helpers.c");
     let picotls_layout_src = cc_dir.join("picotls_layout.c");
     println!("cargo:rerun-if-changed={}", cc_src.display());
     println!("cargo:rerun-if-changed={}", mixed_cc_src.display());
     println!("cargo:rerun-if-changed={}", poll_src.display());
+    println!("cargo:rerun-if-changed={}", stateless_packet_src.display());
     println!("cargo:rerun-if-changed={}", test_helpers_src.display());
     println!("cargo:rerun-if-changed={}", picotls_layout_src.display());
     let picoquic_internal = picoquic_include_dir.join("picoquic_internal.h");
@@ -67,6 +69,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let poll_obj = out_dir.join("slipstream_poll.c.o");
     compile_cc(&poll_src, &poll_obj, &picoquic_include_dir)?;
     object_paths.push(poll_obj);
+
+    let stateless_packet_obj = out_dir.join("slipstream_stateless_packet.c.o");
+    compile_cc(
+        &stateless_packet_src,
+        &stateless_packet_obj,
+        &picoquic_include_dir,
+    )?;
+    object_paths.push(stateless_packet_obj);
 
     let test_helpers_obj = out_dir.join("slipstream_test_helpers.c.o");
     compile_cc(&test_helpers_src, &test_helpers_obj, &picoquic_include_dir)?;
