@@ -10,6 +10,10 @@ use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+use time::format_description::FormatItem;
+use time::macros::format_description;
+use time::OffsetDateTime;
 
 use slipstream_ffi::picoquic::PICOQUIC_RESET_SECRET_SIZE;
 
@@ -148,6 +152,11 @@ fn write_reset_seed(path: &Path, seed: &[u8; PICOQUIC_RESET_SECRET_SIZE]) -> io:
     Ok(())
 }
 
+const CERT_VALIDITY_DAYS: i64 = 365_000;
+const SECONDS_PER_DAY: i64 = 86_400;
+const ASN1_TIME_FORMAT: &[FormatItem<'static>] =
+    format_description!("[year][month][day][hour][minute][second]Z");
+
 fn generate_self_signed(cert_path: &Path, key_path: &Path) -> Result<(), String> {
     let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)
         .map_err(|err| format!("Failed to create EC group: {}", err))?;
@@ -186,10 +195,19 @@ fn generate_self_signed(cert_path: &Path, key_path: &Path) -> Result<(), String>
     builder
         .set_pubkey(&pkey)
         .map_err(|err| format!("Failed to set public key: {}", err))?;
-    let not_before = Asn1Time::days_from_now(0)
-        .map_err(|err| format!("Failed to set notBefore: {}", err))?;
-    let not_after = Asn1Time::days_from_now(365_000)
-        .map_err(|err| format!("Failed to set notAfter: {}", err))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "System time is before UNIX epoch".to_string())?;
+    let now_secs = i64::try_from(now.as_secs())
+        .map_err(|_| "System time is out of range".to_string())?;
+    let not_before = asn1_time_from_unix_secs(now_secs, "notBefore")?;
+    let validity_secs = CERT_VALIDITY_DAYS
+        .checked_mul(SECONDS_PER_DAY)
+        .ok_or_else(|| "Certificate validity overflowed".to_string())?;
+    let not_after_secs = now_secs
+        .checked_add(validity_secs)
+        .ok_or_else(|| "Certificate validity overflowed".to_string())?;
+    let not_after = asn1_time_from_unix_secs(not_after_secs, "notAfter")?;
     builder
         .set_not_before(&not_before)
         .map_err(|err| format!("Failed to set notBefore: {}", err))?;
@@ -219,6 +237,20 @@ fn generate_self_signed(cert_path: &Path, key_path: &Path) -> Result<(), String>
         ));
     }
     Ok(())
+}
+
+fn asn1_time_from_unix_secs(seconds: i64, label: &str) -> Result<Asn1Time, String> {
+    let dt = OffsetDateTime::from_unix_timestamp(seconds)
+        .map_err(|err| format!("Failed to convert {} timestamp: {}", label, err))?;
+    let time_str = dt
+        .format(ASN1_TIME_FORMAT)
+        .map_err(|err| format!("Failed to format {}: {}", label, err))?;
+    Asn1Time::from_str(&time_str).map_err(|err| {
+        format!(
+            "Failed to set {} from ASN1 time {}: {}",
+            label, time_str, err
+        )
+    })
 }
 
 fn write_pem_file(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {

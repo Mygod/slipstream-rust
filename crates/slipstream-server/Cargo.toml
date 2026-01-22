@@ -18,3 +18,4 @@ socket2 = "0.6"
 tokio = { version = "1.37", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+time = { version = "0.3", features = ["formatting", "macros"] }
