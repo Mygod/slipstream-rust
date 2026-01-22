@@ -129,12 +129,8 @@ fn parse_hex_seed(input: &str) -> Result<[u8; PICOQUIC_RESET_SECRET_SIZE], Strin
     let mut seed = [0u8; PICOQUIC_RESET_SECRET_SIZE];
     for (idx, slot) in seed.iter_mut().enumerate() {
         let offset = idx * 2;
-        let byte = u8::from_str_radix(&trimmed[offset..offset + 2], 16).map_err(|_| {
-            format!(
-                "Reset seed contains invalid hex at byte {}",
-                idx
-            )
-        })?;
+        let byte = u8::from_str_radix(&trimmed[offset..offset + 2], 16)
+            .map_err(|_| format!("Reset seed contains invalid hex at byte {}", idx))?;
         *slot = byte;
     }
     Ok(seed)
@@ -160,12 +156,12 @@ const ASN1_TIME_FORMAT: &[FormatItem<'static>] =
 fn generate_self_signed(cert_path: &Path, key_path: &Path) -> Result<(), String> {
     let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)
         .map_err(|err| format!("Failed to create EC group: {}", err))?;
-    let ec_key = EcKey::generate(&group).map_err(|err| format!("Failed to generate key: {}", err))?;
-    let pkey = PKey::from_ec_key(ec_key)
-        .map_err(|err| format!("Failed to create key: {}", err))?;
+    let ec_key =
+        EcKey::generate(&group).map_err(|err| format!("Failed to generate key: {}", err))?;
+    let pkey = PKey::from_ec_key(ec_key).map_err(|err| format!("Failed to create key: {}", err))?;
 
-    let mut name_builder = X509NameBuilder::new()
-        .map_err(|err| format!("Failed to create subject name: {}", err))?;
+    let mut name_builder =
+        X509NameBuilder::new().map_err(|err| format!("Failed to create subject name: {}", err))?;
     name_builder
         .append_entry_by_text("CN", "slipstream")
         .map_err(|err| format!("Failed to set subject CN: {}", err))?;
@@ -198,8 +194,8 @@ fn generate_self_signed(cert_path: &Path, key_path: &Path) -> Result<(), String>
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "System time is before UNIX epoch".to_string())?;
-    let now_secs = i64::try_from(now.as_secs())
-        .map_err(|_| "System time is out of range".to_string())?;
+    let now_secs =
+        i64::try_from(now.as_secs()).map_err(|_| "System time is out of range".to_string())?;
     let not_before = asn1_time_from_unix_secs(now_secs, "notBefore")?;
     let validity_secs = CERT_VALIDITY_DAYS
         .checked_mul(SECONDS_PER_DAY)
@@ -282,7 +278,12 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        path.push(format!("slipstream-test-{}-{}-{}", name, std::process::id(), suffix));
+        path.push(format!(
+            "slipstream-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            suffix
+        ));
         path
     }
 

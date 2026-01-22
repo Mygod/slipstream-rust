@@ -111,13 +111,23 @@ fn restart_reconnects_idle_client() {
         let send_start = std::time::Instant::now();
         if !poke_client_with_payload(tcp_port, Duration::from_secs(2), &payload) {
             let snapshot = log_snapshot(&client_logs);
-            panic!("client did not accept TCP payload after restart\n{}", snapshot);
+            panic!(
+                "client did not accept TCP payload after restart\n{}",
+                snapshot
+            );
         }
-        let reset_delay =
-            wait_for_log_since(&client_logs, "stateless_reset", send_start, Duration::from_secs(5));
+        let reset_delay = wait_for_log_since(
+            &client_logs,
+            "stateless_reset",
+            send_start,
+            Duration::from_secs(5),
+        );
         let Some(reset_delay) = reset_delay else {
             let snapshot = log_snapshot(&client_logs);
-            panic!("client did not observe stateless reset after restart\n{}", snapshot);
+            panic!(
+                "client did not observe stateless reset after restart\n{}",
+                snapshot
+            );
         };
         reset_delay
     };
@@ -143,6 +153,11 @@ fn temp_path(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    path.push(format!("slipstream-test-{}-{}-{}", name, std::process::id(), suffix));
+    path.push(format!(
+        "slipstream-test-{}-{}-{}",
+        name,
+        std::process::id(),
+        suffix
+    ));
     path
 }
