@@ -1,20 +1,25 @@
 use crate::picoquic::{
-    picoquic_cnx_t, picoquic_congestion_algorithm_t, picoquic_disable_port_blocking, picoquic_free,
-    picoquic_quic_t, picoquic_reset_stream, picoquic_set_cookie_mode,
-    picoquic_set_default_congestion_algorithm, picoquic_set_default_congestion_algorithm_by_name,
-    picoquic_set_default_multipath_option, picoquic_set_default_priority,
-    picoquic_set_initial_send_mtu, picoquic_set_key_log_file_from_env,
-    picoquic_set_max_data_control, picoquic_set_mtu_max, picoquic_set_preemptive_repeat_policy,
-    picoquic_set_stream_data_consumption_mode, slipstream_take_stateless_packet_for_cid,
-    PICOQUIC_MAX_PACKET_SIZE,
+    picoquic_clear_crypto_errors, picoquic_cnx_t, picoquic_congestion_algorithm_t,
+    picoquic_disable_port_blocking, picoquic_explain_crypto_error, picoquic_free, picoquic_quic_t,
+    picoquic_reset_stream, picoquic_set_cookie_mode, picoquic_set_default_congestion_algorithm,
+    picoquic_set_default_congestion_algorithm_by_name, picoquic_set_default_multipath_option,
+    picoquic_set_default_priority, picoquic_set_initial_send_mtu,
+    picoquic_set_key_log_file_from_env, picoquic_set_max_data_control, picoquic_set_mtu_max,
+    picoquic_set_preemptive_repeat_policy, picoquic_set_stream_data_consumption_mode,
+    slipstream_take_stateless_packet_for_cid, PICOQUIC_MAX_PACKET_SIZE,
 };
-use libc::{c_char, size_t, sockaddr_storage};
+use libc::{c_char, c_int, c_ulong, size_t, sockaddr_storage};
 use slipstream_core::tcp::stream_write_buffer_bytes;
+use std::ffi::CStr;
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpStream};
 
 pub const SLIPSTREAM_INTERNAL_ERROR: u64 = 0x101;
 pub const SLIPSTREAM_FILE_CANCEL_ERROR: u64 = 0x105;
+
+extern "C" {
+    fn ERR_error_string_n(e: c_ulong, buf: *mut c_char, len: size_t);
+}
 
 pub struct QuicGuard {
     quic: *mut picoquic_quic_t,
@@ -72,6 +77,50 @@ unsafe fn configure_quic_common(quic: *mut picoquic_quic_t, mtu: u32) {
     picoquic_set_mtu_max(quic, mtu);
     picoquic_set_initial_send_mtu(quic, mtu, mtu);
     picoquic_set_key_log_file_from_env(quic);
+}
+
+pub fn take_crypto_errors() -> Vec<String> {
+    let mut errors = Vec::new();
+    loop {
+        let mut file: *const c_char = std::ptr::null();
+        let mut line: c_int = 0;
+        let code = unsafe { picoquic_explain_crypto_error(&mut file, &mut line) };
+        if code == 0 {
+            break;
+        }
+        let mut description = None;
+        let mut buffer = vec![0i8; 256];
+        unsafe {
+            ERR_error_string_n(code as c_ulong, buffer.as_mut_ptr(), buffer.len());
+        }
+        let text = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        if !text.is_empty() {
+            description = Some(text);
+        }
+        let file = if file.is_null() {
+            "?".to_string()
+        } else {
+            // SAFETY: picoquic supplies a null-terminated error file string.
+            unsafe { CStr::from_ptr(file) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        if let Some(description) = description {
+            errors.push(format!(
+                "crypto error {} ({}) at {}:{}",
+                code, description, file, line
+            ));
+        } else {
+            errors.push(format!("crypto error {} at {}:{}", code, file, line));
+        }
+    }
+    unsafe {
+        picoquic_clear_crypto_errors();
+    }
+    errors
 }
 
 pub fn socket_addr_to_storage(addr: SocketAddr) -> sockaddr_storage {

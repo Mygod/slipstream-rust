@@ -6,7 +6,9 @@ use slipstream_ffi::picoquic::{
     picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_prepare_packet_ex, picoquic_quic_t,
     slipstream_server_cc_algorithm, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
-use slipstream_ffi::{configure_quic_with_custom, socket_addr_to_storage, QuicGuard};
+use slipstream_ffi::{
+    configure_quic_with_custom, socket_addr_to_storage, take_crypto_errors, QuicGuard,
+};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -184,7 +186,14 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         )
     };
     if quic.is_null() {
-        return Err(ServerError::new("Could not create QUIC context"));
+        let crypto_errors = take_crypto_errors();
+        if crypto_errors.is_empty() {
+            return Err(ServerError::new("Could not create QUIC context"));
+        }
+        return Err(ServerError::new(format!(
+            "Could not create QUIC context (TLS errors: {})",
+            crypto_errors.join("; ")
+        )));
     }
     let _quic_guard = QuicGuard::new(quic);
     unsafe {

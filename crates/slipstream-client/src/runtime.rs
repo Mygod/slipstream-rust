@@ -32,7 +32,7 @@ use slipstream_ffi::{
         slipstream_set_default_path_mode, PICOQUIC_CONNECTION_ID_MAX_SIZE,
         PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
-    socket_addr_to_storage, ClientConfig, QuicGuard, ResolverMode,
+    socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
 };
 use std::ffi::CString;
 use std::net::Ipv6Addr;
@@ -156,7 +156,14 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             )
         };
         if quic.is_null() {
-            return Err(ClientError::new("Could not create QUIC context"));
+            let crypto_errors = take_crypto_errors();
+            if crypto_errors.is_empty() {
+                return Err(ClientError::new("Could not create QUIC context"));
+            }
+            return Err(ClientError::new(format!(
+                "Could not create QUIC context (TLS errors: {})",
+                crypto_errors.join("; ")
+            )));
         }
         let _quic_guard = QuicGuard::new(quic);
         let mixed_cc = unsafe { slipstream_mixed_cc_algorithm };
