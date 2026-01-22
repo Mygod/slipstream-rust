@@ -41,7 +41,7 @@ pub(crate) struct PacketContext<'a> {
     pub(crate) domains: &'a [&'a str],
     pub(crate) quic: *mut picoquic_quic_t,
     pub(crate) current_time: u64,
-    pub(crate) local_addr_storage: &'a libc::sockaddr_storage,
+    pub(crate) local_addr_storage: &'a slipstream_ffi::SockaddrStorage,
 }
 
 /// Tracks per-peer routing for UDP fallback based on DNS decoding outcomes.
@@ -319,7 +319,7 @@ fn decode_slot(
     domains: &[&str],
     quic: *mut picoquic_quic_t,
     current_time: u64,
-    local_addr_storage: &libc::sockaddr_storage,
+    local_addr_storage: &slipstream_ffi::SockaddrStorage,
 ) -> Result<DecodeSlotOutcome, ServerError> {
     match decode_query_with_domains(packet, domains) {
         Ok(query) => {
@@ -467,11 +467,25 @@ async fn forward_fallback_replies(
     }
 }
 
+#[cfg(not(windows))]
 fn dummy_sockaddr_storage() -> libc::sockaddr_storage {
     socket_addr_to_storage(SocketAddr::new(
         IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
         12345,
     ))
+}
+
+#[cfg(windows)]
+fn dummy_sockaddr_storage() -> slipstream_ffi::SockaddrStorage {
+    use std::net::{Ipv6Addr, SocketAddrV6};
+    slipstream_ffi::socket_addr_to_storage(
+        std::net::SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            12345,
+            0,
+            0,
+        ))
+    )
 }
 
 #[cfg(test)]

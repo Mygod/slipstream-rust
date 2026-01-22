@@ -379,8 +379,8 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
 
         for slot in slots.iter_mut() {
             let mut send_length = 0usize;
-            let mut addr_to: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-            let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut addr_to: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
+            let mut addr_from: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
             let mut if_index: libc::c_int = 0;
 
             if slot.payload_override.is_none() && slot.rcode.is_none() && !slot.cnx.is_null() {

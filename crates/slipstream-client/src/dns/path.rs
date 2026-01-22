@@ -51,7 +51,7 @@ pub(crate) fn add_paths(
         return Ok(());
     }
 
-    let mut local_storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut local_storage: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
     let ret = unsafe { picoquic_get_path_addr(cnx, 0, 1, &mut local_storage) };
     if ret != 0 {
         return Ok(());

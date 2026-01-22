@@ -35,7 +35,7 @@ pub(crate) async fn send_poll_queries(
     cnx: *mut picoquic_cnx_t,
     udp: &TokioUdpSocket,
     config: &ClientConfig<'_>,
-    local_addr_storage: &mut libc::sockaddr_storage,
+    local_addr_storage: &mut slipstream_ffi::SockaddrStorage,
     dns_id: &mut u16,
     resolver: &mut ResolverState,
     remaining: &mut usize,
@@ -54,8 +54,8 @@ pub(crate) async fn send_poll_queries(
         }
 
         let mut send_length: libc::size_t = 0;
-        let mut addr_to: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-        let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut addr_to: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
+        let mut addr_from: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
         let mut if_index: libc::c_int = 0;
         let ret = unsafe {
             picoquic_prepare_packet_ex(
