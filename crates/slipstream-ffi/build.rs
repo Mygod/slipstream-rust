@@ -1,6 +1,24 @@
+#[path = "build/android.rs"]
+mod android;
+#[path = "build/cc.rs"]
+mod cc;
+#[path = "build/openssl.rs"]
+mod openssl;
+#[path = "build/picoquic.rs"]
+mod picoquic;
+#[path = "build/util.rs"]
+mod util;
+
+use android::maybe_link_android_builtins;
+use cc::{compile_cc, compile_cc_with_includes, create_archive, resolve_ar, resolve_cc};
+use openssl::resolve_openssl_paths;
+use picoquic::{
+    build_picoquic, locate_picoquic_include_dir, locate_picoquic_lib_dir,
+    locate_picotls_include_dir, resolve_picoquic_libs,
+};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use util::env_flag;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=PICOQUIC_DIR");
@@ -9,22 +27,95 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=PICOQUIC_LIB_DIR");
     println!("cargo:rerun-if-env-changed=PICOQUIC_AUTO_BUILD");
     println!("cargo:rerun-if-env-changed=PICOTLS_INCLUDE_DIR");
+    println!("cargo:rerun-if-env-changed=OPENSSL_ROOT_DIR");
+    println!("cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR");
+    println!("cargo:rerun-if-env-changed=OPENSSL_CRYPTO_LIBRARY");
+    println!("cargo:rerun-if-env-changed=OPENSSL_SSL_LIBRARY");
+    println!("cargo:rerun-if-env-changed=OPENSSL_USE_STATIC_LIBS");
+    println!("cargo:rerun-if-env-changed=OPENSSL_NO_VENDOR");
+    println!("cargo:rerun-if-env-changed=DEP_OPENSSL_ROOT");
+    println!("cargo:rerun-if-env-changed=DEP_OPENSSL_INCLUDE");
+    println!("cargo:rerun-if-env-changed=RUST_ANDROID_GRADLE_CC");
+    println!("cargo:rerun-if-env-changed=RUST_ANDROID_GRADLE_AR");
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
+    println!("cargo:rerun-if-env-changed=ANDROID_ABI");
+    println!("cargo:rerun-if-env-changed=ANDROID_PLATFORM");
+    println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=AR");
 
-    let explicit_paths = has_explicit_picoquic_paths();
+    let mut openssl_ssl_lib = None;
+    let mut openssl_crypto_lib = None;
+    let allow_openssl_env_overrides =
+        !cfg!(feature = "openssl-vendored") || env::var_os("OPENSSL_NO_VENDOR").is_some();
+    if allow_openssl_env_overrides {
+        let openssl_root = env::var_os("OPENSSL_ROOT_DIR");
+        let openssl_include = env::var_os("OPENSSL_INCLUDE_DIR");
+        let openssl_ssl_lib_env = env::var_os("OPENSSL_SSL_LIBRARY");
+        let openssl_crypto_lib_env = env::var_os("OPENSSL_CRYPTO_LIBRARY");
+
+        let has_root = openssl_root.is_some();
+        let has_include = openssl_include.is_some();
+        let has_ssl = openssl_ssl_lib_env.is_some();
+        let has_crypto = openssl_crypto_lib_env.is_some();
+
+        if has_ssl ^ has_crypto {
+            return Err(
+                "OPENSSL_SSL_LIBRARY and OPENSSL_CRYPTO_LIBRARY must be set together.".into(),
+            );
+        }
+
+        let has_explicit_libs = has_ssl && has_crypto;
+        if has_include && !has_root && !has_explicit_libs {
+            return Err(
+                "OPENSSL_INCLUDE_DIR without OPENSSL_ROOT_DIR is unsupported; set OPENSSL_ROOT_DIR or both OPENSSL_SSL_LIBRARY and OPENSSL_CRYPTO_LIBRARY (with OPENSSL_INCLUDE_DIR)."
+                    .into(),
+            );
+        }
+
+        if has_explicit_libs && !has_root && !has_include {
+            return Err(
+                "OPENSSL_SSL_LIBRARY/OPENSSL_CRYPTO_LIBRARY require OPENSSL_INCLUDE_DIR when OPENSSL_ROOT_DIR is not set."
+                    .into(),
+            );
+        }
+
+        openssl_ssl_lib = openssl_ssl_lib_env.map(PathBuf::from);
+        openssl_crypto_lib = openssl_crypto_lib_env.map(PathBuf::from);
+    }
+
+    let openssl_paths = resolve_openssl_paths();
+    let target = env::var("TARGET").unwrap_or_default();
     let auto_build = env_flag("PICOQUIC_AUTO_BUILD", true);
+    let explicit_picoquic_include = env::var_os("PICOQUIC_INCLUDE_DIR").is_some();
+    let explicit_picoquic_lib = env::var_os("PICOQUIC_LIB_DIR").is_some();
+    let explicit_picoquic_include_lib = explicit_picoquic_include || explicit_picoquic_lib;
     let mut picoquic_include_dir = locate_picoquic_include_dir();
     let mut picoquic_lib_dir = locate_picoquic_lib_dir();
     let mut picotls_include_dir = locate_picotls_include_dir();
 
     if auto_build
-        && !explicit_paths
+        && !explicit_picoquic_include_lib
         && (picoquic_include_dir.is_none() || picoquic_lib_dir.is_none())
     {
-        println!("cargo:warning=auto-building picoquic (set PICOQUIC_AUTO_BUILD=0 to disable)");
-        build_picoquic()?;
+        build_picoquic(&openssl_paths, &target)?;
         picoquic_include_dir = locate_picoquic_include_dir();
         picoquic_lib_dir = locate_picoquic_lib_dir();
         picotls_include_dir = locate_picotls_include_dir();
+    }
+
+    if explicit_picoquic_include_lib {
+        if picoquic_include_dir.is_none() {
+            return Err(
+                "Explicit PICOQUIC_INCLUDE_DIR/PICOQUIC_LIB_DIR set; missing headers. Set PICOQUIC_INCLUDE_DIR to match your libs."
+                .into(),
+            );
+        }
+        if picoquic_lib_dir.is_none() {
+            return Err(
+                "Explicit PICOQUIC_INCLUDE_DIR/PICOQUIC_LIB_DIR set; missing libs. Set PICOQUIC_LIB_DIR to match your headers."
+                .into(),
+            );
+        }
     }
 
     let picoquic_include_dir = picoquic_include_dir.ok_or(
@@ -37,6 +128,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Missing picotls headers; set PICOTLS_INCLUDE_DIR or build picoquic with PICOQUIC_FETCH_PTLS=ON.",
     )?;
 
+    let cc = resolve_cc(&target);
+    let ar = resolve_ar(&target, &cc);
     let mut object_paths = Vec::with_capacity(1);
 
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
@@ -59,19 +152,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={}", picoquic_internal.display());
     }
     let cc_obj = out_dir.join("slipstream_server_cc.c.o");
-    compile_cc(&cc_src, &cc_obj, &picoquic_include_dir)?;
+    compile_cc(&cc, &cc_src, &cc_obj, &picoquic_include_dir)?;
     object_paths.push(cc_obj);
 
     let mixed_cc_obj = out_dir.join("slipstream_mixed_cc.c.o");
-    compile_cc(&mixed_cc_src, &mixed_cc_obj, &picoquic_include_dir)?;
+    compile_cc(&cc, &mixed_cc_src, &mixed_cc_obj, &picoquic_include_dir)?;
     object_paths.push(mixed_cc_obj);
 
     let poll_obj = out_dir.join("slipstream_poll.c.o");
-    compile_cc(&poll_src, &poll_obj, &picoquic_include_dir)?;
+    compile_cc(&cc, &poll_src, &poll_obj, &picoquic_include_dir)?;
     object_paths.push(poll_obj);
 
     let stateless_packet_obj = out_dir.join("slipstream_stateless_packet.c.o");
     compile_cc(
+        &cc,
         &stateless_packet_src,
         &stateless_packet_obj,
         &picoquic_include_dir,
@@ -79,11 +173,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     object_paths.push(stateless_packet_obj);
 
     let test_helpers_obj = out_dir.join("slipstream_test_helpers.c.o");
-    compile_cc(&test_helpers_src, &test_helpers_obj, &picoquic_include_dir)?;
+    compile_cc(
+        &cc,
+        &test_helpers_src,
+        &test_helpers_obj,
+        &picoquic_include_dir,
+    )?;
     object_paths.push(test_helpers_obj);
 
     let picotls_layout_obj = out_dir.join("picotls_layout.c.o");
     compile_cc_with_includes(
+        &cc,
         &picotls_layout_src,
         &picotls_layout_obj,
         &[&picoquic_include_dir, &picotls_include_dir],
@@ -91,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     object_paths.push(picotls_layout_obj);
 
     let archive = out_dir.join("libslipstream_client_objs.a");
-    create_archive(&archive, &object_paths)?;
+    create_archive(&ar, &archive, &object_paths)?;
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=slipstream_client_objs");
 
@@ -105,338 +205,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
 
-    println!("cargo:rustc-link-lib=dylib=ssl");
-    println!("cargo:rustc-link-lib=dylib=crypto");
-    println!("cargo:rustc-link-lib=dylib=pthread");
-
-    Ok(())
-}
-
-fn locate_repo_root() -> Option<PathBuf> {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").ok()?;
-    let crate_dir = Path::new(&manifest_dir);
-    Some(crate_dir.parent()?.parent()?.to_path_buf())
-}
-
-fn env_flag(key: &str, default: bool) -> bool {
-    match env::var(key) {
-        Ok(value) => {
-            let value = value.trim().to_ascii_lowercase();
-            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    if !cfg!(feature = "openssl-vendored") {
+        let mut openssl_search_dirs = Vec::new();
+        if let Some(lib) = &openssl_ssl_lib {
+            add_parent_dir(&mut openssl_search_dirs, lib);
         }
-        Err(_) => default,
-    }
-}
-
-fn has_explicit_picoquic_paths() -> bool {
-    env::var_os("PICOQUIC_DIR").is_some()
-        || env::var_os("PICOQUIC_INCLUDE_DIR").is_some()
-        || env::var_os("PICOQUIC_BUILD_DIR").is_some()
-        || env::var_os("PICOQUIC_LIB_DIR").is_some()
-}
-
-fn build_picoquic() -> Result<(), Box<dyn std::error::Error>> {
-    let root = locate_repo_root().ok_or("Could not locate repository root for picoquic build")?;
-    let script = root.join("scripts").join("build_picoquic.sh");
-    if !script.exists() {
-        return Err("scripts/build_picoquic.sh not found; run git submodule update --init --recursive vendor/picoquic".into());
-    }
-    let picoquic_dir = env::var_os("PICOQUIC_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("vendor").join("picoquic"));
-    if !picoquic_dir.exists() {
-        return Err("picoquic submodule missing; run git submodule update --init --recursive vendor/picoquic".into());
-    }
-    let build_dir = env::var_os("PICOQUIC_BUILD_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join(".picoquic-build"));
-
-    let status = Command::new(script)
-        .env("PICOQUIC_DIR", picoquic_dir)
-        .env("PICOQUIC_BUILD_DIR", build_dir)
-        .status()?;
-    if !status.success() {
-        return Err(
-            "picoquic auto-build failed (run scripts/build_picoquic.sh for details)".into(),
-        );
-    }
-    Ok(())
-}
-
-fn locate_picoquic_include_dir() -> Option<PathBuf> {
-    if let Ok(dir) = env::var("PICOQUIC_INCLUDE_DIR") {
-        let candidate = PathBuf::from(dir);
-        if has_picoquic_internal_header(&candidate) {
-            return Some(candidate);
+        if let Some(lib) = &openssl_crypto_lib {
+            add_parent_dir(&mut openssl_search_dirs, lib);
         }
-    }
-
-    if let Ok(dir) = env::var("PICOQUIC_DIR") {
-        let candidate = PathBuf::from(&dir);
-        if has_picoquic_internal_header(&candidate) {
-            return Some(candidate);
-        }
-        let candidate = Path::new(&dir).join("picoquic");
-        if has_picoquic_internal_header(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    if let Some(root) = locate_repo_root() {
-        let candidate = root.join("vendor").join("picoquic").join("picoquic");
-        if has_picoquic_internal_header(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    None
-}
-
-fn locate_picoquic_lib_dir() -> Option<PathBuf> {
-    if let Ok(dir) = env::var("PICOQUIC_LIB_DIR") {
-        let candidate = PathBuf::from(dir);
-        if has_picoquic_libs(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    if let Ok(dir) = env::var("PICOQUIC_BUILD_DIR") {
-        let candidate = PathBuf::from(&dir);
-        if has_picoquic_libs(&candidate) {
-            return Some(candidate);
-        }
-        let candidate = Path::new(&dir).join("picoquic");
-        if has_picoquic_libs(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    if let Some(root) = locate_repo_root() {
-        let candidate = root.join(".picoquic-build");
-        if has_picoquic_libs(&candidate) {
-            return Some(candidate);
-        }
-        let candidate = root.join(".picoquic-build").join("picoquic");
-        if has_picoquic_libs(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    None
-}
-
-fn locate_picotls_include_dir() -> Option<PathBuf> {
-    if let Ok(dir) = env::var("PICOTLS_INCLUDE_DIR") {
-        let candidate = PathBuf::from(dir);
-        if has_picotls_header(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    if let Ok(dir) = env::var("PICOQUIC_BUILD_DIR") {
-        let candidate = Path::new(&dir)
-            .join("_deps")
-            .join("picotls-src")
-            .join("include");
-        if has_picotls_header(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    if let Ok(dir) = env::var("PICOQUIC_LIB_DIR") {
-        let candidate = Path::new(&dir)
-            .join("_deps")
-            .join("picotls-src")
-            .join("include");
-        if has_picotls_header(&candidate) {
-            return Some(candidate);
-        }
-        if let Some(parent) = Path::new(&dir).parent() {
-            let candidate = parent.join("_deps").join("picotls-src").join("include");
-            if has_picotls_header(&candidate) {
-                return Some(candidate);
+        if openssl_search_dirs.is_empty() {
+            if let Some(root) = &openssl_paths.root {
+                push_unique_dir(&mut openssl_search_dirs, root.join("lib"));
+                push_unique_dir(&mut openssl_search_dirs, root.join("lib64"));
             }
         }
-    }
-
-    if let Some(root) = locate_repo_root() {
-        let candidate = root
-            .join(".picoquic-build")
-            .join("_deps")
-            .join("picotls-src")
-            .join("include");
-        if has_picotls_header(&candidate) {
-            return Some(candidate);
+        for dir in openssl_search_dirs {
+            println!("cargo:rustc-link-search=native={}", dir.display());
         }
-        let candidate = root
-            .join("vendor")
-            .join("picoquic")
-            .join("picotls")
-            .join("include");
-        if has_picotls_header(&candidate) {
-            return Some(candidate);
+        if cfg!(feature = "openssl-static") {
+            println!("cargo:rustc-link-lib=static=ssl");
+            println!("cargo:rustc-link-lib=static=crypto");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=ssl");
+            println!("cargo:rustc-link-lib=dylib=crypto");
         }
     }
 
-    None
-}
-
-fn has_picoquic_internal_header(dir: &Path) -> bool {
-    dir.join("picoquic_internal.h").exists()
-}
-
-fn has_picotls_header(dir: &Path) -> bool {
-    dir.join("picotls.h").exists()
-}
-
-fn has_picoquic_libs(dir: &Path) -> bool {
-    resolve_picoquic_libs(dir).is_some()
-}
-
-struct PicoquicLibs {
-    search_dirs: Vec<PathBuf>,
-    libs: Vec<&'static str>,
-}
-
-fn resolve_picoquic_libs(dir: &Path) -> Option<PicoquicLibs> {
-    if let Some(libs) = resolve_picoquic_libs_single_dir(dir) {
-        return Some(PicoquicLibs {
-            search_dirs: vec![dir.to_path_buf()],
-            libs,
-        });
+    if !target.contains("android") {
+        println!("cargo:rustc-link-lib=dylib=pthread");
+    } else {
+        maybe_link_android_builtins(&target, &cc);
     }
 
-    let mut picotls_dirs = vec![dir.join("_deps").join("picotls-build")];
-    if let Some(parent) = dir.parent() {
-        picotls_dirs.push(parent.join("_deps").join("picotls-build"));
-    }
-    for picotls_dir in picotls_dirs {
-        if let Some(libs) = resolve_picoquic_libs_split(dir, &picotls_dir) {
-            let mut search_dirs = vec![dir.to_path_buf()];
-            if picotls_dir != dir && !search_dirs.contains(&picotls_dir) {
-                search_dirs.push(picotls_dir);
-            }
-            return Some(PicoquicLibs { search_dirs, libs });
-        }
-    }
-
-    if let Some(parent) = dir.parent() {
-        if let Some(libs) = resolve_picoquic_libs_split(parent, dir) {
-            return Some(PicoquicLibs {
-                search_dirs: vec![parent.to_path_buf(), dir.to_path_buf()],
-                libs,
-            });
-        }
-        if let Some(grandparent) = parent.parent() {
-            if let Some(libs) = resolve_picoquic_libs_split(grandparent, dir) {
-                return Some(PicoquicLibs {
-                    search_dirs: vec![grandparent.to_path_buf(), dir.to_path_buf()],
-                    libs,
-                });
-            }
-        }
-    }
-
-    None
-}
-
-fn resolve_picoquic_libs_single_dir(dir: &Path) -> Option<Vec<&'static str>> {
-    const REQUIRED: [(&str, &str); 5] = [
-        ("picoquic_core", "picoquic-core"),
-        ("picotls_core", "picotls-core"),
-        ("picotls_fusion", "picotls-fusion"),
-        ("picotls_minicrypto", "picotls-minicrypto"),
-        ("picotls_openssl", "picotls-openssl"),
-    ];
-    let mut libs = Vec::with_capacity(REQUIRED.len());
-    for (underscored, hyphenated) in REQUIRED {
-        libs.push(find_lib_variant(dir, underscored, hyphenated)?);
-    }
-    Some(libs)
-}
-
-fn resolve_picoquic_libs_split(
-    picoquic_dir: &Path,
-    picotls_dir: &Path,
-) -> Option<Vec<&'static str>> {
-    let picoquic_core = find_lib_variant(picoquic_dir, "picoquic_core", "picoquic-core")?;
-    let picotls_core = find_lib_variant(picotls_dir, "picotls_core", "picotls-core")?;
-    let picotls_fusion = find_lib_variant(picotls_dir, "picotls_fusion", "picotls-fusion")?;
-    let picotls_minicrypto =
-        find_lib_variant(picotls_dir, "picotls_minicrypto", "picotls-minicrypto")?;
-    let picotls_openssl = find_lib_variant(picotls_dir, "picotls_openssl", "picotls-openssl")?;
-    Some(vec![
-        picoquic_core,
-        picotls_core,
-        picotls_fusion,
-        picotls_minicrypto,
-        picotls_openssl,
-    ])
-}
-
-fn find_lib_variant<'a>(dir: &Path, underscored: &'a str, hyphenated: &'a str) -> Option<&'a str> {
-    let underscored_path = dir.join(format!("lib{}.a", underscored));
-    if underscored_path.exists() {
-        return Some(underscored);
-    }
-    let hyphen_path = dir.join(format!("lib{}.a", hyphenated));
-    if hyphen_path.exists() {
-        return Some(hyphenated);
-    }
-    None
-}
-
-fn create_archive(archive: &Path, objects: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut command = std::process::Command::new("ar");
-    command.arg("crus").arg(archive);
-    for obj in objects {
-        command.arg(obj);
-    }
-    let status = command.status()?;
-    if !status.success() {
-        return Err("Failed to create static archive for slipstream objects.".into());
-    }
     Ok(())
 }
 
-fn compile_cc(
-    source: &Path,
-    output: &Path,
-    picoquic_include_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("cc")
-        .arg("-c")
-        .arg("-fPIC")
-        .arg(source)
-        .arg("-o")
-        .arg(output)
-        .arg("-I")
-        .arg(picoquic_include_dir)
-        .status()?;
-    if !status.success() {
-        return Err(format!("Failed to compile {}.", source.display()).into());
+fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
+    if !dirs.iter().any(|existing| existing == &dir) {
+        dirs.push(dir);
     }
-    Ok(())
 }
 
-fn compile_cc_with_includes(
-    source: &Path,
-    output: &Path,
-    include_dirs: &[&Path],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut command = Command::new("cc");
-    command
-        .arg("-c")
-        .arg("-fPIC")
-        .arg(source)
-        .arg("-o")
-        .arg(output);
-    for dir in include_dirs {
-        command.arg("-I").arg(dir);
+fn add_parent_dir(dirs: &mut Vec<PathBuf>, path: &Path) {
+    if let Some(parent) = path.parent() {
+        push_unique_dir(dirs, parent.to_path_buf());
     }
-    let status = command.status()?;
-    if !status.success() {
-        return Err(format!("Failed to compile {}.", source.display()).into());
-    }
-    Ok(())
 }
