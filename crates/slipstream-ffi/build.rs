@@ -159,6 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stateless_packet_obj = out_dir.join("slipstream_stateless_packet.c.o");
     compile_cc(
+        &cc,
         &stateless_packet_src,
         &stateless_packet_obj,
         &picoquic_include_dir,
