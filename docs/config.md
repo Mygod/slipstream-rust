@@ -35,6 +35,8 @@ single certificate. If omitted, server certificates are not verified.
 
 ## Server runtime knobs
 
+- `--max-connections`
+  Caps concurrent QUIC connections and sizes internal connection tables (default: 256).
 - `--idle-timeout-seconds`
   Closes idle QUIC connections after the given number of seconds (default: 1200).
   Set to 0 to disable idle GC.

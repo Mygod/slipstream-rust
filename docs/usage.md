@@ -62,6 +62,7 @@ Common flags:
 - --dns-listen-host <HOST> (default: ::)
 - --dns-listen-port <PORT> (default: 53)
 - --target-address <HOST:PORT> (default: 127.0.0.1:5201)
+- --max-connections <COUNT> (default: 256; caps concurrent QUIC connections)
 - --fallback <HOST:PORT> (optional; forward non-DNS packets to this UDP endpoint)
 - --idle-timeout-seconds <SECONDS> (default: 1200; set to 0 to disable)
 - When binding to ::, slipstream attempts to enable dual-stack (IPV6_V6ONLY=0); if your OS disallows it, IPv4 DNS clients require sysctl changes or binding to an IPv4 address.

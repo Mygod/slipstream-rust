@@ -72,6 +72,7 @@ pub struct ServerConfig {
     pub cert: String,
     pub key: String,
     pub domains: Vec<String>,
+    pub max_connections: u32,
     pub idle_timeout_seconds: u64,
     pub debug_streams: bool,
     pub debug_commands: bool,
@@ -168,7 +169,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let current_time = unsafe { picoquic_current_time() };
     let quic = unsafe {
         picoquic_create(
-            8,
+            config.max_connections,
             cert.as_ptr(),
             key.as_ptr(),
             std::ptr::null(),

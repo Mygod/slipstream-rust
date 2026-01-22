@@ -36,6 +36,8 @@ struct Args {
     key: Option<String>,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
     domains: Vec<String>,
+    #[arg(long = "max-connections", default_value_t = 256, value_parser = parse_max_connections)]
+    max_connections: u32,
     #[arg(long = "idle-timeout-seconds", default_value_t = 1200)]
     idle_timeout_seconds: u64,
     #[arg(long = "debug-streams")]
@@ -152,6 +154,16 @@ fn main() {
         tracing::error!("A key path is required");
         std::process::exit(2);
     };
+    let max_connections = if cli_provided(&matches, "max_connections") {
+        args.max_connections
+    } else if let Some(value) = last_option_value(&sip003_env.plugin_options, "max-connections") {
+        parse_max_connections(&value).unwrap_or_else(|err| {
+            tracing::error!("SIP003 env error: {}", err);
+            std::process::exit(2);
+        })
+    } else {
+        args.max_connections
+    };
 
     let config = ServerConfig {
         dns_listen_host,
@@ -161,6 +173,7 @@ fn main() {
         cert,
         key,
         domains,
+        max_connections,
         idle_timeout_seconds: args.idle_timeout_seconds,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
@@ -203,6 +216,17 @@ fn parse_fallback_address(input: &str) -> Result<HostPort, String> {
         return Err("fallback address must include a port".to_string());
     }
     Ok(parsed)
+}
+
+fn parse_max_connections(input: &str) -> Result<u32, String> {
+    let trimmed = input.trim();
+    let value = trimmed
+        .parse::<u32>()
+        .map_err(|_| format!("Invalid max-connections value: {}", trimmed))?;
+    if value == 0 {
+        return Err("max-connections must be at least 1".to_string());
+    }
+    Ok(value)
 }
 
 fn cli_provided(matches: &clap::ArgMatches, id: &str) -> bool {
