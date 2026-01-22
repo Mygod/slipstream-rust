@@ -26,7 +26,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=PICOQUIC_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=PICOQUIC_LIB_DIR");
     println!("cargo:rerun-if-env-changed=PICOQUIC_AUTO_BUILD");
-    println!("cargo:rerun-if-env-changed=PICOQUIC_MINIMAL_BUILD");
     println!("cargo:rerun-if-env-changed=PICOTLS_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_ROOT_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR");

@@ -44,9 +44,6 @@ pub(crate) fn build_picoquic(
             command.env("ANDROID_PLATFORM", value);
         }
     }
-    if cfg!(feature = "picoquic-minimal-build") {
-        command.env("PICOQUIC_MINIMAL_BUILD", "1");
-    }
     if let Some(root) = &openssl_paths.root {
         command.env("OPENSSL_ROOT_DIR", root);
     }
