@@ -264,7 +264,8 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     }
 
     unsafe {
-        libc::signal(libc::SIGTERM, handle_sigterm as usize);
+        let handler = handle_sigterm as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGTERM, handler);
     }
 
     let recv_buf_len = if fallback_mgr.is_some() {
