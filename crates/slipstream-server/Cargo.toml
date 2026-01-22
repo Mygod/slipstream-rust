@@ -22,6 +22,6 @@ tracing-subscriber = { workspace = true }
 
 [features]
 default = []
-openssl-vendored = ["slipstream-ffi/openssl-vendored"]
-openssl-static = ["slipstream-ffi/openssl-static"]
+openssl-vendored = ["slipstream-ffi/openssl-vendored", "openssl/vendored"]
+openssl-static = ["slipstream-ffi/openssl-static", "openssl/vendored"]
 picoquic-minimal-build = ["slipstream-ffi/picoquic-minimal-build"]
