@@ -46,6 +46,10 @@ int slipstream_take_stateless_packet_for_cid(picoquic_quic_t* quic,
                                              uint8_t* out_bytes,
                                              size_t out_capacity,
                                              size_t* out_len) {
+    /* NOTE: Long-header matching keys on the queued packet's DCID (client SCID). This is safe
+     * for our current client SCID length (8 bytes) but can misroute if SCIDs are short, fixed,
+     * or reused (including zero-length). If SCID length/policy changes, consider additional
+     * disambiguation (e.g., original DCID tracking). */
     if (out_len == NULL || out_bytes == NULL || packet == NULL) {
         return -1;
     }
