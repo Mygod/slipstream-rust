@@ -315,8 +315,7 @@ fn blocked_stream_should_not_stall_other_streams() {
     let client_logs = &harness.client_logs;
     let target = &harness.target;
     let client_addr = harness.client_addr;
-    let _blocked =
-        open_blackhole_stream(&harness, 0, Duration::from_secs(3), 32 * 1024);
+    let _blocked = open_blackhole_stream(&harness, 0, Duration::from_secs(3), 32 * 1024);
 
     let mut echo = TcpStream::connect_timeout(&client_addr, Duration::from_secs(2))
         .expect("connect echo stream");
@@ -391,8 +390,7 @@ fn single_stream_slow_transfer_should_not_abort() {
 
     let server_logs = &harness.server_logs;
     let client_logs = &harness.client_logs;
-    let _blocked =
-        open_blackhole_stream(&harness, 0, Duration::from_secs(2), 64 * 1024);
+    let _blocked = open_blackhole_stream(&harness, 0, Duration::from_secs(2), 64 * 1024);
 
     assert_log_absent(server_logs, "queued_bytes", Duration::from_secs(1));
     assert_log_absent(client_logs, "reset event", Duration::from_secs(1));
