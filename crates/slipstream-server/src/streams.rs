@@ -153,13 +153,15 @@ fn promote_connection_streams(cnx: *mut picoquic_cnx_t, state: &mut ServerState,
             continue;
         }
         if stream.consumed_offset < stream.rx_bytes {
-            stream.consumed_offset = stream.rx_bytes;
-            let ret = unsafe { picoquic_stream_data_consumed(cnx, key.stream_id, stream.rx_bytes) };
+            let new_offset = stream.rx_bytes;
+            let ret = unsafe { picoquic_stream_data_consumed(cnx, key.stream_id, new_offset) };
             if ret < 0 {
                 warn!(
                     "stream {:?}: stream_data_consumed failed during promote ret={} consumed_offset={}",
                     key.stream_id, ret, stream.consumed_offset
                 );
+            } else {
+                stream.consumed_offset = new_offset;
             }
         }
     }
