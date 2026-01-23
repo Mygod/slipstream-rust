@@ -195,10 +195,6 @@ fn setup_flow_control(envs: &[(&str, &str)]) -> Option<FlowControlHarness> {
         }
     };
 
-    for (key, value) in envs {
-        std::env::set_var(key, value);
-    }
-
     let (mut server, server_logs) = spawn_server(ServerArgs {
         server_bin: &server_bin,
         dns_listen_host: Some("127.0.0.1"),
@@ -210,6 +206,7 @@ fn setup_flow_control(envs: &[(&str, &str)]) -> Option<FlowControlHarness> {
         reset_seed_path: None,
         fallback_addr: None,
         idle_timeout_seconds: None,
+        envs,
         rust_log: "info",
         capture_logs: true,
     });
@@ -227,6 +224,7 @@ fn setup_flow_control(envs: &[(&str, &str)]) -> Option<FlowControlHarness> {
         domain: DOMAIN,
         cert: Some(&cert),
         keep_alive_interval: Some(0),
+        envs,
         rust_log: "info",
         capture_logs: true,
     });
@@ -275,8 +273,8 @@ fn blocked_stream_should_not_stall_other_streams() {
     let _ = blocked.set_nodelay(true);
     let _ = blocked.set_write_timeout(Some(Duration::from_millis(200)));
 
-    if !wait_for_log(&client_logs, "Accepted TCP stream", Duration::from_secs(5)) {
-        let snapshot = log_snapshot(&client_logs);
+    if !wait_for_log(client_logs, "Accepted TCP stream", Duration::from_secs(5)) {
+        let snapshot = log_snapshot(client_logs);
         panic!("client did not accept blocked stream\n{}", snapshot);
     }
 
@@ -289,7 +287,7 @@ fn blocked_stream_should_not_stall_other_streams() {
             assert_eq!(mode, TargetMode::Blackhole, "expected blackhole target");
         }
         None => {
-            let snapshot = log_snapshot(&server_logs);
+            let snapshot = log_snapshot(server_logs);
             panic!("target did not accept blackhole connection\n{}", snapshot);
         }
     }
@@ -309,8 +307,8 @@ fn blocked_stream_should_not_stall_other_streams() {
     let _ = echo.set_nodelay(true);
     let _ = echo.set_read_timeout(Some(Duration::from_millis(200)));
 
-    if !wait_for_log(&client_logs, "Accepted TCP stream", Duration::from_secs(5)) {
-        let snapshot = log_snapshot(&client_logs);
+    if !wait_for_log(client_logs, "Accepted TCP stream", Duration::from_secs(5)) {
+        let snapshot = log_snapshot(client_logs);
         panic!("client did not accept echo stream\n{}", snapshot);
     }
 
@@ -323,7 +321,7 @@ fn blocked_stream_should_not_stall_other_streams() {
             assert_eq!(mode, TargetMode::Echo, "expected echo target");
         }
         None => {
-            let snapshot = log_snapshot(&server_logs);
+            let snapshot = log_snapshot(server_logs);
             panic!("target did not accept echo connection\n{}", snapshot);
         }
     }
@@ -345,8 +343,8 @@ fn blocked_stream_should_not_stall_other_streams() {
         }
     }
     if read_total != buf.len() {
-        let client_snapshot = log_snapshot(&client_logs);
-        let server_snapshot = log_snapshot(&server_logs);
+        let client_snapshot = log_snapshot(client_logs);
+        let server_snapshot = log_snapshot(server_logs);
         panic!(
             "echo payload incomplete (got {} of {})\nclient logs:\n{}\nserver logs:\n{}",
             read_total,
@@ -356,8 +354,8 @@ fn blocked_stream_should_not_stall_other_streams() {
         );
     }
     if buf.as_slice() != ping {
-        let client_snapshot = log_snapshot(&client_logs);
-        let server_snapshot = log_snapshot(&server_logs);
+        let client_snapshot = log_snapshot(client_logs);
+        let server_snapshot = log_snapshot(server_logs);
         panic!(
             "echo payload mismatch\nclient logs:\n{}\nserver logs:\n{}",
             client_snapshot, server_snapshot
@@ -384,8 +382,8 @@ fn single_stream_slow_transfer_should_not_abort() {
     let _ = blocked.set_nodelay(true);
     let _ = blocked.set_write_timeout(Some(Duration::from_millis(200)));
 
-    if !wait_for_log(&client_logs, "Accepted TCP stream", Duration::from_secs(5)) {
-        let snapshot = log_snapshot(&client_logs);
+    if !wait_for_log(client_logs, "Accepted TCP stream", Duration::from_secs(5)) {
+        let snapshot = log_snapshot(client_logs);
         panic!("client did not accept blocked stream\n{}", snapshot);
     }
 
@@ -398,7 +396,7 @@ fn single_stream_slow_transfer_should_not_abort() {
             assert_eq!(mode, TargetMode::Blackhole, "expected blackhole target");
         }
         None => {
-            let snapshot = log_snapshot(&server_logs);
+            let snapshot = log_snapshot(server_logs);
             panic!("target did not accept blackhole connection\n{}", snapshot);
         }
     }
@@ -413,6 +411,6 @@ fn single_stream_slow_transfer_should_not_abort() {
         }
     }
 
-    assert_log_absent(&server_logs, "queued_bytes", Duration::from_secs(1));
-    assert_log_absent(&client_logs, "reset event", Duration::from_secs(1));
+    assert_log_absent(server_logs, "queued_bytes", Duration::from_secs(1));
+    assert_log_absent(client_logs, "reset event", Duration::from_secs(1));
 }

@@ -72,6 +72,7 @@ pub struct ServerArgs<'a> {
     pub reset_seed_path: Option<&'a Path>,
     pub fallback_addr: Option<SocketAddr>,
     pub idle_timeout_seconds: Option<u64>,
+    pub envs: &'a [(&'a str, &'a str)],
     pub rust_log: &'a str,
     pub capture_logs: bool,
 }
@@ -83,6 +84,7 @@ pub struct ClientArgs<'a> {
     pub domain: &'a str,
     pub cert: Option<&'a Path>,
     pub keep_alive_interval: Option<u16>,
+    pub envs: &'a [(&'a str, &'a str)],
     pub rust_log: &'a str,
     pub capture_logs: bool,
 }
@@ -148,6 +150,9 @@ pub fn spawn_server(args: ServerArgs<'_>) -> (ChildGuard, Option<LogCapture>) {
         cmd.arg("--idle-timeout-seconds")
             .arg(idle_timeout.to_string());
     }
+    for (key, value) in args.envs {
+        cmd.env(key, value);
+    }
     cmd.arg("--cert")
         .arg(args.cert)
         .arg("--key")
@@ -163,14 +168,17 @@ pub fn spawn_client(args: ClientArgs<'_>) -> (ChildGuard, Option<LogCapture>) {
         .arg("--resolver")
         .arg(format!("127.0.0.1:{}", args.dns_port))
         .arg("--domain")
-        .arg(args.domain)
-        .env("RUST_LOG", args.rust_log);
+        .arg(args.domain);
     if let Some(cert) = args.cert {
         cmd.arg("--cert").arg(cert);
     }
     if let Some(interval) = args.keep_alive_interval {
         cmd.arg("--keep-alive-interval").arg(interval.to_string());
     }
+    for (key, value) in args.envs {
+        cmd.env(key, value);
+    }
+    cmd.env("RUST_LOG", args.rust_log);
     spawn_process(&mut cmd, args.capture_logs, "slipstream-client")
 }
 

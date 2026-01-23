@@ -49,6 +49,7 @@ fn restart_reconnects_idle_client() {
         reset_seed_path: Some(&reset_seed_path),
         fallback_addr: None,
         idle_timeout_seconds: None,
+        envs: &[],
         rust_log: "info",
         capture_logs: false,
     });
@@ -65,6 +66,7 @@ fn restart_reconnects_idle_client() {
         domain,
         cert: Some(&cert),
         keep_alive_interval: Some(0),
+        envs: &[],
         rust_log: "info",
         capture_logs: true,
     });
@@ -94,6 +96,7 @@ fn restart_reconnects_idle_client() {
         reset_seed_path: Some(&reset_seed_path),
         fallback_addr: None,
         idle_timeout_seconds: None,
+        envs: &[],
         rust_log: "info",
         capture_logs: false,
     });

@@ -123,6 +123,7 @@ fn udp_fallback_e2e() {
         reset_seed_path: None,
         fallback_addr: Some(echo.addr),
         idle_timeout_seconds: None,
+        envs: &[],
         rust_log: "info",
         capture_logs: false,
     });
