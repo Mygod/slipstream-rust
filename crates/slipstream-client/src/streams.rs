@@ -651,7 +651,15 @@ pub(crate) fn handle_command(
                 }
                 stream.queued_bytes = stream.queued_bytes.saturating_sub(bytes);
                 if !state.multi_stream_mode {
-                    let mut new_offset = stream.consumed_offset.saturating_add(bytes as u64);
+                    let reserve_bytes = conn_reserve_bytes();
+                    let drained = stream.rx_bytes.saturating_sub(stream.queued_bytes as u64);
+                    let mut new_offset = if reserve_bytes > 0 {
+                        drained
+                            .saturating_add(reserve_bytes as u64)
+                            .min(stream.rx_bytes)
+                    } else {
+                        drained
+                    };
                     if let Some(fin_offset) = stream.fin_offset {
                         if new_offset > fin_offset {
                             new_offset = fin_offset;
