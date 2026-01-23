@@ -130,7 +130,13 @@ pub fn socket_addr_to_storage(addr: SocketAddr) -> sockaddr_storage {
             // SAFETY: sockaddr_storage is plain-old-data; zeroing is valid.
             let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
             let sockaddr = libc::sockaddr_in {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(
+                    target_vendor = "apple",
+                    target_os = "freebsd",
+                    target_os = "openbsd",
+                    target_os = "netbsd",
+                    target_os = "dragonfly",
+                ))]
                 sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
                 sin_family: libc::AF_INET as libc::sa_family_t,
                 sin_port: addr.port().to_be(),
@@ -149,7 +155,13 @@ pub fn socket_addr_to_storage(addr: SocketAddr) -> sockaddr_storage {
             // SAFETY: sockaddr_storage is plain-old-data; zeroing is valid.
             let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
             let sockaddr = libc::sockaddr_in6 {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(
+                    target_vendor = "apple",
+                    target_os = "freebsd",
+                    target_os = "openbsd",
+                    target_os = "netbsd",
+                    target_os = "dragonfly",
+                ))]
                 sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
                 sin6_family: libc::AF_INET6 as libc::sa_family_t,
                 sin6_port: addr.port().to_be(),
