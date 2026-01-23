@@ -4,13 +4,14 @@ use slipstream_ffi::picoquic::{
     picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
     picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_mark_active_stream,
     picoquic_provide_stream_data_buffer, picoquic_quic_t, picoquic_reset_stream,
-    picoquic_stream_data_consumed,
+    picoquic_stop_sending, picoquic_stream_data_consumed,
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
@@ -18,6 +19,7 @@ use tracing::{debug, error, warn};
 pub(crate) struct ServerState {
     target_addr: SocketAddr,
     streams: HashMap<StreamKey, ServerStream>,
+    multi_streams: HashSet<usize>,
     command_tx: mpsc::UnboundedSender<Command>,
     debug_streams: bool,
     debug_commands: bool,
@@ -35,6 +37,7 @@ impl ServerState {
         Self {
             target_addr,
             streams: HashMap::new(),
+            multi_streams: HashSet::new(),
             command_tx,
             debug_streams,
             debug_commands,
@@ -99,6 +102,67 @@ struct ServerStream {
     pending_data: VecDeque<Vec<u8>>,
     pending_fin: bool,
     fin_enqueued: bool,
+    discarding: bool,
+    stop_sending_sent: bool,
+}
+
+const DEFAULT_STREAM_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_CONN_RESERVE_BYTES: usize = 64 * 1024;
+
+fn stream_queue_max_bytes() -> usize {
+    static MAX_BYTES: OnceLock<usize> = OnceLock::new();
+    *MAX_BYTES.get_or_init(|| {
+        std::env::var("SLIPSTREAM_STREAM_QUEUE_MAX_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_STREAM_QUEUE_MAX_BYTES)
+    })
+}
+
+fn conn_reserve_bytes() -> usize {
+    static RESERVE_BYTES: OnceLock<usize> = OnceLock::new();
+    *RESERVE_BYTES.get_or_init(|| {
+        std::env::var("SLIPSTREAM_CONN_RESERVE_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_CONN_RESERVE_BYTES)
+    })
+}
+
+fn mark_multi_stream(state: &mut ServerState, cnx_id: usize) -> bool {
+    if state.multi_streams.contains(&cnx_id) {
+        return false;
+    }
+    let count = state.streams.keys().filter(|key| key.cnx == cnx_id).count();
+    if count > 1 {
+        state.multi_streams.insert(cnx_id);
+        true
+    } else {
+        false
+    }
+}
+
+fn promote_connection_streams(cnx: *mut picoquic_cnx_t, state: &mut ServerState, cnx_id: usize) {
+    for (key, stream) in state
+        .streams
+        .iter_mut()
+        .filter(|(key, _)| key.cnx == cnx_id)
+    {
+        if stream.discarding {
+            continue;
+        }
+        if stream.consumed_offset < stream.rx_bytes {
+            stream.consumed_offset = stream.rx_bytes;
+            let ret = unsafe { picoquic_stream_data_consumed(cnx, key.stream_id, stream.rx_bytes) };
+            if ret < 0 {
+                warn!(
+                    "stream {:?}: stream_data_consumed failed during promote ret={} consumed_offset={}",
+                    key.stream_id, ret, stream.consumed_offset
+                );
+            }
+        }
+    }
 }
 
 pub(crate) unsafe extern "C" fn server_callback(
@@ -301,20 +365,22 @@ fn handle_stream_data(
     };
     let debug_streams = state.debug_streams;
     let mut reset_stream = false;
+    let mut remove_stream = false;
 
-    {
-        let stream = state.streams.entry(key).or_insert_with(|| {
-            let (shutdown_tx, shutdown_rx) = watch::channel(false);
-            if debug_streams {
-                debug!("stream {:?}: connecting", key.stream_id);
-            }
-            spawn_target_connector(
-                key,
-                state.target_addr,
-                state.command_tx.clone(),
-                debug_streams,
-                shutdown_rx,
-            );
+    if !state.streams.contains_key(&key) {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        if debug_streams {
+            debug!("stream {:?}: connecting", key.stream_id);
+        }
+        spawn_target_connector(
+            key,
+            state.target_addr,
+            state.command_tx.clone(),
+            debug_streams,
+            shutdown_rx,
+        );
+        state.streams.insert(
+            key,
             ServerStream {
                 write_tx: None,
                 data_rx: None,
@@ -331,50 +397,192 @@ fn handle_stream_data(
                 pending_data: VecDeque::new(),
                 pending_fin: false,
                 fin_enqueued: false,
-            }
-        });
+                discarding: false,
+                stop_sending_sent: false,
+            },
+        );
+    }
 
-        if !data.is_empty() {
-            // Backpressure is enforced via connection-level max_data, not per-stream buffer caps.
-            stream.rx_bytes = stream.rx_bytes.saturating_add(data.len() as u64);
-            if let Some(write_tx) = stream.write_tx.as_ref() {
+    if mark_multi_stream(state, key.cnx) {
+        promote_connection_streams(cnx, state, key.cnx);
+    }
+    let multi_stream = state.multi_streams.contains(&key.cnx);
+    let reserve_bytes = if multi_stream {
+        0
+    } else {
+        conn_reserve_bytes()
+    };
+
+    {
+        let stream = match state.streams.get_mut(&key) {
+            Some(stream) => stream,
+            None => return,
+        };
+
+        if stream.discarding {
+            if !data.is_empty() {
+                let incoming_len = data.len();
+                stream.rx_bytes = stream.rx_bytes.saturating_add(incoming_len as u64);
+                if stream.consumed_offset < stream.rx_bytes {
+                    stream.consumed_offset = stream.rx_bytes;
+                    let ret = unsafe {
+                        picoquic_stream_data_consumed(cnx, stream_id, stream.consumed_offset)
+                    };
+                    if ret < 0 {
+                        warn!(
+                            "stream {:?}: stream_data_consumed failed ret={} consumed_offset={}",
+                            stream_id, ret, stream.consumed_offset
+                        );
+                    }
+                }
+            }
+        } else if !data.is_empty() {
+            let incoming_len = data.len();
+            stream.rx_bytes = stream.rx_bytes.saturating_add(incoming_len as u64);
+            let projected = stream.queued_bytes.saturating_add(incoming_len);
+
+            if multi_stream {
+                let max_queue = stream_queue_max_bytes();
+                if projected > max_queue {
+                    warn!(
+                        "stream {:?}: queued_bytes {} + {} exceeds limit {}; stopping",
+                        stream_id, stream.queued_bytes, incoming_len, max_queue
+                    );
+                    stream.discarding = true;
+                    stream.pending_data.clear();
+                    stream.queued_bytes = 0;
+                    stream.pending_fin = false;
+                    stream.fin_enqueued = false;
+                    stream.data_rx = None;
+                    stream.write_tx = None;
+                    stream.send_pending = None;
+                    stream.send_stash = None;
+                    stream.target_fin_pending = false;
+                    stream.close_after_flush = false;
+                    let _ = stream.shutdown_tx.send(true);
+                    if stream.consumed_offset < stream.rx_bytes {
+                        stream.consumed_offset = stream.rx_bytes;
+                        let ret = unsafe {
+                            picoquic_stream_data_consumed(cnx, stream_id, stream.consumed_offset)
+                        };
+                        if ret < 0 {
+                            warn!(
+                                "stream {:?}: stream_data_consumed failed ret={} consumed_offset={}",
+                                stream_id, ret, stream.consumed_offset
+                            );
+                        }
+                    }
+                    if !stream.stop_sending_sent {
+                        let _ = unsafe {
+                            picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR)
+                        };
+                        stream.stop_sending_sent = true;
+                    }
+                } else if let Some(write_tx) = stream.write_tx.as_ref() {
+                    if write_tx.send(StreamWrite::Data(data.to_vec())).is_err() {
+                        reset_stream = true;
+                    } else {
+                        stream.queued_bytes = projected;
+                    }
+                } else {
+                    stream.pending_data.push_back(data.to_vec());
+                    stream.queued_bytes = projected;
+                }
+
+                if !stream.discarding && stream.consumed_offset < stream.rx_bytes {
+                    stream.consumed_offset = stream.rx_bytes;
+                    let ret = unsafe {
+                        picoquic_stream_data_consumed(cnx, stream_id, stream.consumed_offset)
+                    };
+                    if ret < 0 {
+                        warn!(
+                            "stream {:?}: stream_data_consumed failed ret={} consumed_offset={}",
+                            stream_id, ret, stream.consumed_offset
+                        );
+                        reset_stream = true;
+                    }
+                }
+            } else if let Some(write_tx) = stream.write_tx.as_ref() {
                 if write_tx.send(StreamWrite::Data(data.to_vec())).is_err() {
                     reset_stream = true;
                 } else {
-                    stream.queued_bytes = stream.queued_bytes.saturating_add(data.len());
+                    stream.queued_bytes = projected;
                 }
             } else {
                 stream.pending_data.push_back(data.to_vec());
-                stream.queued_bytes = stream.queued_bytes.saturating_add(data.len());
+                stream.queued_bytes = projected;
+            }
+
+            if !multi_stream && reserve_bytes > 0 && !stream.discarding {
+                let drained = stream.rx_bytes.saturating_sub(stream.queued_bytes as u64);
+                let mut target_offset = drained
+                    .saturating_add(reserve_bytes as u64)
+                    .min(stream.rx_bytes);
+                if let Some(fin_offset) = stream.fin_offset {
+                    if target_offset > fin_offset {
+                        target_offset = fin_offset;
+                    }
+                }
+                if target_offset > stream.consumed_offset {
+                    stream.consumed_offset = target_offset;
+                    let ret = unsafe {
+                        picoquic_stream_data_consumed(cnx, stream_id, stream.consumed_offset)
+                    };
+                    if ret < 0 {
+                        warn!(
+                            "stream {:?}: stream_data_consumed failed ret={} consumed_offset={}",
+                            stream_id, ret, stream.consumed_offset
+                        );
+                        reset_stream = true;
+                    }
+                }
             }
         }
 
         if fin {
-            if stream.fin_offset.is_none() {
-                stream.fin_offset = Some(stream.rx_bytes);
-            }
-            if !stream.fin_enqueued {
-                if stream.write_tx.is_some() && stream.pending_data.is_empty() {
-                    if let Some(write_tx) = stream.write_tx.as_ref() {
-                        if write_tx.send(StreamWrite::Fin).is_err() {
-                            reset_stream = true;
-                        } else {
-                            stream.fin_enqueued = true;
-                            stream.pending_fin = false;
+            if stream.discarding {
+                if !reset_stream {
+                    remove_stream = true;
+                }
+            } else {
+                if stream.fin_offset.is_none() {
+                    stream.fin_offset = Some(stream.rx_bytes);
+                }
+                if !stream.fin_enqueued {
+                    if stream.write_tx.is_some() && stream.pending_data.is_empty() {
+                        if let Some(write_tx) = stream.write_tx.as_ref() {
+                            if write_tx.send(StreamWrite::Fin).is_err() {
+                                reset_stream = true;
+                            } else {
+                                stream.fin_enqueued = true;
+                                stream.pending_fin = false;
+                            }
                         }
+                    } else {
+                        stream.pending_fin = true;
                     }
-                } else {
-                    stream.pending_fin = true;
                 }
             }
         }
+    }
+
+    if remove_stream {
+        shutdown_stream(state, key);
+        return;
     }
 
     if reset_stream {
         if debug_streams {
             debug!("stream {:?}: resetting", stream_id);
         }
-        shutdown_stream(state, key);
+        if !state
+            .streams
+            .get(&key)
+            .map(|stream| stream.discarding)
+            .unwrap_or(false)
+        {
+            shutdown_stream(state, key);
+        }
         unsafe {
             let _ = picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
         }
@@ -391,6 +599,7 @@ pub(crate) fn remove_connection_streams(state: &mut ServerState, cnx: usize) {
     for key in keys {
         shutdown_stream(state, key);
     }
+    state.multi_streams.remove(&cnx);
 }
 
 fn shutdown_stream(state: &mut ServerState, key: StreamKey) -> Option<ServerStream> {
@@ -434,6 +643,13 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 };
                 if state.debug_streams {
                     debug!("stream {:?}: target connected", stream_id);
+                }
+                if stream.discarding {
+                    stream.pending_data.clear();
+                    stream.pending_fin = false;
+                    stream.fin_enqueued = false;
+                    let _ = stream.shutdown_tx.send(true);
+                    return;
                 }
                 stream.write_tx = Some(write_tx);
                 stream.data_rx = Some(data_rx);
@@ -584,26 +800,34 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             };
             let mut reset_stream = false;
             if let Some(stream) = state.streams.get_mut(&key) {
-                stream.queued_bytes = stream.queued_bytes.saturating_sub(bytes);
-                stream.consumed_offset = stream.consumed_offset.saturating_add(bytes as u64);
-                if let Some(fin_offset) = stream.fin_offset {
-                    if stream.consumed_offset > fin_offset {
-                        stream.consumed_offset = fin_offset;
-                    }
+                if stream.discarding {
+                    return;
                 }
-                let ret = unsafe {
-                    picoquic_stream_data_consumed(
-                        cnx_id as *mut picoquic_cnx_t,
-                        stream_id,
-                        stream.consumed_offset,
-                    )
-                };
-                if ret < 0 {
-                    warn!(
-                        "stream {:?}: stream_data_consumed failed ret={} consumed_offset={}",
-                        stream_id, ret, stream.consumed_offset
-                    );
-                    reset_stream = true;
+                stream.queued_bytes = stream.queued_bytes.saturating_sub(bytes);
+                if !state.multi_streams.contains(&cnx_id) {
+                    let mut new_offset = stream.consumed_offset.saturating_add(bytes as u64);
+                    if let Some(fin_offset) = stream.fin_offset {
+                        if new_offset > fin_offset {
+                            new_offset = fin_offset;
+                        }
+                    }
+                    if new_offset > stream.consumed_offset {
+                        stream.consumed_offset = new_offset;
+                        let ret = unsafe {
+                            picoquic_stream_data_consumed(
+                                cnx_id as *mut picoquic_cnx_t,
+                                stream_id,
+                                stream.consumed_offset,
+                            )
+                        };
+                        if ret < 0 {
+                            warn!(
+                                "stream {:?}: stream_data_consumed failed ret={} consumed_offset={}",
+                                stream_id, ret, stream.consumed_offset
+                            );
+                            reset_stream = true;
+                        }
+                    }
                 }
             }
             if reset_stream {
@@ -656,5 +880,6 @@ pub(crate) fn handle_shutdown(quic: *mut picoquic_quic_t, state: &mut ServerStat
         cnx = next;
     }
     state.streams.clear();
+    state.multi_streams.clear();
     true
 }

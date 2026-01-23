@@ -7,6 +7,12 @@ This page documents runtime knobs and environment variables.
 - SLIPSTREAM_STREAM_WRITE_BUFFER_BYTES
   Overrides the connection-level QUIC max_data limit used for backpressure.
   Default is 8 MiB. Values must be positive integers.
+- SLIPSTREAM_STREAM_QUEUE_MAX_BYTES
+  Per-stream receive queue cap enforced when multiple QUIC streams are active.
+  Default is 2 MiB. Values must be positive integers.
+- SLIPSTREAM_CONN_RESERVE_BYTES
+  Minimum connection-level receive window to keep available for new streams in
+  single-stream mode. Default is 64 KiB. Set to 0 to disable the reserve.
 
 ## TLS certificates
 
