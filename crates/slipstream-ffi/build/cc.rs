@@ -8,35 +8,35 @@ pub(crate) fn resolve_cc(target: &str) -> String {
             .or_else(|_| env::var("CC"))
             .unwrap_or_else(|_| "cc".to_string());
     }
-    
+
     if let Ok(cc) = env::var("CC") {
         return cc;
     }
-    
+
     if target.contains("windows") || target.contains("pc-windows") {
         let gcc_candidates = [
             "C:\\Strawberry\\c\\bin\\gcc.exe",
             "C:\\mingw64\\bin\\gcc.exe",
             "C:\\msys64\\mingw64\\bin\\gcc.exe",
         ];
-        
+
         for candidate in &gcc_candidates {
             if Path::new(candidate).exists() {
                 return candidate.to_string();
             }
         }
     }
-    
+
     let builder = cc::Build::new();
     let compiler = builder.get_compiler();
     let path = compiler.path();
     let path_str = path.to_string_lossy().to_string();
-    
+
     // Verify the compiler actually exists
     if !path.exists() {
         panic!("Compiler not found at: {}. Please install a C compiler (MinGW-w64, MSVC Build Tools, or Strawberry Perl).", path_str);
     }
-    
+
     path_str
 }
 
@@ -84,14 +84,11 @@ pub(crate) fn create_archive(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = env::var("TARGET").unwrap_or_default();
     let is_windows = target.contains("windows") || target.contains("pc-windows");
-    
+
     if is_windows && ar.contains("lib.exe") && ar != "ar" {
         // MSVC: use lib.exe
         let mut lib_cmd = Command::new("lib.exe");
-        lib_cmd
-            .arg("/OUT:")
-            .arg(archive)
-            .arg("/NOLOGO");
+        lib_cmd.arg("/OUT:").arg(archive).arg("/NOLOGO");
         for obj in objects {
             lib_cmd.arg(obj);
         }
@@ -123,26 +120,26 @@ pub(crate) fn compile_cc(
     let target = env::var("TARGET").unwrap_or_default();
     let is_windows = target.contains("windows") || target.contains("pc-windows");
     let is_gcc = cc.contains("gcc") || cc.contains("mingw");
-    
+
     let mut cmd = Command::new(cc);
-    
+
     if is_windows && !is_gcc {
         // MSVC: cl.exe /c /Fo:output source.c /I include_dir
         cmd.arg("/c")
-           .arg(format!("/Fo:{}", output.display()))
-           .arg(source)
-           .arg(format!("/I{}", picoquic_include_dir.display()));
+            .arg(format!("/Fo:{}", output.display()))
+            .arg(source)
+            .arg(format!("/I{}", picoquic_include_dir.display()));
     } else {
         // GCC/Clang: cc -c -fPIC -o output source.c -I include_dir
         cmd.arg("-c")
-           .arg("-fPIC")
-           .arg("-o")
-           .arg(output)
-           .arg(source)
-           .arg("-I")
-           .arg(picoquic_include_dir);
+            .arg("-fPIC")
+            .arg("-o")
+            .arg(output)
+            .arg(source)
+            .arg("-I")
+            .arg(picoquic_include_dir);
     }
-    
+
     let status = cmd.status()?;
     if !status.success() {
         return Err(format!("Failed to compile {}.", source.display()).into());
@@ -159,29 +156,25 @@ pub(crate) fn compile_cc_with_includes(
     let target = env::var("TARGET").unwrap_or_default();
     let is_windows = target.contains("windows") || target.contains("pc-windows");
     let is_gcc = cc.contains("gcc") || cc.contains("mingw");
-    
+
     let mut cmd = Command::new(cc);
-    
+
     if is_windows && !is_gcc {
         // MSVC: cl.exe /c /Fo:output source.c /I include_dir1 /I include_dir2
         cmd.arg("/c")
-           .arg(format!("/Fo:{}", output.display()))
-           .arg(source);
+            .arg(format!("/Fo:{}", output.display()))
+            .arg(source);
         for dir in include_dirs {
             cmd.arg(format!("/I{}", dir.display()));
         }
     } else {
         // GCC/Clang: cc -c -fPIC -o output source.c -I include_dir1 -I include_dir2
-        cmd.arg("-c")
-           .arg("-fPIC")
-           .arg("-o")
-           .arg(output)
-           .arg(source);
+        cmd.arg("-c").arg("-fPIC").arg("-o").arg(output).arg(source);
         for dir in include_dirs {
             cmd.arg("-I").arg(dir);
         }
     }
-    
+
     let status = cmd.status()?;
     if !status.success() {
         return Err(format!("Failed to compile {}.", source.display()).into());
