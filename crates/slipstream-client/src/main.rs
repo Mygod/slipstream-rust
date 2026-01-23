@@ -1,3 +1,5 @@
+#[cfg(target_os = "android")]
+mod android;
 mod dns;
 mod error;
 mod pacing;
@@ -192,6 +194,11 @@ fn main() {
         keep_alive_override.unwrap_or(args.keep_alive_interval)
     };
 
+    let android_vpn = has_option(&sip003_env.plugin_options, "__android_vpn");
+    if android_vpn {
+        tracing::info!("Android VPN mode detected; socket protection enabled");
+    }
+
     let config = ClientConfig {
         tcp_listen_host: &tcp_listen_host,
         tcp_listen_port,
@@ -203,6 +210,7 @@ fn main() {
         keep_alive_interval: keep_alive_interval as usize,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
+        android_vpn,
     };
 
     let runtime = Builder::new_current_thread()
@@ -385,6 +393,10 @@ fn last_option_value(options: &[sip003::Sip003Option], key: &str) -> Option<Stri
         }
     }
     last
+}
+
+fn has_option(options: &[sip003::Sip003Option], key: &str) -> bool {
+    options.iter().any(|option| option.key == key)
 }
 
 #[cfg(test)]

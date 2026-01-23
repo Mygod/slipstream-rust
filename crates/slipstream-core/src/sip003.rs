@@ -220,7 +220,8 @@ fn push_option(
 }
 
 fn allows_empty_value_key(key: &str) -> bool {
-    key.trim().eq_ignore_ascii_case("authoritative")
+    let key = key.trim();
+    key.eq_ignore_ascii_case("authoritative") || key.eq_ignore_ascii_case("__android_vpn")
 }
 
 #[cfg(test)]

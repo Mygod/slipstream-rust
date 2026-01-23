@@ -1,6 +1,8 @@
 use crate::error::ClientError;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
+#[cfg(target_os = "android")]
+use std::os::unix::io::AsRawFd;
 use tokio::net::{lookup_host, TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
 use tracing::warn;
 
@@ -19,9 +21,9 @@ pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
     Ok(mtu)
 }
 
-pub(crate) async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {
+pub(crate) async fn bind_udp_socket(android_vpn: bool) -> Result<TokioUdpSocket, ClientError> {
     let bind_addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
-    bind_udp_socket_addr(bind_addr)
+    bind_udp_socket_addr(bind_addr, android_vpn)
 }
 
 pub(crate) async fn bind_tcp_listener(
@@ -73,7 +75,7 @@ fn bind_tcp_listener_addr(addr: SocketAddr) -> Result<TokioTcpListener, ClientEr
     TokioTcpListener::from_std(std_listener).map_err(map_io)
 }
 
-fn bind_udp_socket_addr(addr: SocketAddr) -> Result<TokioUdpSocket, ClientError> {
+fn bind_udp_socket_addr(addr: SocketAddr, android_vpn: bool) -> Result<TokioUdpSocket, ClientError> {
     let domain = match addr {
         SocketAddr::V4(_) => Domain::IPV4,
         SocketAddr::V6(_) => Domain::IPV6,
@@ -89,6 +91,29 @@ fn bind_udp_socket_addr(addr: SocketAddr) -> Result<TokioUdpSocket, ClientError>
     }
     let sock_addr = SockAddr::from(addr);
     socket.bind(&sock_addr).map_err(map_io)?;
+
+    // Protect socket from VPN routing on Android
+    #[cfg(target_os = "android")]
+    if android_vpn {
+        let fd = socket.as_raw_fd();
+        match crate::android::protect_socket(fd) {
+            Ok(true) => {
+                tracing::info!("UDP socket protected from VPN routing");
+            }
+            Ok(false) => {
+                tracing::debug!("VPN protection not available (protect_path not found)");
+            }
+            Err(err) => {
+                return Err(ClientError::new(format!(
+                    "Failed to protect UDP socket: {}",
+                    err
+                )));
+            }
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = android_vpn; // Suppress unused warning on non-Android
+
     socket.set_nonblocking(true).map_err(map_io)?;
     let std_socket: std::net::UdpSocket = socket.into();
     TokioUdpSocket::from_std(std_socket).map_err(map_io)

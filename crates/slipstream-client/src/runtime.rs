@@ -70,7 +70,7 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let domain_len = config.domain.len();
     let mtu = compute_mtu(domain_len)?;
-    let udp = bind_udp_socket().await?;
+    let udp = bind_udp_socket(config.android_vpn).await?;
 
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let data_notify = Arc::new(Notify::new());
