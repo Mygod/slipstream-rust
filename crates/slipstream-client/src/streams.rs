@@ -1,3 +1,6 @@
+use slipstream_core::flow_control::{
+    conn_reserve_bytes, promote_consumed_offset, reserve_target_offset, stream_queue_max_bytes,
+};
 use slipstream_core::tcp::{stream_read_limit_chunks, tcp_send_buffer_bytes};
 use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
@@ -7,7 +10,7 @@ use slipstream_ffi::picoquic::{
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -16,29 +19,6 @@ use tracing::{debug, info, warn};
 const STREAM_READ_CHUNK_BYTES: usize = 4096;
 const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;
 const CLIENT_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
-const DEFAULT_STREAM_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
-const DEFAULT_CONN_RESERVE_BYTES: usize = 64 * 1024;
-
-fn stream_queue_max_bytes() -> usize {
-    static MAX_BYTES: OnceLock<usize> = OnceLock::new();
-    *MAX_BYTES.get_or_init(|| {
-        std::env::var("SLIPSTREAM_STREAM_QUEUE_MAX_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_STREAM_QUEUE_MAX_BYTES)
-    })
-}
-
-fn conn_reserve_bytes() -> usize {
-    static RESERVE_BYTES: OnceLock<usize> = OnceLock::new();
-    *RESERVE_BYTES.get_or_init(|| {
-        std::env::var("SLIPSTREAM_CONN_RESERVE_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_CONN_RESERVE_BYTES)
-    })
-}
 
 pub(crate) struct ClientState {
     ready: bool,
@@ -160,18 +140,17 @@ fn promote_streams(cnx: *mut picoquic_cnx_t, state: &mut ClientState) {
         if stream.discarding {
             continue;
         }
-        if stream.consumed_offset < stream.rx_bytes {
-            let new_offset = stream.rx_bytes;
-            let ret = unsafe { picoquic_stream_data_consumed(cnx, *stream_id, new_offset) };
-            if ret < 0 {
+        promote_consumed_offset(
+            stream.rx_bytes,
+            &mut stream.consumed_offset,
+            |new_offset| unsafe { picoquic_stream_data_consumed(cnx, *stream_id, new_offset) },
+            |ret, consumed_offset| {
                 warn!(
                     "stream {}: stream_data_consumed failed during promote ret={} consumed_offset={}",
-                    stream_id, ret, stream.consumed_offset
+                    stream_id, ret, consumed_offset
                 );
-            } else {
-                stream.consumed_offset = new_offset;
-            }
-        }
+            },
+        );
     }
 }
 
@@ -403,15 +382,12 @@ fn handle_stream_data(
             }
 
             if !multi_stream && reserve_bytes > 0 && !stream.discarding {
-                let drained = stream.rx_bytes.saturating_sub(stream.queued_bytes as u64);
-                let mut target_offset = drained
-                    .saturating_add(reserve_bytes as u64)
-                    .min(stream.rx_bytes);
-                if let Some(fin_offset) = stream.fin_offset {
-                    if target_offset > fin_offset {
-                        target_offset = fin_offset;
-                    }
-                }
+                let target_offset = reserve_target_offset(
+                    stream.rx_bytes,
+                    stream.queued_bytes,
+                    stream.fin_offset,
+                    reserve_bytes,
+                );
                 if target_offset > stream.consumed_offset {
                     stream.consumed_offset = target_offset;
                     let ret = unsafe {
@@ -653,20 +629,12 @@ pub(crate) fn handle_command(
                 }
                 stream.queued_bytes = stream.queued_bytes.saturating_sub(bytes);
                 if !state.multi_stream_mode {
-                    let reserve_bytes = conn_reserve_bytes();
-                    let drained = stream.rx_bytes.saturating_sub(stream.queued_bytes as u64);
-                    let mut new_offset = if reserve_bytes > 0 {
-                        drained
-                            .saturating_add(reserve_bytes as u64)
-                            .min(stream.rx_bytes)
-                    } else {
-                        drained
-                    };
-                    if let Some(fin_offset) = stream.fin_offset {
-                        if new_offset > fin_offset {
-                            new_offset = fin_offset;
-                        }
-                    }
+                    let new_offset = reserve_target_offset(
+                        stream.rx_bytes,
+                        stream.queued_bytes,
+                        stream.fin_offset,
+                        conn_reserve_bytes(),
+                    );
                     if new_offset > stream.consumed_offset {
                         stream.consumed_offset = new_offset;
                         let ret = unsafe {

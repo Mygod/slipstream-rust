@@ -10,10 +10,11 @@ use std::time::{Duration, Instant};
 
 use support::{
     ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, server_bin_path, spawn_client,
-    spawn_server, wait_for_log, ClientArgs, LogCapture, ServerArgs,
+    spawn_server, wait_for_log, ChildGuard, ClientArgs, LogCapture, ServerArgs,
 };
 
 const ENV_ENABLE: &str = "SLIPSTREAM_FLOW_CONTROL_TEST";
+const DOMAIN: &str = "test.example.com";
 
 fn assert_log_absent(logs: &LogCapture, needle: &str, duration: Duration) {
     let deadline = Instant::now() + duration;
@@ -144,14 +145,22 @@ impl Drop for SplitTarget {
     }
 }
 
-#[test]
-fn blocked_stream_should_not_stall_other_streams() {
+struct FlowControlHarness {
+    _server: ChildGuard,
+    _client: ChildGuard,
+    server_logs: LogCapture,
+    client_logs: LogCapture,
+    target: SplitTarget,
+    client_addr: SocketAddr,
+}
+
+fn setup_flow_control(envs: &[(&str, &str)]) -> Option<FlowControlHarness> {
     if std::env::var(ENV_ENABLE).is_err() {
         eprintln!(
             "skipping flow control e2e test; set {}=1 to enable",
             ENV_ENABLE
         );
-        return;
+        return None;
     }
 
     let root = support::workspace_root();
@@ -167,14 +176,14 @@ fn blocked_stream_should_not_stall_other_streams() {
         Ok(port) => port,
         Err(err) => {
             eprintln!("skipping flow control e2e test: {}", err);
-            return;
+            return None;
         }
     };
     let tcp_port = match pick_tcp_port() {
         Ok(port) => port,
         Err(err) => {
             eprintln!("skipping flow control e2e test: {}", err);
-            return;
+            return None;
         }
     };
 
@@ -182,21 +191,20 @@ fn blocked_stream_should_not_stall_other_streams() {
         Ok(target) => target,
         Err(err) => {
             eprintln!("skipping flow control e2e test: {}", err);
-            return;
+            return None;
         }
     };
-    let domain = "test.example.com";
 
-    std::env::set_var("SLIPSTREAM_STREAM_QUEUE_MAX_BYTES", "65536");
-    std::env::set_var("SLIPSTREAM_CONN_RESERVE_BYTES", "65536");
-    std::env::set_var("SLIPSTREAM_STREAM_WRITE_BUFFER_BYTES", "8388608");
+    for (key, value) in envs {
+        std::env::set_var(key, value);
+    }
 
     let (mut server, server_logs) = spawn_server(ServerArgs {
         server_bin: &server_bin,
         dns_listen_host: Some("127.0.0.1"),
         dns_port,
         target_address: &format!("127.0.0.1:{}", target.addr.port()),
-        domains: &[domain],
+        domains: &[DOMAIN],
         cert: &cert,
         key: &key,
         reset_seed_path: None,
@@ -209,14 +217,14 @@ fn blocked_stream_should_not_stall_other_streams() {
     thread::sleep(Duration::from_millis(200));
     if server.has_exited() {
         eprintln!("skipping flow control e2e test: server failed to start");
-        return;
+        return None;
     }
 
-    let (_client, client_logs) = spawn_client(ClientArgs {
+    let (client, client_logs) = spawn_client(ClientArgs {
         client_bin: &client_bin,
         dns_port,
         tcp_port,
-        domain,
+        domain: DOMAIN,
         cert: Some(&cert),
         keep_alive_interval: Some(0),
         rust_log: "info",
@@ -237,6 +245,31 @@ fn blocked_stream_should_not_stall_other_streams() {
     }
 
     let client_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port));
+
+    Some(FlowControlHarness {
+        _server: server,
+        _client: client,
+        server_logs,
+        client_logs,
+        target,
+        client_addr,
+    })
+}
+
+#[test]
+fn blocked_stream_should_not_stall_other_streams() {
+    let Some(harness) = setup_flow_control(&[
+        ("SLIPSTREAM_STREAM_QUEUE_MAX_BYTES", "65536"),
+        ("SLIPSTREAM_CONN_RESERVE_BYTES", "65536"),
+        ("SLIPSTREAM_STREAM_WRITE_BUFFER_BYTES", "8388608"),
+    ]) else {
+        return;
+    };
+
+    let server_logs = &harness.server_logs;
+    let client_logs = &harness.client_logs;
+    let target = &harness.target;
+    let client_addr = harness.client_addr;
     let mut blocked = TcpStream::connect_timeout(&client_addr, Duration::from_secs(2))
         .expect("connect blocked stream");
     let _ = blocked.set_nodelay(true);
@@ -334,97 +367,18 @@ fn blocked_stream_should_not_stall_other_streams() {
 
 #[test]
 fn single_stream_slow_transfer_should_not_abort() {
-    if std::env::var(ENV_ENABLE).is_err() {
-        eprintln!(
-            "skipping flow control e2e test; set {}=1 to enable",
-            ENV_ENABLE
-        );
+    let Some(harness) = setup_flow_control(&[
+        ("SLIPSTREAM_STREAM_QUEUE_MAX_BYTES", "32768"),
+        ("SLIPSTREAM_CONN_RESERVE_BYTES", "16384"),
+        ("SLIPSTREAM_STREAM_WRITE_BUFFER_BYTES", "8388608"),
+    ]) else {
         return;
-    }
-
-    let root = support::workspace_root();
-    let client_bin = ensure_client_bin(&root);
-    let server_bin = server_bin_path();
-
-    let cert = root.join("fixtures/certs/cert.pem");
-    let key = root.join("fixtures/certs/key.pem");
-    assert!(cert.exists(), "missing fixtures/certs/cert.pem");
-    assert!(key.exists(), "missing fixtures/certs/key.pem");
-
-    let dns_port = match pick_udp_port() {
-        Ok(port) => port,
-        Err(err) => {
-            eprintln!("skipping flow control e2e test: {}", err);
-            return;
-        }
-    };
-    let tcp_port = match pick_tcp_port() {
-        Ok(port) => port,
-        Err(err) => {
-            eprintln!("skipping flow control e2e test: {}", err);
-            return;
-        }
     };
 
-    let target = match SplitTarget::spawn() {
-        Ok(target) => target,
-        Err(err) => {
-            eprintln!("skipping flow control e2e test: {}", err);
-            return;
-        }
-    };
-    let domain = "test.example.com";
-
-    std::env::set_var("SLIPSTREAM_STREAM_QUEUE_MAX_BYTES", "32768");
-    std::env::set_var("SLIPSTREAM_CONN_RESERVE_BYTES", "16384");
-    std::env::set_var("SLIPSTREAM_STREAM_WRITE_BUFFER_BYTES", "8388608");
-
-    let (mut server, server_logs) = spawn_server(ServerArgs {
-        server_bin: &server_bin,
-        dns_listen_host: Some("127.0.0.1"),
-        dns_port,
-        target_address: &format!("127.0.0.1:{}", target.addr.port()),
-        domains: &[domain],
-        cert: &cert,
-        key: &key,
-        reset_seed_path: None,
-        fallback_addr: None,
-        idle_timeout_seconds: None,
-        rust_log: "info",
-        capture_logs: true,
-    });
-    let server_logs = server_logs.expect("server logs");
-    thread::sleep(Duration::from_millis(200));
-    if server.has_exited() {
-        eprintln!("skipping flow control e2e test: server failed to start");
-        return;
-    }
-
-    let (_client, client_logs) = spawn_client(ClientArgs {
-        client_bin: &client_bin,
-        dns_port,
-        tcp_port,
-        domain,
-        cert: Some(&cert),
-        keep_alive_interval: Some(0),
-        rust_log: "info",
-        capture_logs: true,
-    });
-    let client_logs = client_logs.expect("client logs");
-    if !wait_for_log(
-        &client_logs,
-        "Listening on TCP port",
-        Duration::from_secs(5),
-    ) {
-        let snapshot = log_snapshot(&client_logs);
-        panic!("client did not start listening\n{}", snapshot);
-    }
-    if !wait_for_log(&client_logs, "Connection ready", Duration::from_secs(10)) {
-        let snapshot = log_snapshot(&client_logs);
-        panic!("client did not become ready\n{}", snapshot);
-    }
-
-    let client_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port));
+    let server_logs = &harness.server_logs;
+    let client_logs = &harness.client_logs;
+    let target = &harness.target;
+    let client_addr = harness.client_addr;
     let mut blocked = TcpStream::connect_timeout(&client_addr, Duration::from_secs(2))
         .expect("connect blocked stream");
     let _ = blocked.set_nodelay(true);
