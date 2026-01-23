@@ -254,16 +254,12 @@ fn setup_flow_control(envs: &[(&str, &str)]) -> Option<FlowControlHarness> {
     })
 }
 
-#[test]
-fn blocked_stream_should_not_stall_other_streams() {
-    let Some(harness) = setup_flow_control(&[
-        ("SLIPSTREAM_STREAM_QUEUE_MAX_BYTES", "65536"),
-        ("SLIPSTREAM_CONN_RESERVE_BYTES", "65536"),
-        ("SLIPSTREAM_STREAM_WRITE_BUFFER_BYTES", "8388608"),
-    ]) else {
-        return;
-    };
-
+fn open_blackhole_stream(
+    harness: &FlowControlHarness,
+    expected_index: usize,
+    send_duration: Duration,
+    payload_len: usize,
+) -> TcpStream {
     let server_logs = &harness.server_logs;
     let client_logs = &harness.client_logs;
     let target = &harness.target;
@@ -283,7 +279,7 @@ fn blocked_stream_should_not_stall_other_streams() {
 
     match target.recv_event(Duration::from_secs(5)) {
         Some(TargetEvent::Accepted { index, mode }) => {
-            assert_eq!(index, 0, "expected first target connection to be index 0");
+            assert_eq!(index, expected_index, "unexpected target index");
             assert_eq!(mode, TargetMode::Blackhole, "expected blackhole target");
         }
         None => {
@@ -292,8 +288,8 @@ fn blocked_stream_should_not_stall_other_streams() {
         }
     }
 
-    let send_deadline = Instant::now() + Duration::from_secs(3);
-    let payload = vec![0u8; 32 * 1024];
+    let send_deadline = Instant::now() + send_duration;
+    let payload = vec![0u8; payload_len];
     while Instant::now() < send_deadline {
         match blocked.write(&payload) {
             Ok(0) => break,
@@ -301,6 +297,26 @@ fn blocked_stream_should_not_stall_other_streams() {
             Err(_) => break,
         }
     }
+
+    blocked
+}
+
+#[test]
+fn blocked_stream_should_not_stall_other_streams() {
+    let Some(harness) = setup_flow_control(&[
+        ("SLIPSTREAM_STREAM_QUEUE_MAX_BYTES", "65536"),
+        ("SLIPSTREAM_CONN_RESERVE_BYTES", "65536"),
+        ("SLIPSTREAM_STREAM_WRITE_BUFFER_BYTES", "8388608"),
+    ]) else {
+        return;
+    };
+
+    let server_logs = &harness.server_logs;
+    let client_logs = &harness.client_logs;
+    let target = &harness.target;
+    let client_addr = harness.client_addr;
+    let _blocked =
+        open_blackhole_stream(&harness, 0, Duration::from_secs(3), 32 * 1024);
 
     let mut echo = TcpStream::connect_timeout(&client_addr, Duration::from_secs(2))
         .expect("connect echo stream");
@@ -375,41 +391,8 @@ fn single_stream_slow_transfer_should_not_abort() {
 
     let server_logs = &harness.server_logs;
     let client_logs = &harness.client_logs;
-    let target = &harness.target;
-    let client_addr = harness.client_addr;
-    let mut blocked = TcpStream::connect_timeout(&client_addr, Duration::from_secs(2))
-        .expect("connect blocked stream");
-    let _ = blocked.set_nodelay(true);
-    let _ = blocked.set_write_timeout(Some(Duration::from_millis(200)));
-
-    if !wait_for_log(client_logs, "Accepted TCP stream", Duration::from_secs(5)) {
-        let snapshot = log_snapshot(client_logs);
-        panic!("client did not accept blocked stream\n{}", snapshot);
-    }
-
-    let warmup = vec![0u8; 1024];
-    let _ = blocked.write_all(&warmup);
-
-    match target.recv_event(Duration::from_secs(5)) {
-        Some(TargetEvent::Accepted { index, mode }) => {
-            assert_eq!(index, 0, "expected first target connection to be index 0");
-            assert_eq!(mode, TargetMode::Blackhole, "expected blackhole target");
-        }
-        None => {
-            let snapshot = log_snapshot(server_logs);
-            panic!("target did not accept blackhole connection\n{}", snapshot);
-        }
-    }
-
-    let send_deadline = Instant::now() + Duration::from_secs(2);
-    let payload = vec![0u8; 64 * 1024];
-    while Instant::now() < send_deadline {
-        match blocked.write(&payload) {
-            Ok(0) => break,
-            Ok(_) => continue,
-            Err(_) => break,
-        }
-    }
+    let _blocked =
+        open_blackhole_stream(&harness, 0, Duration::from_secs(2), 64 * 1024);
 
     assert_log_absent(server_logs, "queued_bytes", Duration::from_secs(1));
     assert_log_absent(client_logs, "reset event", Duration::from_secs(1));
