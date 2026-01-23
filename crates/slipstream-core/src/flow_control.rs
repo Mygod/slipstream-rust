@@ -3,19 +3,68 @@ use std::sync::OnceLock;
 const DEFAULT_STREAM_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_CONN_RESERVE_BYTES: usize = 64 * 1024;
 
-pub trait FlowControlStream {
-    fn queued_bytes(&self) -> usize;
-    fn set_queued_bytes(&mut self, value: usize);
-    fn rx_bytes(&self) -> u64;
-    fn set_rx_bytes(&mut self, value: u64);
-    fn consumed_offset(&self) -> u64;
-    fn set_consumed_offset(&mut self, value: u64);
-    fn fin_offset(&self) -> Option<u64>;
-    fn discarding(&self) -> bool;
-    fn set_discarding(&mut self, value: bool);
-    fn stop_sending_sent(&self) -> bool;
-    fn set_stop_sending_sent(&mut self, value: bool);
+#[derive(Debug, Default)]
+pub struct FlowControlState {
+    pub queued_bytes: usize,
+    pub rx_bytes: u64,
+    pub consumed_offset: u64,
+    pub fin_offset: Option<u64>,
+    pub discarding: bool,
+    pub stop_sending_sent: bool,
 }
+
+pub trait HasFlowControlState {
+    fn flow_control(&self) -> &FlowControlState;
+    fn flow_control_mut(&mut self) -> &mut FlowControlState;
+}
+
+pub trait FlowControlStream: HasFlowControlState {
+    fn queued_bytes(&self) -> usize {
+        self.flow_control().queued_bytes
+    }
+
+    fn set_queued_bytes(&mut self, value: usize) {
+        self.flow_control_mut().queued_bytes = value;
+    }
+
+    fn rx_bytes(&self) -> u64 {
+        self.flow_control().rx_bytes
+    }
+
+    fn set_rx_bytes(&mut self, value: u64) {
+        self.flow_control_mut().rx_bytes = value;
+    }
+
+    fn consumed_offset(&self) -> u64 {
+        self.flow_control().consumed_offset
+    }
+
+    fn set_consumed_offset(&mut self, value: u64) {
+        self.flow_control_mut().consumed_offset = value;
+    }
+
+    fn fin_offset(&self) -> Option<u64> {
+        self.flow_control().fin_offset
+    }
+
+    fn discarding(&self) -> bool {
+        self.flow_control().discarding
+    }
+
+    fn set_discarding(&mut self, value: bool) {
+        self.flow_control_mut().discarding = value;
+    }
+
+    fn stop_sending_sent(&self) -> bool {
+        self.flow_control().stop_sending_sent
+    }
+
+    fn set_stop_sending_sent(&mut self, value: bool) {
+        self.flow_control_mut().stop_sending_sent = value;
+    }
+}
+
+impl<T: HasFlowControlState> FlowControlStream for T {}
 
 pub struct QueueOverflowOps<Log, Consume, Stop, Err> {
     pub log_overflow: Log,
@@ -30,6 +79,21 @@ pub struct StreamReceiveConfig {
     pub max_queue: usize,
 }
 
+impl StreamReceiveConfig {
+    pub fn new(multi_stream: bool, reserve_bytes: usize) -> Self {
+        let max_queue = if multi_stream {
+            stream_queue_max_bytes()
+        } else {
+            0
+        };
+        Self {
+            multi_stream,
+            reserve_bytes,
+            max_queue,
+        }
+    }
+}
+
 pub struct StreamReceiveOps<Enqueue, Overflow, Consume, Stop, Log, Err> {
     pub enqueue: Enqueue,
     pub on_overflow: Overflow,
@@ -37,6 +101,35 @@ pub struct StreamReceiveOps<Enqueue, Overflow, Consume, Stop, Log, Err> {
     pub stop_sending: Stop,
     pub log_overflow: Log,
     pub on_consume_error: Err,
+}
+
+pub fn overflow_log_message(
+    stream_id: u64,
+    queued_bytes: usize,
+    incoming_len: usize,
+    max_queue: usize,
+) -> String {
+    format!(
+        "stream {}: queued_bytes {} + {} exceeds limit {}; stopping",
+        stream_id, queued_bytes, incoming_len, max_queue
+    )
+}
+
+pub fn consume_error_log_message(
+    stream_id: u64,
+    context: &str,
+    ret: i32,
+    current: u64,
+    target: u64,
+) -> String {
+    format!(
+        "stream {}: stream_data_consumed failed{} ret={} consumed_offset={} target={}",
+        stream_id, context, ret, current, target
+    )
+}
+
+pub fn promote_error_log_message(stream_id: u64, ret: i32, current: u64, target: u64) -> String {
+    consume_error_log_message(stream_id, " during promote", ret, current, target)
 }
 
 pub fn stream_queue_max_bytes() -> usize {
@@ -115,7 +208,6 @@ where
     apply_consumed_offset(consumed_offset, target, consume_fn, on_error)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn handle_queue_overflow<Log, Consume, Stop, Err>(
     queued_bytes: usize,
     incoming_len: usize,
@@ -199,7 +291,6 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn handle_stream_receive<S, Enqueue, Overflow, Consume, Stop, Log, Err>(
     stream: &mut S,
     incoming_len: usize,

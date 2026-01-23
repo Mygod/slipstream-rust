@@ -1,9 +1,9 @@
 use crate::server::{Command, StreamKey, StreamWrite};
 use crate::target::spawn_target_connector;
 use slipstream_core::flow_control::{
-    conn_reserve_bytes, consume_stream_data, handle_stream_receive, promote_streams,
-    reserve_target_offset, stream_queue_max_bytes, FlowControlStream, PromoteEntry,
-    StreamReceiveConfig, StreamReceiveOps,
+    conn_reserve_bytes, consume_error_log_message, consume_stream_data, handle_stream_receive,
+    overflow_log_message, promote_error_log_message, promote_streams, reserve_target_offset,
+    FlowControlState, HasFlowControlState, PromoteEntry, StreamReceiveConfig, StreamReceiveOps,
 };
 use slipstream_ffi::picoquic::{
     picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
@@ -95,64 +95,23 @@ struct ServerStream {
     data_rx: Option<mpsc::Receiver<Vec<u8>>>,
     send_pending: Option<Arc<AtomicBool>>,
     send_stash: Option<Vec<u8>>,
-    queued_bytes: usize,
     shutdown_tx: watch::Sender<bool>,
-    rx_bytes: u64,
-    consumed_offset: u64,
-    fin_offset: Option<u64>,
     tx_bytes: u64,
     target_fin_pending: bool,
     close_after_flush: bool,
     pending_data: VecDeque<Vec<u8>>,
     pending_fin: bool,
     fin_enqueued: bool,
-    discarding: bool,
-    stop_sending_sent: bool,
+    flow: FlowControlState,
 }
 
-impl FlowControlStream for ServerStream {
-    fn queued_bytes(&self) -> usize {
-        self.queued_bytes
+impl HasFlowControlState for ServerStream {
+    fn flow_control(&self) -> &FlowControlState {
+        &self.flow
     }
 
-    fn set_queued_bytes(&mut self, value: usize) {
-        self.queued_bytes = value;
-    }
-
-    fn rx_bytes(&self) -> u64 {
-        self.rx_bytes
-    }
-
-    fn set_rx_bytes(&mut self, value: u64) {
-        self.rx_bytes = value;
-    }
-
-    fn consumed_offset(&self) -> u64 {
-        self.consumed_offset
-    }
-
-    fn set_consumed_offset(&mut self, value: u64) {
-        self.consumed_offset = value;
-    }
-
-    fn fin_offset(&self) -> Option<u64> {
-        self.fin_offset
-    }
-
-    fn discarding(&self) -> bool {
-        self.discarding
-    }
-
-    fn set_discarding(&mut self, value: bool) {
-        self.discarding = value;
-    }
-
-    fn stop_sending_sent(&self) -> bool {
-        self.stop_sending_sent
-    }
-
-    fn set_stop_sending_sent(&mut self, value: bool) {
-        self.stop_sending_sent = value;
+    fn flow_control_mut(&mut self) -> &mut FlowControlState {
+        &mut self.flow
     }
 }
 
@@ -214,13 +173,13 @@ pub(crate) unsafe extern "C" fn server_callback(
                     key.stream_id,
                     reason,
                     stream.tx_bytes,
-                    stream.rx_bytes,
-                    stream.consumed_offset,
-                    stream.queued_bytes,
+                    stream.flow.rx_bytes,
+                    stream.flow.consumed_offset,
+                    stream.flow.queued_bytes,
                     stream.pending_data.len(),
                     stream.pending_fin,
                     stream.fin_enqueued,
-                    stream.fin_offset,
+                    stream.flow.fin_offset,
                     stream.target_fin_pending,
                     stream.close_after_flush
                 );
@@ -310,7 +269,7 @@ pub(crate) unsafe extern "C" fn server_callback(
                                 "stream {:?}: provide_stream_data_buffer returned null send_len={} queued={} pending_chunks={} tx_bytes={}",
                                 key.stream_id,
                                 send_len,
-                                stream.queued_bytes,
+                                stream.flow.queued_bytes,
                                 stream.pending_data.len(),
                                 stream.tx_bytes
                             );
@@ -390,19 +349,14 @@ fn handle_stream_data(
                 data_rx: None,
                 send_pending: None,
                 send_stash: None,
-                queued_bytes: 0,
                 shutdown_tx,
-                rx_bytes: 0,
-                consumed_offset: 0,
-                fin_offset: None,
                 tx_bytes: 0,
                 target_fin_pending: false,
                 close_after_flush: false,
                 pending_data: VecDeque::new(),
                 pending_fin: false,
                 fin_enqueued: false,
-                discarding: false,
-                stop_sending_sent: false,
+                flow: FlowControlState::default(),
             },
         );
     }
@@ -415,17 +369,17 @@ fn handle_stream_data(
                 .filter(|(entry_key, _)| entry_key.cnx == key.cnx)
                 .map(|(entry_key, stream)| PromoteEntry {
                     stream_id: entry_key.stream_id,
-                    rx_bytes: stream.rx_bytes,
-                    consumed_offset: &mut stream.consumed_offset,
-                    discarding: stream.discarding,
+                    rx_bytes: stream.flow.rx_bytes,
+                    consumed_offset: &mut stream.flow.consumed_offset,
+                    discarding: stream.flow.discarding,
                 }),
             |stream_id, new_offset| unsafe {
                 picoquic_stream_data_consumed(cnx, stream_id, new_offset)
             },
             |stream_id, ret, consumed_offset, rx_bytes| {
                 warn!(
-                    "stream {:?}: stream_data_consumed failed during promote ret={} consumed_offset={} target={}",
-                    stream_id, ret, consumed_offset, rx_bytes
+                    "{}",
+                    promote_error_log_message(stream_id, ret, consumed_offset, rx_bytes)
                 );
             },
         );
@@ -443,19 +397,10 @@ fn handle_stream_data(
             None => return,
         };
 
-        let max_queue = if multi_stream {
-            stream_queue_max_bytes()
-        } else {
-            0
-        };
         if handle_stream_receive(
             stream,
             data.len(),
-            StreamReceiveConfig {
-                multi_stream,
-                reserve_bytes,
-                max_queue,
-            },
+            StreamReceiveConfig::new(multi_stream, reserve_bytes),
             StreamReceiveOps {
                 enqueue: |stream: &mut ServerStream| {
                     if let Some(write_tx) = stream.write_tx.as_ref() {
@@ -487,15 +432,12 @@ fn handle_stream_data(
                         unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                 },
                 log_overflow: |queued, incoming, max| {
-                    warn!(
-                        "stream {:?}: queued_bytes {} + {} exceeds limit {}; stopping",
-                        stream_id, queued, incoming, max
-                    );
+                    warn!("{}", overflow_log_message(stream_id, queued, incoming, max));
                 },
                 on_consume_error: |ret, current, target| {
                     warn!(
-                        "stream {:?}: stream_data_consumed failed{} ret={} consumed_offset={} target={}",
-                        stream_id, "", ret, current, target
+                        "{}",
+                        consume_error_log_message(stream_id, "", ret, current, target)
                     );
                 },
             },
@@ -504,13 +446,13 @@ fn handle_stream_data(
         }
 
         if fin {
-            if stream.discarding {
+            if stream.flow.discarding {
                 if !reset_stream {
                     remove_stream = true;
                 }
             } else {
-                if stream.fin_offset.is_none() {
-                    stream.fin_offset = Some(stream.rx_bytes);
+                if stream.flow.fin_offset.is_none() {
+                    stream.flow.fin_offset = Some(stream.flow.rx_bytes);
                 }
                 if !stream.fin_enqueued {
                     if stream.write_tx.is_some() && stream.pending_data.is_empty() {
@@ -542,7 +484,7 @@ fn handle_stream_data(
         if !state
             .streams
             .get(&key)
-            .map(|stream| stream.discarding)
+            .map(|stream| stream.flow.discarding)
             .unwrap_or(false)
         {
             shutdown_stream(state, key);
@@ -608,7 +550,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 if state.debug_streams {
                     debug!("stream {:?}: target connected", stream_id);
                 }
-                if stream.discarding {
+                if stream.flow.discarding {
                     stream.pending_data.clear();
                     stream.pending_fin = false;
                     stream.fin_enqueued = false;
@@ -624,7 +566,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                             warn!(
                                 "stream {:?}: pending write flush failed queued={} pending_chunks={} tx_bytes={}",
                                 stream_id,
-                                stream.queued_bytes,
+                                stream.flow.queued_bytes,
                                 stream.pending_data.len(),
                                 stream.tx_bytes
                             );
@@ -637,7 +579,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                             warn!(
                                 "stream {:?}: pending fin flush failed queued={} pending_chunks={} tx_bytes={}",
                                 stream_id,
-                                stream.queued_bytes,
+                                stream.flow.queued_bytes,
                                 stream.pending_data.len(),
                                 stream.tx_bytes
                             );
@@ -726,10 +668,10 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     "stream {:?}: target read error tx_bytes={} rx_bytes={} consumed_offset={} queued={} fin_offset={:?}",
                     stream_id,
                     stream.tx_bytes,
-                    stream.rx_bytes,
-                    stream.consumed_offset,
-                    stream.queued_bytes,
-                    stream.fin_offset
+                    stream.flow.rx_bytes,
+                    stream.flow.consumed_offset,
+                    stream.flow.queued_bytes,
+                    stream.flow.fin_offset
                 );
                 let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             }
@@ -745,10 +687,10 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     "stream {:?}: target write failed tx_bytes={} rx_bytes={} consumed_offset={} queued={} fin_offset={:?}",
                     stream_id,
                     stream.tx_bytes,
-                    stream.rx_bytes,
-                    stream.consumed_offset,
-                    stream.queued_bytes,
-                    stream.fin_offset
+                    stream.flow.rx_bytes,
+                    stream.flow.consumed_offset,
+                    stream.flow.queued_bytes,
+                    stream.flow.fin_offset
                 );
                 let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             }
@@ -764,19 +706,19 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             };
             let mut reset_stream = false;
             if let Some(stream) = state.streams.get_mut(&key) {
-                if stream.discarding {
+                if stream.flow.discarding {
                     return;
                 }
-                stream.queued_bytes = stream.queued_bytes.saturating_sub(bytes);
+                stream.flow.queued_bytes = stream.flow.queued_bytes.saturating_sub(bytes);
                 if !state.multi_streams.contains(&cnx_id) {
                     let new_offset = reserve_target_offset(
-                        stream.rx_bytes,
-                        stream.queued_bytes,
-                        stream.fin_offset,
+                        stream.flow.rx_bytes,
+                        stream.flow.queued_bytes,
+                        stream.flow.fin_offset,
                         conn_reserve_bytes(),
                     );
                     if !consume_stream_data(
-                        &mut stream.consumed_offset,
+                        &mut stream.flow.consumed_offset,
                         new_offset,
                         |new_offset| unsafe {
                             picoquic_stream_data_consumed(
@@ -787,8 +729,8 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                         },
                         |ret, current, target| {
                             warn!(
-                                "stream {:?}: stream_data_consumed failed{} ret={} consumed_offset={} target={}",
-                                stream_id, "", ret, current, target
+                                "{}",
+                                consume_error_log_message(stream_id, "", ret, current, target)
                             );
                         },
                     ) {
