@@ -25,19 +25,17 @@ jobs:
   build:
     needs: release-please
     if: needs.release-please.outputs.release_created
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             artifact_name: linux-amd64
-            cc: gcc
-            cxx: g++
-          - target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
             artifact_name: linux-arm64
-            cc: aarch64-linux-gnu-gcc
-            cxx: aarch64-linux-gnu-g++
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -49,43 +47,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake pkg-config libssl-dev python3
 
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libssl-dev:arm64
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
-          echo "PKG_CONFIG_SYSROOT_DIR=/" >> $GITHUB_ENV
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
       - name: Build picoquic
-        env:
-          PICOQUIC_BUILD_DIR: .picoquic-build/${{ matrix.target }}
-          CC: ${{ matrix.cc }}
-          CXX: ${{ matrix.cxx }}
         run: ./scripts/build_picoquic.sh
 
       - name: Build release binaries
-        env:
-          PICOQUIC_BUILD_DIR: .picoquic-build/${{ matrix.target }}
-        run: |
-          cargo build --release --target ${{ matrix.target }} \
-            -p slipstream-client -p slipstream-server
+        run: cargo build --release -p slipstream-client -p slipstream-server
 
       - name: Prepare artifacts
         run: |
           mkdir -p artifacts
-          cp target/${{ matrix.target }}/release/slipstream-client artifacts/slipstream-client-${{ matrix.artifact_name }}
-          cp target/${{ matrix.target }}/release/slipstream-server artifacts/slipstream-server-${{ matrix.artifact_name }}
+          cp target/release/slipstream-client artifacts/slipstream-client-${{ matrix.artifact_name }}
+          cp target/release/slipstream-server artifacts/slipstream-server-${{ matrix.artifact_name }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -107,10 +82,7 @@ jobs:
 
       - name: Generate checksums
         working-directory: artifacts
-        run: |
-          for file in slipstream-*; do
-            sha256sum "$file" > "$file.sha256"
-          done
+        run: sha256sum slipstream-* > SHA256SUMS
 
       - name: Upload release assets
         env:
