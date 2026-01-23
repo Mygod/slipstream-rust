@@ -1,4 +1,4 @@
-use slipstream_core::net::is_transient_udp_error;
+use slipstream_core::{net::is_transient_udp_error, normalize_dual_stack_addr};
 use slipstream_dns::{decode_query_with_domains, DecodeQueryError};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_incoming_packet_ex, picoquic_quic_t, slipstream_disable_ack_delay,
@@ -12,7 +12,7 @@ use tokio::net::UdpSocket as TokioUdpSocket;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::server::{map_io, normalize_dual_stack_addr, ServerError, Slot};
+use crate::server::{map_io, ServerError, Slot};
 
 pub(crate) const MAX_UDP_PACKET_SIZE: usize = 65535;
 const FALLBACK_IDLE_TIMEOUT: Duration = Duration::from_secs(180);

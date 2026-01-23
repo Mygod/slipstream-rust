@@ -1,9 +1,9 @@
 use crate::error::ClientError;
 use crate::pacing::{PacingBudgetSnapshot, PacingPollBudget};
-use slipstream_core::resolve_host_port;
+use slipstream_core::{normalize_dual_stack_addr, resolve_host_port};
 use slipstream_ffi::{socket_addr_to_storage, ResolverMode, ResolverSpec};
 use std::collections::HashMap;
-use std::net::{SocketAddr, SocketAddrV6};
+use std::net::SocketAddr;
 use tracing::warn;
 
 use super::debug::DebugMetrics;
@@ -90,15 +90,6 @@ pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
     resolver.last_pacing_snapshot = None;
     resolver.probe_attempts = 0;
     resolver.next_probe_at = 0;
-}
-
-pub(crate) fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
-    match addr {
-        SocketAddr::V4(v4) => {
-            SocketAddr::V6(SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0))
-        }
-        SocketAddr::V6(v6) => SocketAddr::V6(v6),
-    }
 }
 
 pub(crate) fn sockaddr_storage_to_socket_addr(

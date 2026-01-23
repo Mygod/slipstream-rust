@@ -43,6 +43,28 @@ The runtime centers around a connection manager that owns QUIC state, timers, an
 per-connection queues. UDP receive/send and TCP accept/read/write are handled by
 separate tasks, with bounded channels used to limit memory growth under load.
 
+## Flow control strategy
+
+Slipstream needs to satisfy two competing cases:
+
+- Slow, long-lived single-stream transfers should behave like TCP. We want
+  application backpressure to propagate to the sender so large uploads don't get
+  aborted just because the target is slow.
+- If a second stream appears, a stalled or blackholed stream must not be able to
+  exhaust the connection-level window and block new streams. This showed up in
+  practice as “new TCP connections hang” even though the QUIC connection is
+  still alive.
+
+To cover both:
+
+- In single-stream mode, we rely on TCP-style backpressure (consume after TCP
+  writes) but keep a small reserve window (SLIPSTREAM_CONN_RESERVE_BYTES) so
+  a new stream can always send its first bytes and trigger mode switch.
+- Once multiple streams are active, we switch to consume-on-receive and enforce
+  per-stream caps (SLIPSTREAM_STREAM_QUEUE_MAX_BYTES). If a stream exceeds its
+  cap, we send STOP_SENDING and discard further data for that stream while
+  continuing to consume, which prevents connection-wide stalls.
+
 ## Rust vs C behavior notes
 
 - The Rust client clamps active DNS polling sleeps to `DNS_POLL_SLICE_US` (50 ms),
@@ -63,7 +85,8 @@ separate tasks, with bounded channels used to limit memory growth under load.
 ## Safety and shutdown
 
 - CLI validation enforces required flags and valid host:port parsing.
-- Backpressure is applied via connection-level max_data.
+- Backpressure uses connection-level max_data with a single-stream reserve and
+  per-stream caps in multi-stream mode to avoid global stalls.
 - Shutdown follows explicit states (drain, close, force terminate) to avoid hangs
   and minimize data loss.
 

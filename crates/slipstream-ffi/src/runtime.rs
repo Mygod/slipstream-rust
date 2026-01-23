@@ -61,8 +61,9 @@ pub unsafe fn configure_quic_with_custom(
 }
 
 /// Configure shared QUIC defaults.
-/// Backpressure is enforced via a connection-level `max_data` cap (shared across streams),
-/// rather than per-stream buffer limits/reset.
+/// Connection-level `max_data` is still configured. Stream handlers apply a small reserve in
+/// single-stream mode, then switch to per-stream caps with STOP_SENDING + discard when multiple
+/// streams are active to avoid connection-wide stalls.
 ///
 /// # Safety
 /// `quic` must be a valid picoquic context and `mtu` must be non-zero.

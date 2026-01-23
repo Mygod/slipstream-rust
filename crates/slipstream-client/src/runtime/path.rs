@@ -1,9 +1,10 @@
 use crate::dns::{
-    normalize_dual_stack_addr, refresh_resolver_path, reset_resolver_path, resolver_mode_to_c,
+    refresh_resolver_path, reset_resolver_path, resolver_mode_to_c,
     sockaddr_storage_to_socket_addr, ResolverState,
 };
 use crate::error::ClientError;
 use crate::streams::{ClientState, PathEvent};
+use slipstream_core::normalize_dual_stack_addr;
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_get_default_path_quality, picoquic_get_path_addr,
     picoquic_get_path_quality, slipstream_get_path_id_from_unique, slipstream_set_path_ack_delay,

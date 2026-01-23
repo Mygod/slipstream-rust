@@ -397,6 +397,11 @@ extern "C" {
         stream_id: u64,
         local_stream_error: u64,
     ) -> c_int;
+    pub fn picoquic_stop_sending(
+        cnx: *mut picoquic_cnx_t,
+        stream_id: u64,
+        local_stream_error: u64,
+    ) -> c_int;
     pub fn picoquic_stream_data_consumed(
         cnx: *mut picoquic_cnx_t,
         stream_id: u64,

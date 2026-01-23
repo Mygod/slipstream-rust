@@ -54,8 +54,10 @@ fn cert_pinning_e2e() {
         domains: &[domain, alt_domain],
         cert: &cert,
         key: &key,
+        reset_seed_path: None,
         fallback_addr: None,
         idle_timeout_seconds: None,
+        envs: &[],
         rust_log: "info",
         capture_logs: false,
     });
@@ -73,6 +75,7 @@ fn cert_pinning_e2e() {
             domain,
             cert: Some(&cert),
             keep_alive_interval: None,
+            envs: &[],
             rust_log: "info",
             capture_logs: true,
         });
@@ -106,6 +109,7 @@ fn cert_pinning_e2e() {
             domain: alt_domain,
             cert: Some(&alt_cert),
             keep_alive_interval: None,
+            envs: &[],
             rust_log: "info",
             capture_logs: true,
         });

@@ -1,9 +1,14 @@
+use slipstream_core::flow_control::{
+    conn_reserve_bytes, consume_error_log_message, consume_stream_data, handle_stream_receive,
+    overflow_log_message, promote_error_log_message, promote_streams, reserve_target_offset,
+    FlowControlState, HasFlowControlState, PromoteEntry, StreamReceiveConfig, StreamReceiveOps,
+};
 use slipstream_core::tcp::{stream_read_limit_chunks, tcp_send_buffer_bytes};
 use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
     picoquic_get_close_reasons, picoquic_get_cnx_state, picoquic_get_next_local_stream_id,
     picoquic_mark_active_stream, picoquic_provide_stream_data_buffer, picoquic_reset_stream,
-    picoquic_stream_data_consumed,
+    picoquic_stop_sending, picoquic_stream_data_consumed,
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
@@ -21,6 +26,7 @@ pub(crate) struct ClientState {
     ready: bool,
     closing: bool,
     streams: HashMap<u64, ClientStream>,
+    multi_stream_mode: bool,
     command_tx: mpsc::UnboundedSender<Command>,
     data_notify: Arc<Notify>,
     path_events: Vec<PathEvent>,
@@ -39,6 +45,7 @@ impl ClientState {
             ready: false,
             closing: false,
             streams: HashMap::new(),
+            multi_stream_mode: false,
             command_tx,
             data_notify,
             path_events: Vec::new(),
@@ -81,6 +88,7 @@ impl ClientState {
         }
         self.ready = false;
         self.closing = false;
+        self.multi_stream_mode = false;
         self.path_events.clear();
         self.debug_enqueued_bytes = 0;
         self.debug_last_enqueue_at = 0;
@@ -91,12 +99,19 @@ struct ClientStream {
     write_tx: mpsc::UnboundedSender<StreamWrite>,
     read_abort_tx: Option<oneshot::Sender<()>>,
     data_rx: Option<mpsc::Receiver<Vec<u8>>>,
-    queued_bytes: usize,
-    rx_bytes: u64,
     tx_bytes: u64,
-    consumed_offset: u64,
-    fin_offset: Option<u64>,
     fin_enqueued: bool,
+    flow: FlowControlState,
+}
+
+impl HasFlowControlState for ClientStream {
+    fn flow_control(&self) -> &FlowControlState {
+        &self.flow
+    }
+
+    fn flow_control_mut(&mut self) -> &mut FlowControlState {
+        &mut self.flow
+    }
 }
 
 enum StreamWrite {
@@ -171,11 +186,11 @@ pub(crate) unsafe extern "C" fn client_callback(
                     "stream {}: reset event={} rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?} fin_enqueued={}",
                     stream_id,
                     reason,
-                    stream.rx_bytes,
+                    stream.flow.rx_bytes,
                     stream.tx_bytes,
-                    stream.queued_bytes,
-                    stream.consumed_offset,
-                    stream.fin_offset,
+                    stream.flow.queued_bytes,
+                    stream.flow.consumed_offset,
+                    stream.flow.fin_offset,
                     stream.fin_enqueued
                 );
             } else {
@@ -242,6 +257,12 @@ fn handle_stream_data(
     let debug_streams = state.debug_streams;
     let mut reset_stream = false;
     let mut remove_stream = false;
+    let multi_stream = state.multi_stream_mode;
+    let reserve_bytes = if multi_stream {
+        0
+    } else {
+        conn_reserve_bytes()
+    };
 
     {
         let Some(stream) = state.streams.get_mut(&stream_id) else {
@@ -257,46 +278,84 @@ fn handle_stream_data(
             return;
         };
 
-        if !data.is_empty() {
-            // Backpressure is enforced via connection-level max_data, not per-stream buffer caps.
-            stream.rx_bytes = stream.rx_bytes.saturating_add(data.len() as u64);
-            if stream
-                .write_tx
-                .send(StreamWrite::Data(data.to_vec()))
-                .is_err()
-            {
-                warn!(
-                    "stream {}: tcp write channel closed queued={} rx_bytes={} tx_bytes={}",
-                    stream_id, stream.queued_bytes, stream.rx_bytes, stream.tx_bytes
-                );
-                reset_stream = true;
-            } else {
-                stream.queued_bytes = stream.queued_bytes.saturating_add(data.len());
-            }
+        if handle_stream_receive(
+            stream,
+            data.len(),
+            StreamReceiveConfig::new(multi_stream, reserve_bytes),
+            StreamReceiveOps {
+                enqueue: |stream: &mut ClientStream| {
+                    if stream
+                        .write_tx
+                        .send(StreamWrite::Data(data.to_vec()))
+                        .is_err()
+                    {
+                        warn!(
+                            "stream {}: tcp write channel closed queued={} rx_bytes={} tx_bytes={}",
+                            stream_id,
+                            stream.flow.queued_bytes,
+                            stream.flow.rx_bytes,
+                            stream.tx_bytes
+                        );
+                        Err(())
+                    } else {
+                        Ok(())
+                    }
+                },
+                on_overflow: |stream: &mut ClientStream| {
+                    let (drain_tx, _drain_rx) = mpsc::unbounded_channel();
+                    stream.write_tx = drain_tx;
+                },
+                consume: |new_offset| unsafe {
+                    picoquic_stream_data_consumed(cnx, stream_id, new_offset)
+                },
+                stop_sending: || {
+                    let _ =
+                        unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                },
+                log_overflow: |queued, incoming, max| {
+                    warn!("{}", overflow_log_message(stream_id, queued, incoming, max));
+                },
+                on_consume_error: |ret, current, target| {
+                    warn!(
+                        "{}",
+                        consume_error_log_message(stream_id, "", ret, current, target)
+                    );
+                },
+            },
+        ) {
+            reset_stream = true;
         }
 
         if fin {
-            if stream.fin_offset.is_none() {
-                stream.fin_offset = Some(stream.rx_bytes);
-            }
-            stream.data_rx = None;
-            if !stream.fin_enqueued {
-                if stream.write_tx.send(StreamWrite::Fin).is_err() {
-                    warn!(
-                        "stream {}: tcp write channel closed on fin queued={} rx_bytes={} tx_bytes={}",
-                        stream_id,
-                        stream.queued_bytes,
-                        stream.rx_bytes,
-                        stream.tx_bytes
-                    );
-                    reset_stream = true;
-                } else {
-                    stream.fin_enqueued = true;
+            if stream.flow.discarding {
+                remove_stream = true;
+            } else {
+                if stream.flow.fin_offset.is_none() {
+                    stream.flow.fin_offset = Some(stream.flow.rx_bytes);
+                }
+                stream.data_rx = None;
+                if !stream.fin_enqueued {
+                    if stream.write_tx.send(StreamWrite::Fin).is_err() {
+                        warn!(
+                            "stream {}: tcp write channel closed on fin queued={} rx_bytes={} tx_bytes={}",
+                            stream_id,
+                            stream.flow.queued_bytes,
+                            stream.flow.rx_bytes,
+                            stream.tx_bytes
+                        );
+                        reset_stream = true;
+                    } else {
+                        stream.fin_enqueued = true;
+                    }
                 }
             }
         }
 
-        if !reset_stream && stream.fin_enqueued && stream.queued_bytes == 0 {
+        if !reset_stream
+            && !stream.flow.discarding
+            && stream.fin_enqueued
+            && stream.flow.queued_bytes == 0
+        {
             remove_stream = true;
         }
     }
@@ -406,14 +465,34 @@ pub(crate) fn handle_command(
                     write_tx,
                     read_abort_tx: Some(read_abort_tx),
                     data_rx: Some(data_rx),
-                    queued_bytes: 0,
-                    rx_bytes: 0,
                     tx_bytes: 0,
-                    consumed_offset: 0,
-                    fin_offset: None,
                     fin_enqueued: false,
+                    flow: FlowControlState::default(),
                 },
             );
+            if !state.multi_stream_mode && state.streams.len() > 1 {
+                state.multi_stream_mode = true;
+                promote_streams(
+                    state
+                        .streams
+                        .iter_mut()
+                        .map(|(stream_id, stream)| PromoteEntry {
+                            stream_id: *stream_id,
+                            rx_bytes: stream.flow.rx_bytes,
+                            consumed_offset: &mut stream.flow.consumed_offset,
+                            discarding: stream.flow.discarding,
+                        }),
+                    |stream_id, new_offset| unsafe {
+                        picoquic_stream_data_consumed(cnx, stream_id, new_offset)
+                    },
+                    |stream_id, ret, consumed_offset, rx_bytes| {
+                        warn!(
+                            "{}",
+                            promote_error_log_message(stream_id, ret, consumed_offset, rx_bytes)
+                        );
+                    },
+                );
+            }
             let _ = unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
             if state.debug_streams {
                 debug!("stream {}: accepted", stream_id);
@@ -455,11 +534,11 @@ pub(crate) fn handle_command(
                 warn!(
                     "stream {}: tcp read error rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?}",
                     stream_id,
-                    stream.rx_bytes,
+                    stream.flow.rx_bytes,
                     stream.tx_bytes,
-                    stream.queued_bytes,
-                    stream.consumed_offset,
-                    stream.fin_offset
+                    stream.flow.queued_bytes,
+                    stream.flow.consumed_offset,
+                    stream.flow.fin_offset
                 );
             } else {
                 warn!("stream {}: tcp read error (unknown stream)", stream_id);
@@ -471,11 +550,11 @@ pub(crate) fn handle_command(
                 warn!(
                     "stream {}: tcp write error rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?}",
                     stream_id,
-                    stream.rx_bytes,
+                    stream.flow.rx_bytes,
                     stream.tx_bytes,
-                    stream.queued_bytes,
-                    stream.consumed_offset,
-                    stream.fin_offset
+                    stream.flow.queued_bytes,
+                    stream.flow.consumed_offset,
+                    stream.flow.fin_offset
                 );
             } else {
                 warn!("stream {}: tcp write error (unknown stream)", stream_id);
@@ -484,33 +563,43 @@ pub(crate) fn handle_command(
         }
         Command::StreamWriteDrained { stream_id, bytes } => {
             let mut remove_stream = false;
-            let mut reset_stream = false;
             if let Some(stream) = state.streams.get_mut(&stream_id) {
-                stream.queued_bytes = stream.queued_bytes.saturating_sub(bytes);
-                stream.consumed_offset = stream.consumed_offset.saturating_add(bytes as u64);
-                if let Some(fin_offset) = stream.fin_offset {
-                    if stream.consumed_offset > fin_offset {
-                        stream.consumed_offset = fin_offset;
+                if stream.flow.discarding {
+                    return;
+                }
+                stream.flow.queued_bytes = stream.flow.queued_bytes.saturating_sub(bytes);
+                if !state.multi_stream_mode {
+                    let new_offset = reserve_target_offset(
+                        stream.flow.rx_bytes,
+                        stream.flow.queued_bytes,
+                        stream.flow.fin_offset,
+                        conn_reserve_bytes(),
+                    );
+                    if !consume_stream_data(
+                        &mut stream.flow.consumed_offset,
+                        new_offset,
+                        |new_offset| unsafe {
+                            picoquic_stream_data_consumed(cnx, stream_id, new_offset)
+                        },
+                        |ret, current, target| {
+                            warn!(
+                                "{}",
+                                consume_error_log_message(stream_id, "", ret, current, target)
+                            );
+                        },
+                    ) {
+                        let _ = unsafe {
+                            picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR)
+                        };
+                        state.streams.remove(&stream_id);
+                        return;
                     }
                 }
-                let ret = unsafe {
-                    picoquic_stream_data_consumed(cnx, stream_id, stream.consumed_offset)
-                };
-                if ret < 0 {
-                    warn!(
-                        "stream {}: stream_data_consumed failed ret={} consumed_offset={}",
-                        stream_id, ret, stream.consumed_offset
-                    );
-                    reset_stream = true;
-                } else if stream.fin_enqueued && stream.queued_bytes == 0 {
+                if stream.fin_enqueued && stream.flow.queued_bytes == 0 {
                     remove_stream = true;
                 }
             }
-            if reset_stream {
-                let _ =
-                    unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR) };
-                state.streams.remove(&stream_id);
-            } else if remove_stream {
+            if remove_stream {
                 state.streams.remove(&stream_id);
             }
         }

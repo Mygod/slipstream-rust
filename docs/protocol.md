@@ -95,10 +95,15 @@ Otherwise, the response is ignored (including NAME_ERROR, which signals no data)
 ## Backpressure and buffering
 
 - Connection-level max_data is set to stream_write_buffer_bytes (default 8 MiB).
-- Stream receive buffering relies on connection-level flow control; there is no
-  per-stream buffer cap/reset when enqueueing data to TCP writers.
-- picoquic_stream_data_consumed is called after TCP writes drain, so peers are
-  backpressured when the connection window is full.
+- When only one stream is active, stream data consumption tracks TCP write
+  drain and a small reserve window (SLIPSTREAM_CONN_RESERVE_BYTES) is kept
+  open to allow new streams to send their first bytes.
+- When multiple streams are active, each stream enforces a per-stream receive
+  cap (SLIPSTREAM_STREAM_QUEUE_MAX_BYTES). On overflow, the receiver sends
+  STOP_SENDING, discards data for that stream, and continues consuming to
+  avoid connection-level stalls.
+- Once a connection enters multi-stream mode it stays there for the remainder
+  of the connection.
 
 ## Path handling
 

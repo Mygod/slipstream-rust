@@ -72,35 +72,21 @@ fn main() {
         tracing::info!("SIP003 env detected; applying SS_* overrides with CLI precedence");
     }
 
-    let sip003_local = if !cli_provided(&matches, "tcp_listen_host")
-        && !cli_provided(&matches, "tcp_listen_port")
-    {
-        sip003::parse_endpoint(
-            sip003_env.local_host.as_deref(),
-            sip003_env.local_port.as_deref(),
-            "SS_LOCAL",
-        )
-        .unwrap_or_else(|err| {
-            tracing::error!("SIP003 env error: {}", err);
-            std::process::exit(2);
-        })
-    } else {
-        None
-    };
-    let tcp_listen_host = if cli_provided(&matches, "tcp_listen_host") {
-        args.tcp_listen_host.clone()
-    } else if let Some(endpoint) = &sip003_local {
-        endpoint.host.clone()
-    } else {
-        args.tcp_listen_host.clone()
-    };
-    let tcp_listen_port = if cli_provided(&matches, "tcp_listen_port") {
-        args.tcp_listen_port
-    } else if let Some(endpoint) = &sip003_local {
-        endpoint.port
-    } else {
-        args.tcp_listen_port
-    };
+    let tcp_listen_host_provided = cli_provided(&matches, "tcp_listen_host");
+    let tcp_listen_port_provided = cli_provided(&matches, "tcp_listen_port");
+    let (tcp_listen_host, tcp_listen_port) = sip003::select_host_port(
+        &args.tcp_listen_host,
+        args.tcp_listen_port,
+        tcp_listen_host_provided,
+        tcp_listen_port_provided,
+        sip003_env.local_host.as_deref(),
+        sip003_env.local_port.as_deref(),
+        "SS_LOCAL",
+    )
+    .unwrap_or_else(|err| {
+        tracing::error!("SIP003 env error: {}", err);
+        std::process::exit(2);
+    });
 
     let domain = if let Some(domain) = args.domain.clone() {
         domain
@@ -173,8 +159,13 @@ fn main() {
     let cert = if args.cert.is_some() {
         args.cert.clone()
     } else {
-        last_option_value(&sip003_env.plugin_options, "cert")
+        sip003::last_option_value(&sip003_env.plugin_options, "cert")
     };
+    if cert.is_none() {
+        tracing::warn!(
+            "Server certificate pinning is disabled; this allows MITM. Provide --cert to pin the server leaf, or dismiss this if your underlying tunnel provides authentication."
+        );
+    }
 
     let keep_alive_interval = if cli_provided(&matches, "keep_alive_interval") {
         args.keep_alive_interval
@@ -370,16 +361,6 @@ fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<
         }
     }
     Ok(last)
-}
-
-fn last_option_value(options: &[sip003::Sip003Option], key: &str) -> Option<String> {
-    let mut last = None;
-    for option in options {
-        if option.key == key {
-            last = Some(option.value.trim().to_string());
-        }
-    }
-    last
 }
 
 #[cfg(test)]

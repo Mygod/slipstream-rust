@@ -1,5 +1,8 @@
+use crate::config::{ensure_cert_key, load_or_create_reset_seed, ResetSeed};
 use crate::udp_fallback::{handle_packet, FallbackManager, PacketContext, MAX_UDP_PACKET_SIZE};
-use slipstream_core::{net::is_transient_udp_error, resolve_host_port, HostPort};
+use slipstream_core::{
+    net::is_transient_udp_error, normalize_dual_stack_addr, resolve_host_port, HostPort,
+};
 use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_delete_cnx,
@@ -13,7 +16,8 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt;
-use std::net::{SocketAddr, SocketAddrV6};
+use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -71,6 +75,7 @@ pub struct ServerConfig {
     pub fallback_address: Option<HostPort>,
     pub cert: String,
     pub key: String,
+    pub reset_seed_path: Option<String>,
     pub domains: Vec<String>,
     pub max_connections: u32,
     pub idle_timeout_seconds: u64,
@@ -138,6 +143,35 @@ pub(crate) struct Slot {
 }
 
 pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
+    let cert_path = Path::new(&config.cert);
+    let key_path = Path::new(&config.key);
+    let generated = ensure_cert_key(cert_path, key_path).map_err(ServerError::new)?;
+    if generated {
+        tracing::warn!(
+            "Generated self-signed TLS cert/key at {} and {} (ECDSA P-256, 1000y validity); replace for production use",
+            cert_path.display(),
+            key_path.display()
+        );
+    }
+
+    let reset_seed: Option<ResetSeed> = if let Some(path) = &config.reset_seed_path {
+        let seed = load_or_create_reset_seed(Path::new(path)).map_err(ServerError::new)?;
+        if seed.created {
+            tracing::warn!(
+                "Reset seed created at {}; stateless resets will now survive restarts",
+                path
+            );
+        } else {
+            tracing::info!("Loaded reset seed from {}", path);
+        }
+        Some(seed)
+    } else {
+        tracing::warn!(
+            "Reset seed not configured; stateless resets will not survive server restarts"
+        );
+        None
+    };
+
     let target_addr = resolve_host_port(&config.target_address)
         .map_err(|err| ServerError::new(err.to_string()))?;
     let fallback_addr = match &config.fallback_address {
@@ -167,6 +201,10 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let _state = state;
 
     let current_time = unsafe { picoquic_current_time() };
+    let reset_seed_ptr = reset_seed
+        .as_ref()
+        .map(|seed| seed.bytes.as_ptr())
+        .unwrap_or(std::ptr::null());
     let quic = unsafe {
         picoquic_create(
             config.max_connections,
@@ -178,7 +216,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             state_ptr as *mut _,
             None,
             std::ptr::null_mut(),
-            std::ptr::null(),
+            reset_seed_ptr,
             current_time,
             std::ptr::null_mut(),
             std::ptr::null(),
@@ -228,8 +266,8 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     }
 
     unsafe {
-        let handler = handle_sigterm as *const ();
-        libc::signal(libc::SIGTERM, handler as libc::sighandler_t);
+        let handler = handle_sigterm as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGTERM, handler);
     }
 
     let recv_buf_len = if fallback_mgr.is_some() {
@@ -438,15 +476,6 @@ fn bind_udp_socket_addr(addr: SocketAddr) -> Result<TokioUdpSocket, ServerError>
     socket.set_nonblocking(true).map_err(map_io)?;
     let std_socket: std::net::UdpSocket = socket.into();
     TokioUdpSocket::from_std(std_socket).map_err(map_io)
-}
-
-pub(crate) fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
-    match addr {
-        SocketAddr::V4(v4) => {
-            SocketAddr::V6(SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0))
-        }
-        SocketAddr::V6(v6) => SocketAddr::V6(v6),
-    }
 }
 
 pub(crate) fn map_io(err: std::io::Error) -> ServerError {

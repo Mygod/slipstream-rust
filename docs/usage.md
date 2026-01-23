@@ -65,6 +65,7 @@ Common flags:
 - --max-connections <COUNT> (default: 256; caps concurrent QUIC connections)
 - --fallback <HOST:PORT> (optional; forward non-DNS packets to this UDP endpoint)
 - --idle-timeout-seconds <SECONDS> (default: 1200; set to 0 to disable)
+- --reset-seed <PATH> (optional; 32 hex chars / 16 bytes; auto-created if missing)
 - When binding to ::, slipstream attempts to enable dual-stack (IPV6_V6ONLY=0); if your OS disallows it, IPv4 DNS clients require sysctl changes or binding to an IPv4 address.
 - With --fallback enabled, peers that have recently sent DNS stay DNS-only; while active they switch to fallback only after 16 consecutive non-DNS packets to avoid diverting DNS on stray traffic. DNS-only classification expires after an idle timeout without DNS traffic.
 - Fallback sessions are created per source address without a hard cap; untrusted or spoofed UDP traffic can consume file descriptors/CPU. Use network filtering or rate limiting when exposing fallback to the public Internet, or disable --fallback if this is a concern.
@@ -78,11 +79,14 @@ Example:
   --domain example.com \
   --domain tunnel.example.com \
   --cert ./cert.pem \
-  --key ./key.pem
+  --key ./key.pem \
+  --reset-seed ./reset-seed
 ```
 
 For quick tests you can use the sample certs in `fixtures/certs/` (test-only).
-To generate your own:
+If the configured cert/key paths are missing, the server auto-generates a
+self-signed ECDSA P-256 certificate (1000-year validity). To generate your
+own manually:
 
 ```
 openssl req -x509 -newkey rsa:2048 -nodes \

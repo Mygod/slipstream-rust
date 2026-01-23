@@ -1,5 +1,6 @@
 use std::fmt;
 
+pub mod flow_control;
 mod macros;
 pub mod net;
 pub mod sip003;
@@ -232,6 +233,15 @@ pub fn resolve_host_port(address: &HostPort) -> Result<SocketAddr, ConfigError> 
         },
         address.host
     )))
+}
+
+pub fn normalize_dual_stack_addr(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V4(v4) => {
+            SocketAddr::V6(SocketAddrV6::new(v4.ip().to_ipv6_mapped(), v4.port(), 0, 0))
+        }
+        SocketAddr::V6(v6) => SocketAddr::V6(v6),
+    }
 }
 
 fn parse_port(port_str: &str, input: &str, kind: AddressKind) -> Result<u16, ConfigError> {

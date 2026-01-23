@@ -62,8 +62,10 @@ fn idle_gc_closes_connection() {
         domains: &[domain],
         cert: &cert,
         key: &key,
+        reset_seed_path: None,
         fallback_addr: None,
         idle_timeout_seconds: Some(1),
+        envs: &[],
         rust_log: "debug",
         capture_logs: true,
     });
@@ -81,6 +83,7 @@ fn idle_gc_closes_connection() {
         domain,
         cert: Some(&cert),
         keep_alive_interval: Some(0),
+        envs: &[],
         rust_log: "info",
         capture_logs: true,
     });
@@ -114,6 +117,7 @@ fn idle_gc_closes_connection() {
         domain,
         cert: Some(&cert),
         keep_alive_interval: Some(0),
+        envs: &[],
         rust_log: "info",
         capture_logs: true,
     });

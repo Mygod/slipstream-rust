@@ -1,3 +1,4 @@
+mod config;
 mod server;
 mod streams;
 mod target;
@@ -34,6 +35,8 @@ struct Args {
     cert: Option<String>,
     #[arg(long = "key", short = 'k', value_name = "PATH")]
     key: Option<String>,
+    #[arg(long = "reset-seed", value_name = "PATH")]
+    reset_seed: Option<String>,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
     domains: Vec<String>,
     #[arg(long = "max-connections", default_value_t = 256, value_parser = parse_max_connections)]
@@ -58,35 +61,21 @@ fn main() {
         tracing::info!("SIP003 env detected; applying SS_* overrides with CLI precedence");
     }
 
-    let sip003_remote = if !cli_provided(&matches, "dns_listen_host")
-        && !cli_provided(&matches, "dns_listen_port")
-    {
-        sip003::parse_endpoint(
-            sip003_env.remote_host.as_deref(),
-            sip003_env.remote_port.as_deref(),
-            "SS_REMOTE",
-        )
-        .unwrap_or_else(|err| {
-            tracing::error!("SIP003 env error: {}", err);
-            std::process::exit(2);
-        })
-    } else {
-        None
-    };
-    let dns_listen_host = if cli_provided(&matches, "dns_listen_host") {
-        args.dns_listen_host.clone()
-    } else if let Some(endpoint) = &sip003_remote {
-        endpoint.host.clone()
-    } else {
-        args.dns_listen_host.clone()
-    };
-    let dns_listen_port = if cli_provided(&matches, "dns_listen_port") {
-        args.dns_listen_port
-    } else if let Some(endpoint) = &sip003_remote {
-        endpoint.port
-    } else {
-        args.dns_listen_port
-    };
+    let dns_listen_host_provided = cli_provided(&matches, "dns_listen_host");
+    let dns_listen_port_provided = cli_provided(&matches, "dns_listen_port");
+    let (dns_listen_host, dns_listen_port) = sip003::select_host_port(
+        &args.dns_listen_host,
+        args.dns_listen_port,
+        dns_listen_host_provided,
+        dns_listen_port_provided,
+        sip003_env.remote_host.as_deref(),
+        sip003_env.remote_port.as_deref(),
+        "SS_REMOTE",
+    )
+    .unwrap_or_else(|err| {
+        tracing::error!("SIP003 env error: {}", err);
+        std::process::exit(2);
+    });
 
     let sip003_local = if cli_provided(&matches, "target_address") {
         None
@@ -114,7 +103,7 @@ fn main() {
     let fallback_address = if cli_provided(&matches, "fallback") {
         args.fallback.clone()
     } else {
-        last_option_value(&sip003_env.plugin_options, "fallback").map(|value| {
+        sip003::last_option_value(&sip003_env.plugin_options, "fallback").map(|value| {
             parse_fallback_address(&value).unwrap_or_else(|err| {
                 tracing::error!("SIP003 env error: {}", err);
                 std::process::exit(2);
@@ -139,7 +128,7 @@ fn main() {
 
     let cert = if let Some(cert) = args.cert.clone() {
         cert
-    } else if let Some(cert) = last_option_value(&sip003_env.plugin_options, "cert") {
+    } else if let Some(cert) = sip003::last_option_value(&sip003_env.plugin_options, "cert") {
         cert
     } else {
         tracing::error!("A certificate path is required");
@@ -148,15 +137,22 @@ fn main() {
 
     let key = if let Some(key) = args.key.clone() {
         key
-    } else if let Some(key) = last_option_value(&sip003_env.plugin_options, "key") {
+    } else if let Some(key) = sip003::last_option_value(&sip003_env.plugin_options, "key") {
         key
     } else {
         tracing::error!("A key path is required");
         std::process::exit(2);
     };
+    let reset_seed_path = if let Some(path) = args.reset_seed.clone() {
+        Some(path)
+    } else {
+        sip003::last_option_value(&sip003_env.plugin_options, "reset-seed")
+    };
     let max_connections = if cli_provided(&matches, "max_connections") {
         args.max_connections
-    } else if let Some(value) = last_option_value(&sip003_env.plugin_options, "max-connections") {
+    } else if let Some(value) =
+        sip003::last_option_value(&sip003_env.plugin_options, "max-connections")
+    {
         parse_max_connections(&value).unwrap_or_else(|err| {
             tracing::error!("SIP003 env error: {}", err);
             std::process::exit(2);
@@ -172,6 +168,7 @@ fn main() {
         fallback_address,
         cert,
         key,
+        reset_seed_path,
         domains,
         max_connections,
         idle_timeout_seconds: args.idle_timeout_seconds,
@@ -250,14 +247,4 @@ fn parse_domains_from_options(options: &[sip003::Sip003Option]) -> Result<Vec<St
         }
     }
     Ok(domains.unwrap_or_default())
-}
-
-fn last_option_value(options: &[sip003::Sip003Option], key: &str) -> Option<String> {
-    let mut last = None;
-    for option in options {
-        if option.key == key {
-            last = Some(option.value.trim().to_string());
-        }
-    }
-    last
 }

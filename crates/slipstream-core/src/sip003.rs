@@ -164,6 +164,25 @@ pub fn parse_endpoint(
     }
 }
 
+pub fn select_host_port(
+    cli_host: &str,
+    cli_port: u16,
+    cli_host_provided: bool,
+    cli_port_provided: bool,
+    env_host: Option<&str>,
+    env_port: Option<&str>,
+    label: &str,
+) -> Result<(String, u16), ConfigError> {
+    if cli_host_provided || cli_port_provided {
+        return Ok((cli_host.to_string(), cli_port));
+    }
+
+    match parse_endpoint(env_host, env_port, label)? {
+        Some(endpoint) => Ok((endpoint.host, endpoint.port)),
+        None => Ok((cli_host.to_string(), cli_port)),
+    }
+}
+
 pub fn split_list(value: &str) -> Result<Vec<String>, ConfigError> {
     let mut entries = Vec::new();
     for raw in value.split(',') {
@@ -176,6 +195,16 @@ pub fn split_list(value: &str) -> Result<Vec<String>, ConfigError> {
         entries.push(trimmed.to_string());
     }
     Ok(entries)
+}
+
+pub fn last_option_value(options: &[Sip003Option], key: &str) -> Option<String> {
+    let mut last = None;
+    for option in options {
+        if option.key == key {
+            last = Some(option.value.trim().to_string());
+        }
+    }
+    last
 }
 
 fn read_env_value(name: &str) -> Option<String> {

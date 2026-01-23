@@ -7,7 +7,8 @@ use slipstream_ffi::picoquic::{
 use slipstream_ffi::{socket_addr_to_storage, ResolverMode};
 use std::net::SocketAddr;
 
-use super::resolver::{normalize_dual_stack_addr, ResolverState};
+use super::resolver::ResolverState;
+use slipstream_core::normalize_dual_stack_addr;
 
 const MAX_POLL_BURST: usize = PICOQUIC_PACKET_LOOP_RECV_MAX;
 

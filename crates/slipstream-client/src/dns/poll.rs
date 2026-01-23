@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use tokio::net::UdpSocket as TokioUdpSocket;
 
 use super::path::refresh_resolver_path;
-use super::resolver::{normalize_dual_stack_addr, sockaddr_storage_to_socket_addr, ResolverState};
+use super::resolver::{sockaddr_storage_to_socket_addr, ResolverState};
+use slipstream_core::normalize_dual_stack_addr;
 
 const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 5_000_000;
 
