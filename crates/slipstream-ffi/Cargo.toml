@@ -12,9 +12,11 @@ cc = "1.0"
 
 [dependencies]
 libc = "0.2"
-winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 openssl-sys = { version = "0.9", optional = true, features = ["vendored"] }
 slipstream-core = { path = "../slipstream-core" }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 
 [features]
 default = []

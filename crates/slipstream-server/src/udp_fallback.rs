@@ -478,14 +478,12 @@ fn dummy_sockaddr_storage() -> libc::sockaddr_storage {
 #[cfg(windows)]
 fn dummy_sockaddr_storage() -> slipstream_ffi::SockaddrStorage {
     use std::net::{Ipv6Addr, SocketAddrV6};
-    slipstream_ffi::socket_addr_to_storage(
-        std::net::SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
-            12345,
-            0,
-            0,
-        ))
-    )
+    slipstream_ffi::socket_addr_to_storage(std::net::SocketAddr::V6(SocketAddrV6::new(
+        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+        12345,
+        0,
+        0,
+    )))
 }
 
 #[cfg(test)]
