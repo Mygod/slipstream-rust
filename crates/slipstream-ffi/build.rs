@@ -243,6 +243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !target.contains("android") {
         if is_windows {
             println!("cargo:rustc-link-lib=dylib=ws2_32");
+            println!("cargo:rustc-link-lib=dylib=bcrypt");
         } else {
             println!("cargo:rustc-link-lib=dylib=pthread");
         }

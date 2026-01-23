@@ -318,7 +318,7 @@ pub fn sockaddr_storage_to_socket_addr(storage: &sockaddr_storage) -> Result<Soc
         AF_INET => {
             let addr_in: &SOCKADDR_IN =
                 unsafe { &*(storage as *const _ as *const SOCKADDR_IN) };
-            let ip = Ipv4Addr::from(addr_in.sin_addr.S_un.S_addr());
+            let ip = Ipv4Addr::from(unsafe { *addr_in.sin_addr.S_un.S_addr() });
             let port = u16::from_be(addr_in.sin_port);
             Ok(SocketAddr::V4(SocketAddrV4::new(ip, port)))
         }
