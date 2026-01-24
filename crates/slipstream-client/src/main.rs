@@ -388,7 +388,10 @@ fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<
 fn parse_cert_sha256(input: &str) -> Result<[u8; 32], String> {
     let trimmed = input.trim();
     let trimmed = trimmed.strip_prefix("sha256:").unwrap_or(trimmed);
-    let cleaned: String = trimmed.chars().filter(|c| *c != ':' && !c.is_whitespace()).collect();
+    let cleaned: String = trimmed
+        .chars()
+        .filter(|c| *c != ':' && !c.is_whitespace())
+        .collect();
     if cleaned.len() != 64 {
         return Err("cert-sha256 must be 64 hex characters".to_string());
     }

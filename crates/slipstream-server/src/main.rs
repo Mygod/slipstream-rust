@@ -11,8 +11,8 @@ use server::{run_server, ServerConfig};
 use slipstream_core::{
     normalize_domain, parse_host_port, parse_host_port_parts, sip003, AddressKind, HostPort,
 };
-use std::fs;
 use std::fmt::Write;
+use std::fs;
 use tokio::runtime::Builder;
 use tracing_subscriber::EnvFilter;
 
@@ -278,7 +278,8 @@ fn parse_domains_from_options(options: &[sip003::Sip003Option]) -> Result<Vec<St
 }
 
 fn cert_sha256_hex(cert_path: &str) -> Result<String, String> {
-    let pem = fs::read(cert_path).map_err(|err| format!("Failed to read cert {}: {}", cert_path, err))?;
+    let pem =
+        fs::read(cert_path).map_err(|err| format!("Failed to read cert {}: {}", cert_path, err))?;
     let mut certs = X509::stack_from_pem(&pem)
         .map_err(|err| format!("Failed to parse cert {}: {}", cert_path, err))?;
     if certs.len() != 1 {
@@ -304,13 +305,9 @@ fn percent_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len() * 3);
     for byte in input.as_bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~' => out.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
             _ => {
                 let _ = write!(&mut out, "%{:02X}", byte);
             }
