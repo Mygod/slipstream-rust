@@ -9,9 +9,8 @@ use slipstream_ffi::picoquic::{
     picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
     picoquic_get_close_reasons, picoquic_get_cnx_state, picoquic_get_first_cnx,
     picoquic_get_next_cnx, picoquic_mark_active_stream, picoquic_provide_stream_data_buffer,
-    picoquic_quic_t, picoquic_reset_stream, picoquic_stop_sending,
-    picoquic_stream_data_consumed, PICOQUIC_ERROR_CANNOT_SET_ACTIVE_STREAM,
-    PICOQUIC_ERROR_STREAM_ALREADY_CLOSED,
+    picoquic_quic_t, picoquic_reset_stream, picoquic_stop_sending, picoquic_stream_data_consumed,
+    PICOQUIC_ERROR_CANNOT_SET_ACTIVE_STREAM, PICOQUIC_ERROR_STREAM_ALREADY_CLOSED,
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -387,7 +386,8 @@ pub(crate) unsafe extern "C" fn server_callback(
                     };
                     if still_active != 0 {
                         let now = Instant::now();
-                        if now.duration_since(state.last_prepare_zero_warn) >= Duration::from_secs(1)
+                        if now.duration_since(state.last_prepare_zero_warn)
+                            >= Duration::from_secs(1)
                         {
                             debug!(
                                 "stream {:?}: send callback has no space (cnx={} pending={} target_fin_pending={} fin_enqueued={})",
@@ -851,7 +851,11 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 );
             }
         }
-        Command::StreamReadError { cnx_id, stream_id, err } => {
+        Command::StreamReadError {
+            cnx_id,
+            stream_id,
+            err,
+        } => {
             let cnx = cnx_id as *mut picoquic_cnx_t;
             let key = StreamKey {
                 cnx: cnx_id,
@@ -883,7 +887,11 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 );
             }
         }
-        Command::StreamWriteError { cnx_id, stream_id, err } => {
+        Command::StreamWriteError {
+            cnx_id,
+            stream_id,
+            err,
+        } => {
             let cnx = cnx_id as *mut picoquic_cnx_t;
             let key = StreamKey {
                 cnx: cnx_id,
