@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::sleep;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 // Protocol defaults; see docs/config.md for details.
 const SLIPSTREAM_ALPN: &str = "picoquic_sample";
@@ -49,6 +49,7 @@ const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
 const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
+const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
 
 fn is_ipv6_unspecified(host: &str) -> bool {
     host.parse::<Ipv6Addr>()
@@ -226,6 +227,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let packet_loop_recv_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_RECV_MAX);
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
+        let mut last_flow_block_log_at = 0u64;
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -433,6 +435,33 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
             let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
             let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
+            let streams_len = unsafe { (*state_ptr).streams_len() };
+            if streams_len > 0 && has_ready_stream && flow_blocked {
+                let now = unsafe { picoquic_current_time() };
+                if now.saturating_sub(last_flow_block_log_at) >= FLOW_BLOCKED_LOG_INTERVAL_US {
+                    let (enqueued_bytes, last_enqueue_at) =
+                        unsafe { (*state_ptr).debug_snapshot() };
+                    let queued_bytes_total = unsafe { (*state_ptr).queued_bytes_total() };
+                    let last_enqueue_ms = if last_enqueue_at == 0 {
+                        0
+                    } else {
+                        now.saturating_sub(last_enqueue_at) / 1_000
+                    };
+                    error!(
+                        "connection flow blocked: streams={} queued_bytes_total={} enqueued_bytes={} last_enqueue_at={} last_enqueue_ms={} zero_send_with_streams={} zero_send_loops={} flow_blocked={} has_ready_stream={}",
+                        streams_len,
+                        queued_bytes_total,
+                        enqueued_bytes,
+                        last_enqueue_at,
+                        last_enqueue_ms,
+                        zero_send_with_streams,
+                        zero_send_loops,
+                        flow_blocked,
+                        has_ready_stream
+                    );
+                    last_flow_block_log_at = now;
+                }
+            }
             for resolver in resolvers.iter_mut() {
                 if !refresh_resolver_path(cnx, resolver) {
                     continue;
@@ -519,7 +548,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             }
 
             let report_time = unsafe { picoquic_current_time() };
-            let streams_len = unsafe { (*state_ptr).streams_len() };
             let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
             for resolver in resolvers.iter_mut() {
                 resolver.debug.enqueued_bytes = enqueued_bytes;

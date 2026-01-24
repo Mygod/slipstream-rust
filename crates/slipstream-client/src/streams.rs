@@ -71,6 +71,14 @@ impl ClientState {
         (self.debug_enqueued_bytes, self.debug_last_enqueue_at)
     }
 
+    pub(crate) fn queued_bytes_total(&self) -> u64 {
+        let mut queued_bytes = 0u64;
+        for stream in self.streams.values() {
+            queued_bytes = queued_bytes.saturating_add(stream.flow.queued_bytes as u64);
+        }
+        queued_bytes
+    }
+
     pub(crate) fn take_path_events(&mut self) -> Vec<PathEvent> {
         std::mem::take(&mut self.path_events)
     }
@@ -497,7 +505,7 @@ pub(crate) fn handle_command(
             if state.debug_streams {
                 debug!("stream {}: accepted", stream_id);
             } else {
-                info!("Accepted TCP stream {}", stream_id);
+                debug!("Accepted TCP stream {}", stream_id);
             }
         }
         Command::StreamData { stream_id, data } => {
