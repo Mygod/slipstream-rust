@@ -158,20 +158,23 @@ fn main() {
         })
     };
 
-    let cert_sha256 = if let Some(value) = args.cert_sha256.clone() {
-        Some(parse_cert_sha256(&value).unwrap_or_else(|err| {
-            tracing::error!("Invalid cert-sha256 value: {}", err);
-            std::process::exit(2);
-        }))
-    } else if let Some(value) = sip003::last_option_value(&sip003_env.plugin_options, "cert-sha256")
-    {
-        Some(parse_cert_sha256(&value).unwrap_or_else(|err| {
-            tracing::error!("Invalid cert-sha256 value: {}", err);
-            std::process::exit(2);
-        }))
-    } else {
-        None
-    };
+    let cert_sha256 = args
+        .cert_sha256
+        .as_deref()
+        .map(|value| {
+            parse_cert_sha256(value).unwrap_or_else(|err| {
+                tracing::error!("Invalid cert-sha256 value: {}", err);
+                std::process::exit(2);
+            })
+        })
+        .or_else(|| {
+            sip003::last_option_value(&sip003_env.plugin_options, "cert-sha256").map(|value| {
+                parse_cert_sha256(&value).unwrap_or_else(|err| {
+                    tracing::error!("Invalid cert-sha256 value: {}", err);
+                    std::process::exit(2);
+                })
+            })
+        });
 
     let mut cert = if args.cert.is_some() {
         args.cert.clone()
