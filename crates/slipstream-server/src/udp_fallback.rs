@@ -3,7 +3,7 @@ use slipstream_dns::{decode_query_with_domains, DecodeQueryError};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_incoming_packet_ex, picoquic_quic_t, slipstream_disable_ack_delay,
 };
-use slipstream_ffi::take_stateless_packet_for_cid;
+use slipstream_ffi::{socket_addr_to_storage, take_stateless_packet_for_cid};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -468,28 +468,10 @@ async fn forward_fallback_replies(
 }
 
 fn dummy_sockaddr_storage() -> libc::sockaddr_storage {
-    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let sockaddr = libc::sockaddr_in6 {
-        #[cfg(any(
-            target_vendor = "apple",
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd",
-            target_os = "dragonfly",
-        ))]
-        sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
-        sin6_family: libc::AF_INET6 as libc::sa_family_t,
-        sin6_port: 12345u16.to_be(),
-        sin6_flowinfo: 0,
-        sin6_addr: libc::in6_addr {
-            s6_addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets(),
-        },
-        sin6_scope_id: 0,
-    };
-    unsafe {
-        std::ptr::write(&mut storage as *mut _ as *mut libc::sockaddr_in6, sockaddr);
-    }
-    storage
+    socket_addr_to_storage(SocketAddr::new(
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+        12345,
+    ))
 }
 
 #[cfg(test)]

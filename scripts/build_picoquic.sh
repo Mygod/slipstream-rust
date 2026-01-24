@@ -82,4 +82,8 @@ if [[ -n "${OPENSSL_USE_STATIC_LIBS:-}" ]]; then
 fi
 
 cmake -S "${PICOQUIC_DIR}" -B "${BUILD_DIR}" "${CMAKE_ARGS[@]}"
-cmake --build "${BUILD_DIR}" "${BUILD_TARGET[@]}"
+if [[ ${#BUILD_TARGET[@]} -gt 0 ]]; then
+  cmake --build "${BUILD_DIR}" "${BUILD_TARGET[@]}"
+else
+  cmake --build "${BUILD_DIR}"
+fi

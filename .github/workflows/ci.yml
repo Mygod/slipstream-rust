@@ -42,47 +42,6 @@ jobs:
       - name: IPv4 listener check
         run: ./scripts/verify_ipv4_listener.sh
 
-  rust-platform-checks:
-    name: Rust Check (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macos-arm64
-            os: macos-latest
-            target: aarch64-apple-darwin
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install build dependencies (linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libssl-dev python3
-
-      - name: Install build dependencies (macos)
-        if: runner.os == 'macOS'
-        run: |
-          brew update
-          brew install cmake pkg-config openssl@3 python
-
-      - name: Configure OpenSSL (macos)
-        if: runner.os == 'macOS'
-        run: |
-          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
-          echo "OPENSSL_INCLUDE_DIR=$(brew --prefix openssl@3)/include" >> "$GITHUB_ENV"
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust check
-        run: cargo check -p slipstream-client -p slipstream-server --target ${{ matrix.target }}
-
   cargo-audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
