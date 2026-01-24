@@ -5,10 +5,14 @@ mod target;
 mod udp_fallback;
 
 use clap::{parser::ValueSource, CommandFactory, FromArgMatches, Parser};
+use openssl::hash::{hash, MessageDigest};
+use openssl::x509::X509;
 use server::{run_server, ServerConfig};
 use slipstream_core::{
     normalize_domain, parse_host_port, parse_host_port_parts, sip003, AddressKind, HostPort,
 };
+use std::fs;
+use std::fmt::Write;
 use tokio::runtime::Builder;
 use tracing_subscriber::EnvFilter;
 
@@ -35,6 +39,8 @@ struct Args {
     cert: Option<String>,
     #[arg(long = "key", short = 'k', value_name = "PATH")]
     key: Option<String>,
+    #[arg(long = "print-ss-plugin")]
+    print_ss_plugin: bool,
     #[arg(long = "reset-seed", value_name = "PATH")]
     reset_seed: Option<String>,
     #[arg(long = "domain", short = 'd', value_parser = parse_domain)]
@@ -57,7 +63,7 @@ fn main() {
         tracing::error!("SIP003 env error: {}", err);
         std::process::exit(2);
     });
-    if sip003_env.is_present() {
+    if sip003_env.is_present() && !args.print_ss_plugin {
         tracing::info!("SIP003 env detected; applying SS_* overrides with CLI precedence");
     }
 
@@ -143,6 +149,28 @@ fn main() {
         tracing::error!("A key path is required");
         std::process::exit(2);
     };
+
+    if args.print_ss_plugin {
+        let domain = domains.first().cloned().unwrap_or_default();
+        if domains.len() > 1 {
+            eprintln!(
+                "Note: server has {} domains; using first domain '{}'",
+                domains.len(),
+                domain
+            );
+        }
+        let cert_hash = cert_sha256_hex(&cert).unwrap_or_else(|err| {
+            eprintln!("Failed computing cert SHA-256: {}", err);
+            std::process::exit(2);
+        });
+        let plugin_opts = format!("domain={};cert-sha256={}", domain, cert_hash);
+        let plugin = format!("slipstream;{}", plugin_opts);
+        let encoded = percent_encode(&plugin);
+        println!("cert-sha256={}", cert_hash);
+        println!("plugin-opts={}", plugin_opts);
+        println!("plugin={}", encoded);
+        return;
+    }
     let reset_seed_path = if let Some(path) = args.reset_seed.clone() {
         Some(path)
     } else {
@@ -247,4 +275,46 @@ fn parse_domains_from_options(options: &[sip003::Sip003Option]) -> Result<Vec<St
         }
     }
     Ok(domains.unwrap_or_default())
+}
+
+fn cert_sha256_hex(cert_path: &str) -> Result<String, String> {
+    let pem = fs::read(cert_path).map_err(|err| format!("Failed to read cert {}: {}", cert_path, err))?;
+    let mut certs = X509::stack_from_pem(&pem)
+        .map_err(|err| format!("Failed to parse cert {}: {}", cert_path, err))?;
+    if certs.len() != 1 {
+        return Err("Pinned cert must contain exactly one certificate".to_string());
+    }
+    let cert = certs.remove(0);
+    let der = cert
+        .to_der()
+        .map_err(|err| format!("Failed to convert cert to DER: {}", err))?;
+    let digest = hash(MessageDigest::sha256(), &der).map_err(|err| err.to_string())?;
+    Ok(hex_encode(digest.as_ref()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
+}
+
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 3);
+    for byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~' => out.push(*byte as char),
+            _ => {
+                let _ = write!(&mut out, "%{:02X}", byte);
+            }
+        }
+    }
+    out
 }

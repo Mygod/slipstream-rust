@@ -1,5 +1,5 @@
 use libc::{c_char, c_int, c_void, size_t};
-use openssl::hash::MessageDigest;
+use openssl::hash::{hash, MessageDigest};
 use openssl::pkey::{Id, PKey, Public};
 use openssl::rsa::Padding;
 use openssl::sign::{RsaPssSaltlen, Verifier};
@@ -9,6 +9,7 @@ use slipstream_ffi::picoquic::{
     ptls_verify_certificate_t, ptls_verify_sign_cb_fn,
 };
 use std::fs;
+use std::sync::OnceLock;
 
 const SIG_RSA_PKCS1_SHA256: u16 = 0x0401;
 const SIG_RSA_PKCS1_SHA384: u16 = 0x0501;
@@ -47,8 +48,9 @@ static PINNING_ALGOS: [u16; 15] = [
 #[repr(C)]
 struct PinnedCertVerifier {
     super_ctx: ptls_verify_certificate_t,
-    pinned_der: Vec<u8>,
-    pkey: PKey<Public>,
+    pinned_der: Option<Vec<u8>>,
+    pinned_hash: Option<[u8; 32]>,
+    pkey: OnceLock<PKey<Public>>,
 }
 
 pub fn configure_pinned_certificate(
@@ -59,13 +61,45 @@ pub fn configure_pinned_certificate(
         return Err("QUIC context is null".to_string());
     }
     let (pinned_der, pkey) = load_pinned_cert(cert_path)?;
+    let pkey_cell = OnceLock::new();
+    let _ = pkey_cell.set(pkey);
     let verifier = Box::new(PinnedCertVerifier {
         super_ctx: ptls_verify_certificate_t {
             cb: Some(pinned_verify_certificate),
             algos: PINNING_ALGOS.as_ptr(),
         },
-        pinned_der,
-        pkey,
+        pinned_der: Some(pinned_der),
+        pinned_hash: None,
+        pkey: pkey_cell,
+    });
+    let raw = Box::into_raw(verifier);
+    // SAFETY: `quic` is a valid context, and the verifier pointer remains alive until picoquic
+    // calls the provided free callback.
+    unsafe {
+        picoquic_set_verify_certificate_callback(
+            quic,
+            &mut (*raw).super_ctx,
+            Some(pinned_verify_free),
+        );
+    }
+    Ok(())
+}
+
+pub fn configure_pinned_certificate_hash(
+    quic: *mut picoquic_quic_t,
+    cert_hash: [u8; 32],
+) -> Result<(), String> {
+    if quic.is_null() {
+        return Err("QUIC context is null".to_string());
+    }
+    let verifier = Box::new(PinnedCertVerifier {
+        super_ctx: ptls_verify_certificate_t {
+            cb: Some(pinned_verify_certificate),
+            algos: PINNING_ALGOS.as_ptr(),
+        },
+        pinned_der: None,
+        pinned_hash: Some(cert_hash),
+        pkey: OnceLock::new(),
     });
     let raw = Box::into_raw(verifier);
     // SAFETY: `quic` is a valid context, and the verifier pointer remains alive until picoquic
@@ -98,6 +132,17 @@ fn load_pinned_cert(cert_path: &str) -> Result<(Vec<u8>, PKey<Public>), String> 
     Ok((der, pkey))
 }
 
+fn sha256_digest(data: &[u8]) -> Result<[u8; 32], String> {
+    let digest = hash(MessageDigest::sha256(), data).map_err(|err| err.to_string())?;
+    let bytes = digest.as_ref();
+    if bytes.len() != 32 {
+        return Err("Unexpected SHA-256 length".to_string());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
 unsafe extern "C" fn pinned_verify_free(ctx: *mut ptls_verify_certificate_t) {
     if ctx.is_null() {
         return;
@@ -125,7 +170,35 @@ unsafe extern "C" fn pinned_verify_certificate(
         return -1;
     }
     let leaf_bytes = std::slice::from_raw_parts(leaf.base as *const u8, leaf.len);
-    if leaf_bytes != verifier.pinned_der.as_slice() {
+    match (&verifier.pinned_der, &verifier.pinned_hash) {
+        (Some(pinned_der), _) => {
+            if leaf_bytes != pinned_der.as_slice() {
+                return -1;
+            }
+        }
+        (None, Some(pinned_hash)) => {
+            let digest = match sha256_digest(leaf_bytes) {
+                Ok(digest) => digest,
+                Err(_) => return -1,
+            };
+            if &digest != pinned_hash {
+                return -1;
+            }
+        }
+        _ => return -1,
+    }
+    if verifier.pkey.get().is_none() {
+        let cert = match X509::from_der(leaf_bytes) {
+            Ok(cert) => cert,
+            Err(_) => return -1,
+        };
+        let pkey = match cert.public_key() {
+            Ok(pkey) => pkey,
+            Err(_) => return -1,
+        };
+        let _ = verifier.pkey.set(pkey);
+    }
+    if verifier.pkey.get().is_none() {
         return -1;
     }
     if !verify_sign.is_null() {
@@ -153,10 +226,14 @@ unsafe extern "C" fn pinned_verify_sign(
         return -1;
     }
     let verifier = &*(verify_ctx as *const PinnedCertVerifier);
+    let pkey = match verifier.pkey.get() {
+        Some(pkey) => pkey,
+        None => return -1,
+    };
     // SAFETY: picotls supplies valid message and signature buffers while verifying.
     let data = std::slice::from_raw_parts(data.base as *const u8, data.len);
     let signature = std::slice::from_raw_parts(sign.base as *const u8, sign.len);
-    match verify_signature(&verifier.pkey, algo, data, signature) {
+    match verify_signature(pkey, algo, data, signature) {
         Ok(true) => 0,
         Ok(false) => -1,
         Err(_) => -1,

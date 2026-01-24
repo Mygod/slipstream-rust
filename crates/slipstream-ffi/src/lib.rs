@@ -29,6 +29,7 @@ pub struct ClientConfig<'a> {
     pub resolvers: &'a [ResolverSpec],
     pub domain: &'a str,
     pub cert: Option<&'a str>,
+    pub cert_sha256: Option<[u8; 32]>,
     pub congestion_control: Option<&'a str>,
     pub gso: bool,
     pub keep_alive_interval: usize,

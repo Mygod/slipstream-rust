@@ -52,6 +52,8 @@ struct Args {
     domain: Option<String>,
     #[arg(long = "cert", value_name = "PATH")]
     cert: Option<String>,
+    #[arg(long = "cert-sha256", value_name = "HEX")]
+    cert_sha256: Option<String>,
     #[arg(long = "keep-alive-interval", short = 't', default_value_t = 400)]
     keep_alive_interval: u16,
     #[arg(long = "debug-poll")]
@@ -156,14 +158,33 @@ fn main() {
         })
     };
 
-    let cert = if args.cert.is_some() {
+    let cert_sha256 = if let Some(value) = args.cert_sha256.clone() {
+        Some(parse_cert_sha256(&value).unwrap_or_else(|err| {
+            tracing::error!("Invalid cert-sha256 value: {}", err);
+            std::process::exit(2);
+        }))
+    } else if let Some(value) = sip003::last_option_value(&sip003_env.plugin_options, "cert-sha256")
+    {
+        Some(parse_cert_sha256(&value).unwrap_or_else(|err| {
+            tracing::error!("Invalid cert-sha256 value: {}", err);
+            std::process::exit(2);
+        }))
+    } else {
+        None
+    };
+
+    let mut cert = if args.cert.is_some() {
         args.cert.clone()
     } else {
         sip003::last_option_value(&sip003_env.plugin_options, "cert")
     };
-    if cert.is_none() {
+    if cert_sha256.is_some() && cert.is_some() {
+        tracing::warn!("Both cert and cert-sha256 provided; using cert-sha256");
+        cert = None;
+    }
+    if cert.is_none() && cert_sha256.is_none() {
         tracing::warn!(
-            "Server certificate pinning is disabled; this allows MITM. Provide --cert to pin the server leaf, or dismiss this if your underlying tunnel provides authentication."
+            "Server certificate pinning is disabled; this allows MITM. Provide --cert or --cert-sha256 to pin the server leaf, or dismiss this if your underlying tunnel provides authentication."
         );
     }
 
@@ -186,6 +207,7 @@ fn main() {
         gso: args.gso,
         domain: &domain,
         cert: cert.as_deref(),
+        cert_sha256,
         keep_alive_interval: keep_alive_interval as usize,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
@@ -363,6 +385,22 @@ fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<
     Ok(last)
 }
 
+fn parse_cert_sha256(input: &str) -> Result<[u8; 32], String> {
+    let trimmed = input.trim();
+    let trimmed = trimmed.strip_prefix("sha256:").unwrap_or(trimmed);
+    let cleaned: String = trimmed.chars().filter(|c| *c != ':' && !c.is_whitespace()).collect();
+    if cleaned.len() != 64 {
+        return Err("cert-sha256 must be 64 hex characters".to_string());
+    }
+    let mut out = [0u8; 32];
+    for (idx, chunk) in cleaned.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).map_err(|_| "cert-sha256 is not valid hex")?;
+        out[idx] = u8::from_str_radix(hex, 16)
+            .map_err(|_| format!("cert-sha256 has invalid hex byte: {}", hex))?;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,5 +525,15 @@ mod tests {
         let parsed = parse_resolvers_from_options(&options).expect("options should parse");
         assert!(parsed.resolvers.is_empty());
         assert!(parsed.authoritative_remote);
+    }
+
+    #[test]
+    fn parses_cert_sha256_hex() {
+        let value = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let parsed = parse_cert_sha256(value).expect("valid hex");
+        assert_eq!(parsed.len(), 32);
+        assert_eq!(parsed[0], 0x00);
+        assert_eq!(parsed[1], 0x11);
+        assert_eq!(parsed[31], 0xff);
     }
 }

@@ -21,9 +21,10 @@ requires explicit `--cert` and `--key` paths; provide your own cert/key pair
 for real deployments. If the configured cert/key paths do not exist, the
 server auto-generates an ECDSA P-256 self-signed certificate (1000-year
 validity) and writes the key with 0600 permissions. The client can pass
-`--cert` to pin the server leaf certificate (PEM); CA bundles are not
-supported and the PEM must contain a single certificate. If omitted, server
-certificates are not verified.
+`--cert` to pin the server leaf certificate (PEM), or `--cert-sha256` to pin
+the SHA-256 of the leaf certificate DER. CA bundles are not supported and the
+PEM must contain a single certificate. If omitted, server certificates are not
+verified.
 
 ## Logging and debug knobs
 

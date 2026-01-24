@@ -17,6 +17,7 @@ Common flags:
 - --tcp-listen-port <PORT> (default: 5201)
 - --congestion-control <bbr|dcubic> (optional; overrides congestion control for all resolvers)
 - --cert <PATH> (optional; PEM-encoded server certificate for strict leaf pinning)
+- --cert-sha256 <HEX> (optional; SHA-256 of the server leaf certificate DER)
 - --authoritative <IP:PORT> (repeatable; mark a resolver path as authoritative and use pacing-based polling)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <SECONDS> (default: 400)
@@ -36,8 +37,9 @@ Notes:
 - Resolver addresses may be IPv4 or bracketed IPv6; mixed families are supported.
 - IPv6 resolvers must be bracketed, for example: [2001:db8::1]:53.
 - IPv4 resolvers require an IPv6 dual-stack UDP socket; slipstream attempts to set IPV6_V6ONLY=0, but some OSes may still require sysctl changes.
-- Provide --cert to enable strict leaf pinning; omit it for legacy/no-verification behavior.
+- Provide --cert or --cert-sha256 to enable strict leaf pinning; omit both for legacy/no-verification behavior.
 - The pinned certificate must match the server leaf exactly; CA bundles are not supported.
+- When both are provided, --cert-sha256 takes precedence over --cert.
 - Resolver order follows the CLI; the first resolver becomes path 0.
 - Resolver addresses must be unique; duplicates are rejected.
 - --authoritative keeps the DNS wire format unchanged and remains C interop safe.
@@ -66,9 +68,11 @@ Common flags:
 - --fallback <HOST:PORT> (optional; forward non-DNS packets to this UDP endpoint)
 - --idle-timeout-seconds <SECONDS> (default: 1200; set to 0 to disable)
 - --reset-seed <PATH> (optional; 32 hex chars / 16 bytes; auto-created if missing)
+- --print-ss-plugin (prints cert SHA-256 plus a URL-encoded plugin parameter for ss:// links, then exits)
 - When binding to ::, slipstream attempts to enable dual-stack (IPV6_V6ONLY=0); if your OS disallows it, IPv4 DNS clients require sysctl changes or binding to an IPv4 address.
 - With --fallback enabled, peers that have recently sent DNS stay DNS-only; while active they switch to fallback only after 16 consecutive non-DNS packets to avoid diverting DNS on stray traffic. DNS-only classification expires after an idle timeout without DNS traffic.
 - Fallback sessions are created per source address without a hard cap; untrusted or spoofed UDP traffic can consume file descriptors/CPU. Use network filtering or rate limiting when exposing fallback to the public Internet, or disable --fallback if this is a concern.
+- When multiple domains are configured, --print-ss-plugin uses the first domain.
 
 Example:
 
