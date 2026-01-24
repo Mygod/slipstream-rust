@@ -3,7 +3,9 @@ use slipstream_dns::{decode_query_with_domains, DecodeQueryError};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_incoming_packet_ex, picoquic_quic_t, slipstream_disable_ack_delay,
 };
-use slipstream_ffi::{socket_addr_to_storage, take_stateless_packet_for_cid};
+#[cfg(not(windows))]
+use slipstream_ffi::socket_addr_to_storage;
+use slipstream_ffi::take_stateless_packet_for_cid;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};

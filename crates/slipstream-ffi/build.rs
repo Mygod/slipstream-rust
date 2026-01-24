@@ -226,17 +226,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if cfg!(feature = "openssl-static") {
             println!("cargo:rustc-link-lib=static=ssl");
             println!("cargo:rustc-link-lib=static=crypto");
-        } else {
-            if is_windows {
-                if let Ok(openssl_lib_dir) = env::var("OPENSSL_LIB_DIR") {
-                    println!("cargo:rustc-link-search=native={}", openssl_lib_dir);
-                }
-                println!("cargo:rustc-link-lib=dylib=libssl");
-                println!("cargo:rustc-link-lib=dylib=libcrypto");
-            } else {
-                println!("cargo:rustc-link-lib=dylib=ssl");
-                println!("cargo:rustc-link-lib=dylib=crypto");
+        } else if is_windows {
+            if let Ok(openssl_lib_dir) = env::var("OPENSSL_LIB_DIR") {
+                println!("cargo:rustc-link-search=native={}", openssl_lib_dir);
             }
+            println!("cargo:rustc-link-lib=dylib=libssl");
+            println!("cargo:rustc-link-lib=dylib=libcrypto");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=ssl");
+            println!("cargo:rustc-link-lib=dylib=crypto");
         }
     }
 
