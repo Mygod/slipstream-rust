@@ -7,6 +7,9 @@ pub const PICOQUIC_MAX_PACKET_SIZE: usize = 1536;
 pub const PICOQUIC_RESET_SECRET_SIZE: usize = 16;
 pub const PICOQUIC_PACKET_LOOP_RECV_MAX: usize = 10;
 pub const PICOQUIC_PACKET_LOOP_SEND_MAX: usize = 10;
+pub const PICOQUIC_ERROR_CLASS: c_int = 0x400;
+pub const PICOQUIC_ERROR_STREAM_ALREADY_CLOSED: c_int = PICOQUIC_ERROR_CLASS + 15;
+pub const PICOQUIC_ERROR_CANNOT_SET_ACTIVE_STREAM: c_int = PICOQUIC_ERROR_CLASS + 36;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

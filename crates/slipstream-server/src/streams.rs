@@ -7,9 +7,11 @@ use slipstream_core::flow_control::{
 };
 use slipstream_ffi::picoquic::{
     picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
-    picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_mark_active_stream,
-    picoquic_provide_stream_data_buffer, picoquic_quic_t, picoquic_reset_stream,
-    picoquic_stop_sending, picoquic_stream_data_consumed,
+    picoquic_get_close_reasons, picoquic_get_cnx_state, picoquic_get_first_cnx,
+    picoquic_get_next_cnx, picoquic_mark_active_stream, picoquic_provide_stream_data_buffer,
+    picoquic_quic_t, picoquic_reset_stream, picoquic_stop_sending,
+    picoquic_stream_data_consumed, PICOQUIC_ERROR_CANNOT_SET_ACTIVE_STREAM,
+    PICOQUIC_ERROR_STREAM_ALREADY_CLOSED,
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -29,6 +31,17 @@ pub(crate) struct ServerState {
     debug_commands: bool,
     command_counts: CommandCounts,
     last_command_report: Instant,
+    last_mark_active_warn: Instant,
+    last_prepare_zero_warn: Instant,
+}
+
+fn close_event_label(event: picoquic_call_back_event_t) -> &'static str {
+    match event {
+        picoquic_call_back_event_t::picoquic_callback_close => "close",
+        picoquic_call_back_event_t::picoquic_callback_application_close => "application_close",
+        picoquic_call_back_event_t::picoquic_callback_stateless_reset => "stateless_reset",
+        _ => "unknown",
+    }
 }
 
 #[derive(Default)]
@@ -75,6 +88,8 @@ impl ServerState {
             debug_commands,
             command_counts: CommandCounts::default(),
             last_command_report: Instant::now(),
+            last_mark_active_warn: Instant::now(),
+            last_prepare_zero_warn: Instant::now(),
         }
     }
 
@@ -146,6 +161,31 @@ impl ServerState {
             }
         }
         metrics
+    }
+
+    pub(crate) fn stream_send_backlog_ids(&self, cnx_id: usize, limit: usize) -> Vec<u64> {
+        let mut ids = Vec::new();
+        for (key, stream) in self.streams.iter() {
+            if key.cnx != cnx_id {
+                continue;
+            }
+            let pending = stream
+                .send_pending
+                .as_ref()
+                .map(|flag| flag.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            let has_stash = stream
+                .send_stash
+                .as_ref()
+                .is_some_and(|data| !data.is_empty());
+            if pending || has_stash || stream.target_fin_pending {
+                ids.push(key.stream_id);
+                if ids.len() >= limit {
+                    break;
+                }
+            }
+        }
+        ids
     }
 }
 
@@ -292,6 +332,29 @@ pub(crate) unsafe extern "C" fn server_callback(
         picoquic_call_back_event_t::picoquic_callback_close
         | picoquic_call_back_event_t::picoquic_callback_application_close
         | picoquic_call_back_event_t::picoquic_callback_stateless_reset => {
+            let mut local_reason = 0u64;
+            let mut remote_reason = 0u64;
+            let mut local_app_reason = 0u64;
+            let mut remote_app_reason = 0u64;
+            let cnx_state = unsafe { picoquic_get_cnx_state(cnx) };
+            unsafe {
+                picoquic_get_close_reasons(
+                    cnx,
+                    &mut local_reason,
+                    &mut remote_reason,
+                    &mut local_app_reason,
+                    &mut remote_app_reason,
+                );
+            }
+            warn!(
+                "Connection closed event={} state={:?} local_error=0x{:x} remote_error=0x{:x} local_app=0x{:x} remote_app=0x{:x}",
+                close_event_label(fin_or_event),
+                cnx_state,
+                local_reason,
+                remote_reason,
+                local_app_reason,
+                remote_app_reason
+            );
             remove_connection_streams(state, cnx as usize);
             let _ = picoquic_close(cnx, 0);
         }
@@ -322,6 +385,21 @@ pub(crate) unsafe extern "C" fn server_callback(
                     } else {
                         0
                     };
+                    if still_active != 0 {
+                        let now = Instant::now();
+                        if now.duration_since(state.last_prepare_zero_warn) >= Duration::from_secs(1)
+                        {
+                            debug!(
+                                "stream {:?}: send callback has no space (cnx={} pending={} target_fin_pending={} fin_enqueued={})",
+                                stream_id,
+                                key.cnx,
+                                pending_flag || has_stash,
+                                stream.target_fin_pending,
+                                stream.fin_enqueued
+                            );
+                            state.last_prepare_zero_warn = now;
+                        }
+                    }
                     if still_active == 0 {
                         if let Some(flag) = stream.send_pending.as_ref() {
                             flag.store(false, Ordering::SeqCst);
@@ -711,6 +789,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 cnx: cnx_id,
                 stream_id,
             };
+            let mut close_stream = false;
             if let Some(stream) = state.streams.get_mut(&key) {
                 stream.target_fin_pending = true;
                 stream.close_after_flush = true;
@@ -726,13 +805,32 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     let ret = unsafe {
                         picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut())
                     };
-                    if ret != 0 && state.debug_streams {
-                        debug!(
-                            "stream {:?}: mark_active_stream fin failed ret={}",
-                            stream_id, ret
-                        );
+                    if ret != 0 {
+                        let now = Instant::now();
+                        if now.duration_since(state.last_mark_active_warn) >= Duration::from_secs(1)
+                        {
+                            warn!(
+                                "stream {:?}: activate failed on close (cnx={} ret={})",
+                                stream_id, cnx_id, ret
+                            );
+                            state.last_mark_active_warn = now;
+                        }
+                        if ret == PICOQUIC_ERROR_CANNOT_SET_ACTIVE_STREAM
+                            || ret == PICOQUIC_ERROR_STREAM_ALREADY_CLOSED
+                        {
+                            close_stream = true;
+                        }
+                        if state.debug_streams {
+                            debug!(
+                                "stream {:?}: mark_active_stream fin failed ret={}",
+                                stream_id, ret
+                            );
+                        }
                     }
                 }
+            }
+            if close_stream {
+                shutdown_stream(state, key);
             }
         }
         Command::StreamReadable { cnx_id, stream_id } => {
@@ -753,7 +851,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 );
             }
         }
-        Command::StreamReadError { cnx_id, stream_id } => {
+        Command::StreamReadError { cnx_id, stream_id, err } => {
             let cnx = cnx_id as *mut picoquic_cnx_t;
             let key = StreamKey {
                 cnx: cnx_id,
@@ -761,18 +859,31 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             };
             if let Some(stream) = shutdown_stream(state, key) {
                 warn!(
-                    "stream {:?}: target read error tx_bytes={} rx_bytes={} consumed_offset={} queued={} fin_offset={:?}",
+                    "stream {:?}: target read error tx_bytes={} rx_bytes={} consumed_offset={} queued={} fin_offset={:?} target_addr={} err_kind={:?} os_error={:?} err={}",
                     stream_id,
                     stream.tx_bytes,
                     stream.flow.rx_bytes,
                     stream.flow.consumed_offset,
                     stream.flow.queued_bytes,
-                    stream.flow.fin_offset
+                    stream.flow.fin_offset,
+                    state.target_addr,
+                    err.kind(),
+                    err.raw_os_error(),
+                    err
                 );
                 let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+            } else {
+                warn!(
+                    "stream {:?}: target read error (unknown stream) target_addr={} err_kind={:?} os_error={:?} err={}",
+                    stream_id,
+                    state.target_addr,
+                    err.kind(),
+                    err.raw_os_error(),
+                    err
+                );
             }
         }
-        Command::StreamWriteError { cnx_id, stream_id } => {
+        Command::StreamWriteError { cnx_id, stream_id, err } => {
             let cnx = cnx_id as *mut picoquic_cnx_t;
             let key = StreamKey {
                 cnx: cnx_id,
@@ -780,15 +891,28 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             };
             if let Some(stream) = shutdown_stream(state, key) {
                 warn!(
-                    "stream {:?}: target write failed tx_bytes={} rx_bytes={} consumed_offset={} queued={} fin_offset={:?}",
+                    "stream {:?}: target write failed tx_bytes={} rx_bytes={} consumed_offset={} queued={} fin_offset={:?} target_addr={} err_kind={:?} os_error={:?} err={}",
                     stream_id,
                     stream.tx_bytes,
                     stream.flow.rx_bytes,
                     stream.flow.consumed_offset,
                     stream.flow.queued_bytes,
-                    stream.flow.fin_offset
+                    stream.flow.fin_offset,
+                    state.target_addr,
+                    err.kind(),
+                    err.raw_os_error(),
+                    err
                 );
                 let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+            } else {
+                warn!(
+                    "stream {:?}: target write failed (unknown stream) target_addr={} err_kind={:?} os_error={:?} err={}",
+                    stream_id,
+                    state.target_addr,
+                    err.kind(),
+                    err.raw_os_error(),
+                    err
+                );
             }
         }
         Command::StreamWriteDrained {

@@ -120,10 +120,12 @@ pub(crate) enum Command {
     StreamReadError {
         cnx_id: usize,
         stream_id: u64,
+        err: std::io::Error,
     },
     StreamWriteError {
         cnx_id: usize,
         stream_id: u64,
+        err: std::io::Error,
     },
     StreamWriteDrained {
         cnx_id: usize,
@@ -413,8 +415,10 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                         let flow_blocked = unsafe { slipstream_is_flow_blocked(slot.cnx) != 0 };
                         let has_ready_stream =
                             unsafe { slipstream_has_ready_stream(slot.cnx) != 0 };
+                        let send_backlog_streams =
+                            unsafe { (&*state_ptr).stream_send_backlog_ids(cnx_id, 8) };
                         tracing::warn!(
-                            "server connection stalled: cnx={} streams={} streams_with_write_tx={} streams_with_data_rx={} queued_bytes_total={} streams_with_pending_data={} pending_chunks_total={} pending_bytes_total={} streams_with_pending_fin={} streams_with_fin_enqueued={} streams_with_target_fin_pending={} streams_with_send_pending={} streams_with_send_stash={} send_stash_bytes_total={} streams_discarding={} streams_close_after_flush={} multi_stream={} flow_blocked={} has_ready_stream={}",
+                            "server connection stalled: cnx={} streams={} streams_with_write_tx={} streams_with_data_rx={} queued_bytes_total={} streams_with_pending_data={} pending_chunks_total={} pending_bytes_total={} streams_with_pending_fin={} streams_with_fin_enqueued={} streams_with_target_fin_pending={} streams_with_send_pending={} streams_with_send_stash={} send_stash_bytes_total={} streams_discarding={} streams_close_after_flush={} multi_stream={} flow_blocked={} has_ready_stream={} send_backlog_streams={:?}",
                             cnx_id,
                             metrics.streams_total,
                             metrics.streams_with_write_tx,
@@ -433,7 +437,8 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                             metrics.streams_close_after_flush,
                             metrics.multi_stream,
                             flow_blocked,
-                            has_ready_stream
+                            has_ready_stream,
+                            send_backlog_streams
                         );
                         last_flow_block_log_at = loop_time;
                     }

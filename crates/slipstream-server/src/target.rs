@@ -151,6 +151,7 @@ pub(crate) fn spawn_target_reader(
                             let _ = command_tx.send(Command::StreamReadError {
                                 cnx_id: key.cnx,
                                 stream_id: key.stream_id,
+                                err,
                             });
                             break;
                         }
@@ -207,10 +208,11 @@ pub(crate) fn spawn_target_writer(
                                 }
                             }
                             let len = buffer.len();
-                            if write_half.write_all(&buffer).await.is_err() {
+                            if let Err(err) = write_half.write_all(&buffer).await {
                                 let _ = command_tx.send(Command::StreamWriteError {
                                     cnx_id: key.cnx,
                                     stream_id: key.stream_id,
+                                    err,
                                 });
                                 return;
                             }

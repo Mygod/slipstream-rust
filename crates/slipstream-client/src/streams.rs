@@ -12,6 +12,7 @@ use slipstream_ffi::picoquic::{
 };
 use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
@@ -133,6 +134,8 @@ struct ClientStream {
     tx_bytes: u64,
     fin_enqueued: bool,
     flow: FlowControlState,
+    local_addr: Option<SocketAddr>,
+    peer_addr: Option<SocketAddr>,
 }
 
 impl HasFlowControlState for ClientStream {
@@ -154,8 +157,8 @@ pub(crate) enum Command {
     NewStream(TokioTcpStream),
     StreamData { stream_id: u64, data: Vec<u8> },
     StreamClosed { stream_id: u64 },
-    StreamReadError { stream_id: u64 },
-    StreamWriteError { stream_id: u64 },
+    StreamReadError { stream_id: u64, err: std::io::Error },
+    StreamWriteError { stream_id: u64, err: std::io::Error },
     StreamWriteDrained { stream_id: u64, bytes: usize },
 }
 
@@ -460,6 +463,8 @@ pub(crate) fn handle_command(
     match command {
         Command::NewStream(stream) => {
             let _ = stream.set_nodelay(true);
+            let local_addr = stream.local_addr().ok();
+            let peer_addr = stream.peer_addr().ok();
             let read_limit = stream_read_limit_chunks(
                 &stream,
                 DEFAULT_TCP_RCVBUF_BYTES,
@@ -499,6 +504,8 @@ pub(crate) fn handle_command(
                     tx_bytes: 0,
                     fin_enqueued: false,
                     flow: FlowControlState::default(),
+                    local_addr,
+                    peer_addr,
                 },
             );
             if !state.multi_stream_mode && state.streams.len() > 1 {
@@ -560,35 +567,57 @@ pub(crate) fn handle_command(
                 );
             }
         }
-        Command::StreamReadError { stream_id } => {
+        Command::StreamReadError { stream_id, err } => {
             if let Some(stream) = state.streams.remove(&stream_id) {
                 warn!(
-                    "stream {}: tcp read error rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?}",
+                    "stream {}: tcp read error rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?} local_addr={:?} peer_addr={:?} err_kind={:?} os_error={:?} err={}",
                     stream_id,
                     stream.flow.rx_bytes,
                     stream.tx_bytes,
                     stream.flow.queued_bytes,
                     stream.flow.consumed_offset,
-                    stream.flow.fin_offset
+                    stream.flow.fin_offset,
+                    stream.local_addr,
+                    stream.peer_addr,
+                    err.kind(),
+                    err.raw_os_error(),
+                    err
                 );
             } else {
-                warn!("stream {}: tcp read error (unknown stream)", stream_id);
+                warn!(
+                    "stream {}: tcp read error (unknown stream) err_kind={:?} os_error={:?} err={}",
+                    stream_id,
+                    err.kind(),
+                    err.raw_os_error(),
+                    err
+                );
             }
             let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
         }
-        Command::StreamWriteError { stream_id } => {
+        Command::StreamWriteError { stream_id, err } => {
             if let Some(stream) = state.streams.remove(&stream_id) {
                 warn!(
-                    "stream {}: tcp write error rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?}",
+                    "stream {}: tcp write error rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?} local_addr={:?} peer_addr={:?} err_kind={:?} os_error={:?} err={}",
                     stream_id,
                     stream.flow.rx_bytes,
                     stream.tx_bytes,
                     stream.flow.queued_bytes,
                     stream.flow.consumed_offset,
-                    stream.flow.fin_offset
+                    stream.flow.fin_offset,
+                    stream.local_addr,
+                    stream.peer_addr,
+                    err.kind(),
+                    err.raw_os_error(),
+                    err
                 );
             } else {
-                warn!("stream {}: tcp write error (unknown stream)", stream_id);
+                warn!(
+                    "stream {}: tcp write error (unknown stream) err_kind={:?} os_error={:?} err={}",
+                    stream_id,
+                    err.kind(),
+                    err.raw_os_error(),
+                    err
+                );
             }
             let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
         }
@@ -667,8 +696,8 @@ fn spawn_client_reader(
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
                             continue;
                         }
-                        Err(_) => {
-                            let _ = command_tx.send(Command::StreamReadError { stream_id });
+                        Err(err) => {
+                            let _ = command_tx.send(Command::StreamReadError { stream_id, err });
                             break;
                         }
                     }
@@ -714,8 +743,8 @@ fn spawn_client_writer(
                         }
                     }
                     let len = buffer.len();
-                    if write_half.write_all(&buffer).await.is_err() {
-                        let _ = command_tx.send(Command::StreamWriteError { stream_id });
+                    if let Err(err) = write_half.write_all(&buffer).await {
+                        let _ = command_tx.send(Command::StreamWriteError { stream_id, err });
                         return;
                     }
                     let _ = command_tx.send(Command::StreamWriteDrained {
