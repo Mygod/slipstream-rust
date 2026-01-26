@@ -5,6 +5,7 @@
 - docs/build.md - build prerequisites and picoquic setup
 - docs/usage.md - CLI usage and examples
 - docs/config.md - environment variables and tuning knobs
+- docs/install-oneclick.md - one click install 
 
 ## Protocol and correctness
 
