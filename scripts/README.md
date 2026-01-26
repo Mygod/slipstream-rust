@@ -27,6 +27,7 @@ contributors; "dev-only" scripts are internal or experimental.
 - `scripts/interop/run_rust_rust.sh`: Rust client/server interop harness (set `DOMAINS` and `CLIENT_DOMAIN` to exercise multi-domain).
 - `scripts/bench/run_rust_rust_10mb.sh`: Rust<->Rust throughput benchmark (set `RESOLVER_MODE=mixed` for mixed resolver runs).
 - `scripts/bench/run_rust_rust_mem.sh`: Rust<->Rust memory benchmark.
+- `scripts/installer.sh`: interactive installer for client/server setup.
 
 
 ## Dev-only or experimental scripts
