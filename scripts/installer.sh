@@ -148,16 +148,21 @@ build_targets() {
   local mode=$1
   log "Updating submodules"
   git -C "$REPO_ROOT" submodule update --init --recursive
+  
+  pushd "$REPO_ROOT" > /dev/null
+
   if [[ $mode == client ]]; then
     log "Building slipstream-client"
-    cargo -C "$REPO_ROOT" build -p slipstream-client --release
+    cargo build -p slipstream-client --release
   elif [[ $mode == server ]]; then
     log "Building slipstream-server"
-    cargo -C "$REPO_ROOT" build -p slipstream-server --release
+    cargo build -p slipstream-server --release
   else
     log "Building slipstream-client and slipstream-server"
-    cargo -C "$REPO_ROOT" build -p slipstream-client -p slipstream-server --release
+    cargo build -p slipstream-client -p slipstream-server --release
   fi
+
+  popd > /dev/null
 }
 
 should_start_now() {
