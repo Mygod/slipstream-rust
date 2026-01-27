@@ -97,6 +97,10 @@ jobs:
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact_name: slipstream-linux-x86_64
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: slipstream-windows-x86_64
     steps:
       - name: Check out slipstream-rust
         uses: actions/checkout@v4
@@ -116,6 +120,32 @@ jobs:
           echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
 
+      - name: Install build dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VCPKG_ROOT: C:\vcpkg
+          VCPKG_INSTALLATION_ROOT: C:\vcpkg
+          VCPKG_DEFAULT_TRIPLET: x64-windows
+          VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (!(Test-Path "$vcpkgRoot\vcpkg.exe")) {
+            Write-Error "vcpkg.exe not found at $vcpkgRoot. Expected GitHub runner preinstall."
+          }
+          & "$vcpkgRoot\vcpkg.exe" install openssl:x64-windows
+          $installed = Join-Path $vcpkgRoot "installed\x64-windows"
+          "OPENSSL_ROOT_DIR=$installed" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_INCLUDE_DIR=$installed\include" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_LIB_DIR=$installed\lib" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENSSL_DIR=$installed" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $gitBin = "C:\Program Files\Git\bin"
+          $gitUsrBin = "C:\Program Files\Git\usr\bin"
+          if (!(Test-Path $gitBin)) {
+            Write-Error "Git Bash not found at $gitBin."
+          }
+          "PATH=$gitBin;$gitUsrBin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -134,13 +164,17 @@ jobs:
           dist_dir="dist"
           base_name="${{ matrix.artifact_name }}"
           bin_dir="target/${{ matrix.target }}/release"
+          bin_suffix=""
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            bin_suffix=".exe"
+          fi
           mkdir -p "${dist_dir}"
-          cp "${bin_dir}/slipstream-client" "${dist_dir}/"
-          cp "${bin_dir}/slipstream-server" "${dist_dir}/"
+          cp "${bin_dir}/slipstream-client${bin_suffix}" "${dist_dir}/"
+          cp "${bin_dir}/slipstream-server${bin_suffix}" "${dist_dir}/"
           if command -v sha256sum >/dev/null 2>&1; then
-            (cd "${dist_dir}" && sha256sum slipstream-client slipstream-server > "${base_name}.sha256")
+            (cd "${dist_dir}" && sha256sum "slipstream-client${bin_suffix}" "slipstream-server${bin_suffix}" > "${base_name}.sha256")
           else
-            (cd "${dist_dir}" && shasum -a 256 slipstream-client slipstream-server > "${base_name}.sha256")
+            (cd "${dist_dir}" && shasum -a 256 "slipstream-client${bin_suffix}" "slipstream-server${bin_suffix}" > "${base_name}.sha256")
           fi
 
       - name: Upload binaries
