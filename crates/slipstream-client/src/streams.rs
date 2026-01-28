@@ -463,6 +463,85 @@ pub(crate) fn spawn_acceptor(
     });
 }
 
+#[cfg(test)]
+mod test_hooks {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(super) const FORCED_ADD_TO_STREAM_ERROR: i32 = -1;
+    pub(super) static ADD_TO_STREAM_FAILS_LEFT: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn set_add_to_stream_failures(count: usize) {
+        ADD_TO_STREAM_FAILS_LEFT.store(count, Ordering::SeqCst);
+    }
+
+    pub(super) fn take_add_to_stream_failure() -> bool {
+        let mut current = ADD_TO_STREAM_FAILS_LEFT.load(Ordering::SeqCst);
+        while current > 0 {
+            match ADD_TO_STREAM_FAILS_LEFT.compare_exchange(
+                current,
+                current - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(next) => current = next,
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, oneshot, Notify};
+
+    struct AddToStreamFailGuard;
+
+    impl Drop for AddToStreamFailGuard {
+        fn drop(&mut self) {
+            test_hooks::set_add_to_stream_failures(0);
+        }
+    }
+
+    #[test]
+    fn add_to_stream_fin_failure_removes_stream() {
+        let _guard = AddToStreamFailGuard;
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let data_notify = Arc::new(Notify::new());
+        let mut state = ClientState::new(command_tx, data_notify, false);
+        let stream_id = 4;
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        let (read_abort_tx, _read_abort_rx) = oneshot::channel();
+
+        state.streams.insert(
+            stream_id,
+            ClientStream {
+                write_tx,
+                read_abort_tx: Some(read_abort_tx),
+                data_rx: None,
+                tx_bytes: 0,
+                fin_enqueued: false,
+                flow: FlowControlState::default(),
+            },
+        );
+
+        test_hooks::set_add_to_stream_failures(1);
+
+        handle_command(
+            std::ptr::null_mut(),
+            &mut state as *mut _,
+            Command::StreamClosed { stream_id },
+        );
+
+        assert!(
+            !state.streams.contains_key(&stream_id),
+            "stream state should be removed when add_to_stream(fin) fails"
+        );
+    }
+}
+
 pub(crate) fn drain_commands(
     cnx: *mut picoquic_cnx_t,
     state_ptr: *mut ClientState,
@@ -589,12 +668,27 @@ pub(crate) fn handle_command(
             }
         }
         Command::StreamClosed { stream_id } => {
+            #[cfg(test)]
+            let forced_failure = test_hooks::take_add_to_stream_failure();
+            #[cfg(not(test))]
+            let forced_failure = false;
+            #[cfg(test)]
+            let ret = if forced_failure {
+                test_hooks::FORCED_ADD_TO_STREAM_ERROR
+            } else {
+                unsafe { picoquic_add_to_stream(cnx, stream_id, std::ptr::null(), 0, 1) }
+            };
+            #[cfg(not(test))]
             let ret = unsafe { picoquic_add_to_stream(cnx, stream_id, std::ptr::null(), 0, 1) };
             if ret < 0 {
                 warn!(
                     "stream {}: add_to_stream(fin) failed ret={}",
                     stream_id, ret
                 );
+                if !forced_failure {
+                    unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                }
+                state.streams.remove(&stream_id);
             }
         }
         Command::StreamReadError { stream_id } => {
