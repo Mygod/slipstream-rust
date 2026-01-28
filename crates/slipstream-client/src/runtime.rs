@@ -397,20 +397,20 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                             let has_backlog = metrics.streams_with_rx_queued > 0
                                 || metrics.streams_with_fin_enqueued > 0
                                 || metrics.streams_discarding > 0
-                                || metrics.streams_with_data_rx > 0;
+                                || metrics.streams_with_unconsumed_rx > 0;
                             if has_backlog
                                 && current_time.saturating_sub(last_idle_log_at)
                                     >= FLOW_BLOCKED_LOG_INTERVAL_US
                             {
                                 let backlog = unsafe { (*state_ptr).stream_backlog_summaries(8) };
                                 warn!(
-                                    "connection idle with backlog: streams={} streams_with_rx_queued={} queued_bytes_total={} streams_with_fin_enqueued={} streams_discarding={} streams_with_data_rx={} flow_blocked={} has_ready_stream={} backlog={:?}",
+                                    "connection idle with backlog: streams={} streams_with_rx_queued={} queued_bytes_total={} streams_with_fin_enqueued={} streams_discarding={} streams_with_unconsumed_rx={} flow_blocked={} has_ready_stream={} backlog={:?}",
                                     streams_len,
                                     metrics.streams_with_rx_queued,
                                     metrics.queued_bytes_total,
                                     metrics.streams_with_fin_enqueued,
                                     metrics.streams_discarding,
-                                    metrics.streams_with_data_rx,
+                                    metrics.streams_with_unconsumed_rx,
                                     flow_blocked,
                                     has_ready_stream,
                                     backlog
@@ -477,13 +477,13 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                         now.saturating_sub(last_enqueue_at) / 1_000
                     };
                     error!(
-                        "connection flow blocked: streams={} streams_with_rx_queued={} queued_bytes_total={} streams_with_fin_enqueued={} streams_discarding={} streams_with_data_rx={} enqueued_bytes={} last_enqueue_ms={} zero_send_with_streams={} zero_send_loops={} flow_blocked={} has_ready_stream={} backlog={:?}",
+                        "connection flow blocked: streams={} streams_with_rx_queued={} queued_bytes_total={} streams_with_fin_enqueued={} streams_discarding={} streams_with_unconsumed_rx={} enqueued_bytes={} last_enqueue_ms={} zero_send_with_streams={} zero_send_loops={} flow_blocked={} has_ready_stream={} backlog={:?}",
                         streams_len,
                         metrics.streams_with_rx_queued,
                         metrics.queued_bytes_total,
                         metrics.streams_with_fin_enqueued,
                         metrics.streams_discarding,
-                        metrics.streams_with_data_rx,
+                        metrics.streams_with_unconsumed_rx,
                         enqueued_bytes,
                         last_enqueue_ms,
                         zero_send_with_streams,

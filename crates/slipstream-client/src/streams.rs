@@ -43,7 +43,7 @@ pub(crate) struct ClientStreamMetrics {
     pub(crate) queued_bytes_total: u64,
     pub(crate) streams_with_fin_enqueued: usize,
     pub(crate) streams_discarding: usize,
-    pub(crate) streams_with_data_rx: usize,
+    pub(crate) streams_with_unconsumed_rx: usize,
 }
 
 #[allow(dead_code)]
@@ -101,6 +101,10 @@ impl ClientState {
         let mut metrics = ClientStreamMetrics::default();
         for stream in self.streams.values() {
             let queued = stream.flow.queued_bytes as u64;
+            let unconsumed = stream
+                .flow
+                .rx_bytes
+                .saturating_sub(stream.flow.consumed_offset);
             metrics.queued_bytes_total = metrics.queued_bytes_total.saturating_add(queued);
             if queued > 0 {
                 metrics.streams_with_rx_queued = metrics.streams_with_rx_queued.saturating_add(1);
@@ -112,8 +116,9 @@ impl ClientState {
             if stream.flow.discarding {
                 metrics.streams_discarding = metrics.streams_discarding.saturating_add(1);
             }
-            if stream.data_rx.is_some() {
-                metrics.streams_with_data_rx = metrics.streams_with_data_rx.saturating_add(1);
+            if unconsumed > 0 {
+                metrics.streams_with_unconsumed_rx =
+                    metrics.streams_with_unconsumed_rx.saturating_add(1);
             }
         }
         metrics
@@ -124,7 +129,11 @@ impl ClientState {
         for (stream_id, stream) in self.streams.iter() {
             let queued_bytes = stream.flow.queued_bytes as u64;
             let has_data_rx = stream.data_rx.is_some();
-            if queued_bytes > 0 || stream.fin_enqueued || stream.flow.discarding || has_data_rx {
+            let unconsumed = stream
+                .flow
+                .rx_bytes
+                .saturating_sub(stream.flow.consumed_offset);
+            if queued_bytes > 0 || stream.fin_enqueued || stream.flow.discarding || unconsumed > 0 {
                 summaries.push(ClientBacklogSummary {
                     stream_id: *stream_id,
                     queued_bytes,
