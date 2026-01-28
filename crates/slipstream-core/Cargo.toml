@@ -9,3 +9,8 @@ readme = "../../README.md"
 
 [dependencies]
 libc = "0.2"
+
+[features]
+default = []
+invariant-panic = []
+test-support = []

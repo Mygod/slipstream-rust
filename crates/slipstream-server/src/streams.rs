@@ -830,9 +830,17 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 }
                 let cnx = cnx_id as *mut picoquic_cnx_t;
                 #[cfg(test)]
-                let ret = if test_hooks::take_mark_active_stream_failure() {
+                let forced_failure = test_hooks::take_mark_active_stream_failure();
+                #[cfg(not(test))]
+                let forced_failure = false;
+                #[cfg(test)]
+                let ret = if forced_failure {
                     test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
                 } else {
+                    assert!(
+                        cnx_id >= 0x1000,
+                        "mark_active_stream called with synthetic cnx_id; set test failure counter"
+                    );
                     unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
                 };
                 #[cfg(not(test))]
@@ -870,6 +878,9 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                             stream_id, ret, backlog
                         );
                         state.last_mark_active_fail_log_at = now;
+                    }
+                    if !forced_failure {
+                        unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                     }
                     remove_stream = true;
                 }

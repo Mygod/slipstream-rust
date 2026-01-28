@@ -25,3 +25,6 @@ default = []
 openssl-vendored = ["slipstream-ffi/openssl-vendored", "openssl/vendored"]
 openssl-static = ["slipstream-ffi/openssl-static", "openssl/vendored"]
 picoquic-minimal-build = ["slipstream-ffi/picoquic-minimal-build"]
+
+[dev-dependencies]
+slipstream-core = { path = "../slipstream-core", features = ["invariant-panic", "test-support"] }

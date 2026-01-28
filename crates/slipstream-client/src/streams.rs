@@ -657,6 +657,10 @@ pub(crate) fn handle_command(
             let stream_id = if forced_failure {
                 4
             } else {
+                assert!(
+                    !cnx.is_null(),
+                    "picoquic connection must be non-null when not forcing failures in tests"
+                );
                 unsafe { picoquic_get_next_local_stream_id(cnx, 0) }
             };
             #[cfg(not(test))]
@@ -779,6 +783,10 @@ pub(crate) fn handle_command(
             let ret = if forced_failure {
                 test_hooks::FORCED_ADD_TO_STREAM_ERROR
             } else {
+                assert!(
+                    !cnx.is_null(),
+                    "picoquic connection must be non-null when not forcing failures in tests"
+                );
                 unsafe { picoquic_add_to_stream(cnx, stream_id, std::ptr::null(), 0, 1) }
             };
             #[cfg(not(test))]

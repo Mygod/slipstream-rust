@@ -38,7 +38,7 @@ impl InvariantReporter {
         if self.should_log(now_us) {
             log(&message);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "invariant-panic"))]
         panic!("{}", message);
     }
 }
