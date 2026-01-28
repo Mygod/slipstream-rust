@@ -468,16 +468,38 @@ mod test_hooks {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub(super) const FORCED_ADD_TO_STREAM_ERROR: i32 = -1;
+    pub(super) const FORCED_MARK_ACTIVE_STREAM_ERROR: i32 = 0x400 + 36;
     pub(super) static ADD_TO_STREAM_FAILS_LEFT: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static MARK_ACTIVE_STREAM_FAILS_LEFT: AtomicUsize = AtomicUsize::new(0);
 
     pub(super) fn set_add_to_stream_failures(count: usize) {
         ADD_TO_STREAM_FAILS_LEFT.store(count, Ordering::SeqCst);
+    }
+
+    pub(super) fn set_mark_active_stream_failures(count: usize) {
+        MARK_ACTIVE_STREAM_FAILS_LEFT.store(count, Ordering::SeqCst);
     }
 
     pub(super) fn take_add_to_stream_failure() -> bool {
         let mut current = ADD_TO_STREAM_FAILS_LEFT.load(Ordering::SeqCst);
         while current > 0 {
             match ADD_TO_STREAM_FAILS_LEFT.compare_exchange(
+                current,
+                current - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(next) => current = next,
+            }
+        }
+        false
+    }
+
+    pub(super) fn take_mark_active_stream_failure() -> bool {
+        let mut current = MARK_ACTIVE_STREAM_FAILS_LEFT.load(Ordering::SeqCst);
+        while current > 0 {
+            match MARK_ACTIVE_STREAM_FAILS_LEFT.compare_exchange(
                 current,
                 current - 1,
                 Ordering::SeqCst,
@@ -502,6 +524,14 @@ mod tests {
     impl Drop for AddToStreamFailGuard {
         fn drop(&mut self) {
             test_hooks::set_add_to_stream_failures(0);
+        }
+    }
+
+    struct MarkActiveFailGuard;
+
+    impl Drop for MarkActiveFailGuard {
+        fn drop(&mut self) {
+            test_hooks::set_mark_active_stream_failures(0);
         }
     }
 
@@ -539,6 +569,46 @@ mod tests {
             !state.streams.contains_key(&stream_id),
             "stream state should be removed when add_to_stream(fin) fails"
         );
+    }
+
+    #[test]
+    fn mark_active_stream_failure_removes_stream() {
+        let _guard = MarkActiveFailGuard;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .expect("build tokio runtime");
+        rt.block_on(async {
+            let listener = TokioTcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let accept = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept");
+                stream
+            });
+            let _client = TokioTcpStream::connect(addr)
+                .await
+                .expect("connect");
+            let stream = accept.await.expect("accept join");
+
+            let (command_tx, _command_rx) = mpsc::unbounded_channel();
+            let data_notify = Arc::new(Notify::new());
+            let mut state = ClientState::new(command_tx, data_notify, false);
+
+            test_hooks::set_mark_active_stream_failures(1);
+
+            handle_command(
+                std::ptr::null_mut(),
+                &mut state as *mut _,
+                Command::NewStream(stream),
+            );
+
+            assert!(
+                state.streams.is_empty(),
+                "stream state should be removed when mark_active_stream fails"
+            );
+        });
     }
 }
 
@@ -583,6 +653,17 @@ pub(crate) fn handle_command(
             );
             let (data_tx, data_rx) = mpsc::channel(read_limit);
             let data_notify = state.data_notify.clone();
+            #[cfg(test)]
+            let forced_failure = test_hooks::take_mark_active_stream_failure();
+            #[cfg(not(test))]
+            let forced_failure = false;
+            #[cfg(test)]
+            let stream_id = if forced_failure {
+                4
+            } else {
+                unsafe { picoquic_get_next_local_stream_id(cnx, 0) }
+            };
+            #[cfg(not(test))]
             let stream_id = unsafe { picoquic_get_next_local_stream_id(cnx, 0) };
             let send_buffer_bytes = tcp_send_buffer_bytes(&stream)
                 .filter(|bytes| *bytes > 0)
@@ -640,7 +721,30 @@ pub(crate) fn handle_command(
                     },
                 );
             }
-            let _ = unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
+            #[cfg(test)]
+            let ret = if forced_failure {
+                test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
+            } else {
+                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
+            };
+            #[cfg(not(test))]
+            let ret = unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
+            if ret != 0 {
+                warn!(
+                    "stream {}: mark_active_stream failed ret={}",
+                    stream_id, ret
+                );
+                if let Some(mut stream) = state.streams.remove(&stream_id) {
+                    if let Some(read_abort_tx) = stream.read_abort_tx.take() {
+                        let _ = read_abort_tx.send(());
+                    }
+                    let _ = stream.write_tx.send(StreamWrite::Fin);
+                }
+                if !forced_failure {
+                    unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                }
+                return;
+            }
             if state.debug_streams {
                 debug!("stream {}: accepted", stream_id);
             } else {
