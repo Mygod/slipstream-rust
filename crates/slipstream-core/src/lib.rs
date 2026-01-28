@@ -1,6 +1,7 @@
 use std::fmt;
 
 pub mod flow_control;
+pub mod invariants;
 mod macros;
 pub mod net;
 pub mod sip003;

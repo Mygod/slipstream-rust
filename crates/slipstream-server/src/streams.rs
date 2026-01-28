@@ -5,6 +5,7 @@ use slipstream_core::flow_control::{
     overflow_log_message, promote_error_log_message, promote_streams, reserve_target_offset,
     FlowControlState, HasFlowControlState, PromoteEntry, StreamReceiveConfig, StreamReceiveOps,
 };
+use slipstream_core::invariants::InvariantReporter;
 use slipstream_ffi::picoquic::{
     picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
     picoquic_current_time, picoquic_get_first_cnx, picoquic_get_next_cnx,
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
 
- 
+static INVARIANT_REPORTER: InvariantReporter = InvariantReporter::new(1_000_000);
 
 pub(crate) struct ServerState {
     target_addr: SocketAddr,
@@ -204,6 +205,50 @@ impl ServerState {
             }
         }
         summaries
+    }
+}
+
+fn report_invariant(message: String) {
+    let now = unsafe { picoquic_current_time() };
+    INVARIANT_REPORTER.report(now, message, |msg| error!("{}", msg));
+}
+
+fn check_stream_invariants(state: &ServerState, key: StreamKey, context: &str) {
+    let Some(stream) = state.streams.get(&key) else {
+        return;
+    };
+    if stream.close_after_flush && !stream.target_fin_pending {
+        report_invariant(format!(
+            "server invariant violated: close_after_flush without target_fin_pending stream={} context={} queued={} pending_fin={} fin_enqueued={} target_fin_pending={} close_after_flush={}",
+            key.stream_id,
+            context,
+            stream.flow.queued_bytes,
+            stream.pending_fin,
+            stream.fin_enqueued,
+            stream.target_fin_pending,
+            stream.close_after_flush
+        ));
+    }
+    if stream.pending_fin && stream.fin_enqueued {
+        report_invariant(format!(
+            "server invariant violated: pending_fin with fin_enqueued stream={} context={} queued={} pending_chunks={} target_fin_pending={} close_after_flush={}",
+            key.stream_id,
+            context,
+            stream.flow.queued_bytes,
+            stream.pending_data.len(),
+            stream.target_fin_pending,
+            stream.close_after_flush
+        ));
+    }
+    if stream.write_tx.is_some() != stream.send_pending.is_some() {
+        report_invariant(format!(
+            "server invariant violated: write_tx/send_pending mismatch stream={} context={} write_tx={} send_pending={} data_rx={}",
+            key.stream_id,
+            context,
+            stream.write_tx.is_some(),
+            stream.send_pending.is_some(),
+            stream.data_rx.is_some()
+        ));
     }
 }
 
@@ -647,6 +692,8 @@ fn handle_stream_data(
         }
         unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
     }
+
+    check_stream_invariants(state, key, "handle_stream_data");
 }
 
 pub(crate) fn remove_connection_streams(state: &mut ServerState, cnx: usize) {
@@ -750,6 +797,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 shutdown_stream(state, key);
                 unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             }
+            check_stream_invariants(state, key, "StreamConnected");
         }
         Command::StreamConnectError { cnx_id, stream_id } => {
             let cnx = cnx_id as *mut picoquic_cnx_t;
@@ -785,9 +833,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 let ret = if test_hooks::take_mark_active_stream_failure() {
                     test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
                 } else {
-                    unsafe {
-                        picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut())
-                    }
+                    unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
                 };
                 #[cfg(not(test))]
                 let ret =
@@ -831,6 +877,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             if remove_stream {
                 shutdown_stream(state, key);
             }
+            check_stream_invariants(state, key, "StreamClosed");
         }
         Command::StreamReadable { cnx_id, stream_id } => {
             let key = StreamKey {
@@ -941,6 +988,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     )
                 };
             }
+            check_stream_invariants(state, key, "StreamWriteDrained");
         }
     }
 }

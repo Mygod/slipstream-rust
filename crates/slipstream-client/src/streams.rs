@@ -3,6 +3,7 @@ use slipstream_core::flow_control::{
     overflow_log_message, promote_error_log_message, promote_streams, reserve_target_offset,
     FlowControlState, HasFlowControlState, PromoteEntry, StreamReceiveConfig, StreamReceiveOps,
 };
+use slipstream_core::invariants::InvariantReporter;
 use slipstream_core::tcp::{stream_read_limit_chunks, tcp_send_buffer_bytes};
 use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
@@ -16,11 +17,12 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
 use tokio::sync::{mpsc, oneshot, Notify};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 const STREAM_READ_CHUNK_BYTES: usize = 4096;
 const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;
 const CLIENT_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
+static INVARIANT_REPORTER: InvariantReporter = InvariantReporter::new(1_000_000);
 
 pub(crate) struct ClientState {
     ready: bool,
@@ -164,6 +166,39 @@ impl ClientState {
         self.path_events.clear();
         self.debug_enqueued_bytes = 0;
         self.debug_last_enqueue_at = 0;
+    }
+}
+
+fn report_invariant(message: String) {
+    let now = unsafe { picoquic_current_time() };
+    INVARIANT_REPORTER.report(now, message, |msg| error!("{}", msg));
+}
+
+fn check_stream_invariants(state: &ClientState, stream_id: u64, context: &str) {
+    let Some(stream) = state.streams.get(&stream_id) else {
+        return;
+    };
+    if stream.fin_enqueued && stream.data_rx.is_some() {
+        report_invariant(format!(
+            "client invariant violated: fin_enqueued with data_rx stream={} context={} queued={} fin_enqueued={} discarding={} tx_bytes={}",
+            stream_id,
+            context,
+            stream.flow.queued_bytes,
+            stream.fin_enqueued,
+            stream.flow.discarding,
+            stream.tx_bytes
+        ));
+    }
+    if stream.fin_enqueued && stream.flow.queued_bytes == 0 && !stream.flow.discarding {
+        report_invariant(format!(
+            "client invariant violated: fin_enqueued with zero queue stream={} context={} queued={} fin_enqueued={} discarding={} rx_bytes={}",
+            stream_id,
+            context,
+            stream.flow.queued_bytes,
+            stream.fin_enqueued,
+            stream.flow.discarding,
+            stream.flow.rx_bytes
+        ));
     }
 }
 
@@ -442,6 +477,8 @@ fn handle_stream_data(
         }
         state.streams.remove(&stream_id);
     }
+
+    check_stream_invariants(state, stream_id, "handle_stream_data");
 }
 
 pub(crate) fn spawn_acceptor(
@@ -587,9 +624,7 @@ mod tests {
                 let (stream, _) = listener.accept().await.expect("accept");
                 stream
             });
-            let _client = TokioTcpStream::connect(addr)
-                .await
-                .expect("connect");
+            let _client = TokioTcpStream::connect(addr).await.expect("connect");
             let stream = accept.await.expect("accept join");
 
             let (command_tx, _command_rx) = mpsc::unbounded_channel();
@@ -728,7 +763,8 @@ pub(crate) fn handle_command(
                 unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
             };
             #[cfg(not(test))]
-            let ret = unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
+            let ret =
+                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
             if ret != 0 {
                 warn!(
                     "stream {}: mark_active_stream failed ret={}",
@@ -750,6 +786,7 @@ pub(crate) fn handle_command(
             } else {
                 debug!("Accepted TCP stream {}", stream_id);
             }
+            check_stream_invariants(state, stream_id, "NewStream");
         }
         Command::StreamData { stream_id, data } => {
             let ret =
@@ -770,6 +807,7 @@ pub(crate) fn handle_command(
                     state.debug_enqueued_bytes.saturating_add(data.len() as u64);
                 state.debug_last_enqueue_at = now;
             }
+            check_stream_invariants(state, stream_id, "StreamData");
         }
         Command::StreamClosed { stream_id } => {
             #[cfg(test)]
@@ -794,6 +832,7 @@ pub(crate) fn handle_command(
                 }
                 state.streams.remove(&stream_id);
             }
+            check_stream_invariants(state, stream_id, "StreamClosed");
         }
         Command::StreamReadError { stream_id } => {
             if let Some(stream) = state.streams.remove(&stream_id) {
@@ -866,6 +905,7 @@ pub(crate) fn handle_command(
             if remove_stream {
                 state.streams.remove(&stream_id);
             }
+            check_stream_invariants(state, stream_id, "StreamWriteDrained");
         }
     }
 }
