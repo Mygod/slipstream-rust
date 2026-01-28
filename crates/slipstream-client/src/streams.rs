@@ -10,7 +10,7 @@ use slipstream_ffi::picoquic::{
     picoquic_mark_active_stream, picoquic_provide_stream_data_buffer, picoquic_reset_stream,
     picoquic_stop_sending, picoquic_stream_data_consumed,
 };
-use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
+use slipstream_ffi::{abort_stream_bidi, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -303,9 +303,7 @@ fn handle_stream_data(
                 data.len(),
                 fin
             );
-            unsafe {
-                let _ = picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR);
-            }
+            unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR) };
             return;
         };
 
@@ -395,9 +393,7 @@ fn handle_stream_data(
         if debug_streams {
             debug!("stream {}: resetting", stream_id);
         }
-        unsafe {
-            let _ = picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR);
-        }
+        unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR) };
         state.streams.remove(&stream_id);
     } else if remove_stream {
         if debug_streams {
@@ -541,7 +537,7 @@ pub(crate) fn handle_command(
                     ret,
                     data.len()
                 );
-                let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                 state.streams.remove(&stream_id);
             } else if let Some(stream) = state.streams.get_mut(&stream_id) {
                 stream.tx_bytes = stream.tx_bytes.saturating_add(data.len() as u64);
@@ -574,8 +570,7 @@ pub(crate) fn handle_command(
             } else {
                 warn!("stream {}: tcp read error (unknown stream)", stream_id);
             }
-            let _ = unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
-            let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+            unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
         }
         Command::StreamWriteError { stream_id } => {
             if let Some(stream) = state.streams.remove(&stream_id) {
@@ -591,8 +586,7 @@ pub(crate) fn handle_command(
             } else {
                 warn!("stream {}: tcp write error (unknown stream)", stream_id);
             }
-            let _ = unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
-            let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+            unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
         }
         Command::StreamWriteDrained { stream_id, bytes } => {
             let mut remove_stream = false;
@@ -621,9 +615,7 @@ pub(crate) fn handle_command(
                             );
                         },
                     ) {
-                        let _ = unsafe {
-                            picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR)
-                        };
+                        unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                         state.streams.remove(&stream_id);
                         return;
                     }

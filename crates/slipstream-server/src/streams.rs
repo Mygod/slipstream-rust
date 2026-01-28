@@ -11,7 +11,7 @@ use slipstream_ffi::picoquic::{
     picoquic_provide_stream_data_buffer, picoquic_quic_t, picoquic_reset_stream,
     picoquic_stop_sending, picoquic_stream_data_consumed,
 };
-use slipstream_ffi::{SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
+use slipstream_ffi::{abort_stream_bidi, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -377,7 +377,7 @@ pub(crate) unsafe extern "C" fn server_callback(
                                 key.stream_id, send_len
                             );
                         }
-                        let _ = picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
+                        unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                         return 0;
                     }
                     unsafe {
@@ -587,9 +587,7 @@ fn handle_stream_data(
         {
             shutdown_stream(state, key);
         }
-        unsafe {
-            let _ = picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR);
-        }
+        unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
     }
 }
 
@@ -692,7 +690,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             if reset_stream {
                 let cnx = cnx_id as *mut picoquic_cnx_t;
                 shutdown_stream(state, key);
-                let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             }
         }
         Command::StreamConnectError { cnx_id, stream_id } => {
@@ -702,7 +700,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 stream_id,
             };
             if shutdown_stream(state, key).is_some() {
-                let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                 warn!("stream {:?}: target connect failed", stream_id);
             }
         }
@@ -768,8 +766,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     stream.flow.queued_bytes,
                     stream.flow.fin_offset
                 );
-                let _ = unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
-                let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             }
         }
         Command::StreamWriteError { cnx_id, stream_id } => {
@@ -788,8 +785,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     stream.flow.queued_bytes,
                     stream.flow.fin_offset
                 );
-                let _ = unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
-                let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             }
         }
         Command::StreamWriteDrained {
@@ -837,8 +833,8 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             }
             if reset_stream {
                 shutdown_stream(state, key);
-                let _ = unsafe {
-                    picoquic_reset_stream(
+                unsafe {
+                    abort_stream_bidi(
                         cnx_id as *mut picoquic_cnx_t,
                         stream_id,
                         SLIPSTREAM_INTERNAL_ERROR,

@@ -6,7 +6,7 @@ use crate::picoquic::{
     picoquic_set_default_priority, picoquic_set_initial_send_mtu,
     picoquic_set_key_log_file_from_env, picoquic_set_max_data_control, picoquic_set_mtu_max,
     picoquic_set_preemptive_repeat_policy, picoquic_set_stream_data_consumption_mode,
-    slipstream_take_stateless_packet_for_cid, PICOQUIC_MAX_PACKET_SIZE,
+    picoquic_stop_sending, slipstream_take_stateless_packet_for_cid, PICOQUIC_MAX_PACKET_SIZE,
 };
 use libc::{c_char, c_int, c_ulong, size_t, sockaddr_storage};
 use slipstream_core::tcp::stream_write_buffer_bytes;
@@ -249,9 +249,16 @@ pub unsafe fn write_stream_or_reset(
             SLIPSTREAM_INTERNAL_ERROR
         };
         // SAFETY: caller guarantees cnx is a valid picoquic connection.
-        let _ = unsafe { picoquic_reset_stream(cnx, stream_id, code) };
+        unsafe { abort_stream_bidi(cnx, stream_id, code) };
         let _ = stream.shutdown(Shutdown::Both);
         return true;
     }
     false
+}
+
+/// # Safety
+/// Caller must ensure `cnx` points to a valid picoquic connection.
+pub unsafe fn abort_stream_bidi(cnx: *mut picoquic_cnx_t, stream_id: u64, app_error: u64) {
+    let _ = picoquic_stop_sending(cnx, stream_id, app_error);
+    let _ = picoquic_reset_stream(cnx, stream_id, app_error);
 }
