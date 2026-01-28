@@ -64,9 +64,7 @@ jobs:
       - name: Run ignored tests
         env:
           RUST_BACKTRACE: "1"
-        run: |
-          cargo test -p slipstream-dns -- --ignored
-          cargo test -- --ignored
+        run: cargo test -- --ignored
 
   cargo-audit:
     name: Cargo Audit
