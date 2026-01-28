@@ -228,7 +228,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
-        let mut last_idle_log_at = 0u64;
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -384,38 +383,11 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     if streams_len > 0 {
                         zero_send_with_streams = zero_send_with_streams.saturating_add(1);
                         let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) } != 0;
-                        let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) } != 0;
                         if flow_blocked {
                             for resolver in resolvers.iter_mut() {
                                 if resolver.mode == ResolverMode::Recursive && resolver.added {
                                     resolver.pending_polls = resolver.pending_polls.max(1);
                                 }
-                            }
-                        }
-                        if !flow_blocked && !has_ready_stream {
-                            let metrics = unsafe { (*state_ptr).stream_debug_metrics() };
-                            let has_backlog = metrics.streams_with_rx_queued > 0
-                                || metrics.streams_with_fin_enqueued > 0
-                                || metrics.streams_discarding > 0
-                                || metrics.streams_with_unconsumed_rx > 0;
-                            if has_backlog
-                                && current_time.saturating_sub(last_idle_log_at)
-                                    >= FLOW_BLOCKED_LOG_INTERVAL_US
-                            {
-                                let backlog = unsafe { (*state_ptr).stream_backlog_summaries(8) };
-                                warn!(
-                                    "connection idle with backlog: streams={} streams_with_rx_queued={} queued_bytes_total={} streams_with_fin_enqueued={} streams_discarding={} streams_with_unconsumed_rx={} flow_blocked={} has_ready_stream={} backlog={:?}",
-                                    streams_len,
-                                    metrics.streams_with_rx_queued,
-                                    metrics.queued_bytes_total,
-                                    metrics.streams_with_fin_enqueued,
-                                    metrics.streams_discarding,
-                                    metrics.streams_with_unconsumed_rx,
-                                    flow_blocked,
-                                    has_ready_stream,
-                                    backlog
-                                );
-                                last_idle_log_at = current_time;
                             }
                         }
                     }
