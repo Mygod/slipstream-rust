@@ -7,9 +7,9 @@ use slipstream_core::flow_control::{
 };
 use slipstream_ffi::picoquic::{
     picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
-    picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_mark_active_stream,
-    picoquic_provide_stream_data_buffer, picoquic_quic_t, picoquic_reset_stream,
-    picoquic_stop_sending, picoquic_stream_data_consumed,
+    picoquic_current_time, picoquic_get_first_cnx, picoquic_get_next_cnx,
+    picoquic_mark_active_stream, picoquic_provide_stream_data_buffer, picoquic_quic_t,
+    picoquic_reset_stream, picoquic_stop_sending, picoquic_stream_data_consumed,
 };
 use slipstream_ffi::{abort_stream_bidi, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -29,6 +29,7 @@ pub(crate) struct ServerState {
     debug_commands: bool,
     command_counts: CommandCounts,
     last_command_report: Instant,
+    last_mark_active_fail_log_at: u64,
 }
 
 #[derive(Default)]
@@ -89,6 +90,7 @@ impl ServerState {
             debug_commands,
             command_counts: CommandCounts::default(),
             last_command_report: Instant::now(),
+            last_mark_active_fail_log_at: 0,
         }
     }
 
@@ -778,11 +780,39 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 let cnx = cnx_id as *mut picoquic_cnx_t;
                 let ret =
                     unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
-                if ret != 0 && state.debug_streams {
-                    debug!(
-                        "stream {:?}: mark_active_stream fin failed ret={}",
-                        stream_id, ret
-                    );
+                if ret != 0 {
+                    const MARK_ACTIVE_FAIL_LOG_INTERVAL_US: u64 = 1_000_000;
+                    let now = unsafe { picoquic_current_time() };
+                    if now.saturating_sub(state.last_mark_active_fail_log_at)
+                        >= MARK_ACTIVE_FAIL_LOG_INTERVAL_US
+                    {
+                        let send_pending = stream
+                            .send_pending
+                            .as_ref()
+                            .map(|pending| pending.load(Ordering::SeqCst))
+                            .unwrap_or(false);
+                        let send_stash_bytes = stream
+                            .send_stash
+                            .as_ref()
+                            .map(|stash| stash.len())
+                            .unwrap_or(0);
+                        let backlog = BacklogStreamSummary {
+                            stream_id,
+                            send_pending,
+                            send_stash_bytes,
+                            target_fin_pending: stream.target_fin_pending,
+                            close_after_flush: stream.close_after_flush,
+                            pending_fin: stream.pending_fin,
+                            fin_enqueued: stream.fin_enqueued,
+                            queued_bytes: stream.flow.queued_bytes as u64,
+                            pending_chunks: stream.pending_data.len(),
+                        };
+                        warn!(
+                            "stream {:?}: mark_active_stream fin failed ret={} backlog={:?}",
+                            stream_id, ret, backlog
+                        );
+                        state.last_mark_active_fail_log_at = now;
+                    }
                 }
             }
         }
