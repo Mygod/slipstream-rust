@@ -574,6 +574,7 @@ pub(crate) fn handle_command(
             } else {
                 warn!("stream {}: tcp read error (unknown stream)", stream_id);
             }
+            let _ = unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
         }
         Command::StreamWriteError { stream_id } => {
@@ -590,6 +591,7 @@ pub(crate) fn handle_command(
             } else {
                 warn!("stream {}: tcp write error (unknown stream)", stream_id);
             }
+            let _ = unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
         }
         Command::StreamWriteDrained { stream_id, bytes } => {
