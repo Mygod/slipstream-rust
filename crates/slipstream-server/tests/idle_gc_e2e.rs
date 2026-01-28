@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use support::{
     ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, poke_client_with_payload,
-    server_bin_path, spawn_client, spawn_server, wait_for_log, workspace_root, ClientArgs,
-    ServerArgs,
+    server_bin_path, spawn_client, spawn_server, test_cert_and_key, wait_for_log, workspace_root,
+    ClientArgs, ServerArgs,
 };
 
 #[test]
@@ -15,10 +15,7 @@ fn idle_gc_closes_connection() {
     let client_bin = ensure_client_bin(&root);
     let server_bin = server_bin_path();
 
-    let cert = root.join("fixtures/certs/cert.pem");
-    let key = root.join("fixtures/certs/key.pem");
-    assert!(cert.exists(), "missing fixtures/certs/cert.pem");
-    assert!(key.exists(), "missing fixtures/certs/key.pem");
+    let (cert, key) = test_cert_and_key(&root);
 
     let dns_port = match pick_udp_port() {
         Ok(port) => port,

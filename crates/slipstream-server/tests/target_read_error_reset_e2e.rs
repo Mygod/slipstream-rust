@@ -1,17 +1,15 @@
 mod support;
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
-use std::thread;
+use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use socket2::SockRef;
 use support::{
-    ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, server_bin_path, spawn_client,
-    spawn_server, wait_for_log, workspace_root, ClientArgs, ServerArgs,
+    ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, server_bin_path,
+    spawn_server_client_ready, spawn_single_target, test_cert_and_key, wait_for_log,
+    workspace_root, ClientArgs, ServerArgs,
 };
 
 const DOMAIN: &str = "test.example.com";
@@ -22,97 +20,13 @@ enum TargetEvent {
     Closed,
 }
 
-struct ResettingTarget {
-    addr: SocketAddr,
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-    rx: Receiver<TargetEvent>,
-}
-
-impl ResettingTarget {
-    fn spawn() -> std::io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let addr = listener.local_addr()?;
-        let (tx, rx) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_flag = Arc::clone(&stop);
-
-        let handle = thread::spawn(move || {
-            let accept = listener.accept();
-            if stop_flag.load(Ordering::Relaxed) {
-                return;
-            }
-            match accept {
-                Ok((mut stream, _)) => {
-                    let _ = tx.send(TargetEvent::Accepted);
-                    let _ = stream.set_nodelay(true);
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-                    let mut buf = [0u8; 4096];
-                    let mut total = 0usize;
-                    loop {
-                        if stop_flag.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        match stream.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                total = total.saturating_add(n);
-                                break;
-                            }
-                            Err(err)
-                                if err.kind() == std::io::ErrorKind::Interrupted
-                                    || err.kind() == std::io::ErrorKind::WouldBlock
-                                    || err.kind() == std::io::ErrorKind::TimedOut =>
-                            {
-                                continue;
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    let _ = tx.send(TargetEvent::FirstRead { _bytes: total });
-                    let _ = SockRef::from(&stream).set_linger(Some(Duration::from_secs(0)));
-                    drop(stream);
-                    let _ = tx.send(TargetEvent::Closed);
-                }
-                Err(_) => {
-                    let _ = tx.send(TargetEvent::Closed);
-                }
-            }
-        });
-
-        Ok(Self {
-            addr,
-            stop,
-            handle: Some(handle),
-            rx,
-        })
-    }
-
-    fn recv_event(&self, timeout: Duration) -> Option<TargetEvent> {
-        self.rx.recv_timeout(timeout).ok()
-    }
-}
-
-impl Drop for ResettingTarget {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(200));
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
 #[test]
 fn target_read_error_triggers_client_reset() {
     let root = workspace_root();
     let client_bin = ensure_client_bin(&root);
     let server_bin = server_bin_path();
 
-    let cert = root.join("fixtures/certs/cert.pem");
-    let key = root.join("fixtures/certs/key.pem");
-    assert!(cert.exists(), "missing fixtures/certs/cert.pem");
-    assert!(key.exists(), "missing fixtures/certs/key.pem");
+    let (cert, key) = test_cert_and_key(&root);
 
     let dns_port = match pick_udp_port() {
         Ok(port) => port,
@@ -129,7 +43,41 @@ fn target_read_error_triggers_client_reset() {
         }
     };
 
-    let target = match ResettingTarget::spawn() {
+    let target = match spawn_single_target(
+        Some(TargetEvent::Closed),
+        move |mut stream, tx, stop_flag| {
+            let _ = tx.send(TargetEvent::Accepted);
+            let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut buf = [0u8; 4096];
+            let mut total = 0usize;
+            loop {
+                if stop_flag.load(Ordering::Relaxed) {
+                    return None;
+                }
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        total = total.saturating_add(n);
+                        break;
+                    }
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::Interrupted
+                            || err.kind() == std::io::ErrorKind::WouldBlock
+                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        continue;
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(TargetEvent::FirstRead { _bytes: total });
+            let _ = SockRef::from(&stream).set_linger(Some(Duration::from_secs(0)));
+            drop(stream);
+            let _ = tx.send(TargetEvent::Closed);
+            None
+        },
+    ) {
         Ok(target) => target,
         Err(err) => {
             eprintln!("skipping target write error e2e test: {}", err);
@@ -137,51 +85,45 @@ fn target_read_error_triggers_client_reset() {
         }
     };
 
-    let (mut server, server_logs) = spawn_server(ServerArgs {
-        server_bin: &server_bin,
-        dns_listen_host: Some("127.0.0.1"),
-        dns_port,
-        target_address: &format!("127.0.0.1:{}", target.addr.port()),
-        domains: &[DOMAIN],
-        cert: &cert,
-        key: &key,
-        reset_seed_path: None,
-        fallback_addr: None,
-        idle_timeout_seconds: None,
-        envs: &[],
-        rust_log: "info",
-        capture_logs: true,
-    });
-    let server_logs = server_logs.expect("server logs");
-    if server.has_exited() {
-        eprintln!("skipping target write error e2e test: server failed to start");
-        return;
-    }
-
-    let (_client, client_logs) = spawn_client(ClientArgs {
-        client_bin: &client_bin,
-        dns_port,
-        tcp_port,
-        domain: DOMAIN,
-        cert: Some(&cert),
-        keep_alive_interval: Some(1),
-        envs: &[],
-        rust_log: "info",
-        capture_logs: true,
-    });
-    let client_logs = client_logs.expect("client logs");
-    if !wait_for_log(
-        &client_logs,
-        "Listening on TCP port",
-        Duration::from_secs(5),
+    let harness = match spawn_server_client_ready(
+        ServerArgs {
+            server_bin: &server_bin,
+            dns_listen_host: Some("127.0.0.1"),
+            dns_port,
+            target_address: &format!("127.0.0.1:{}", target.addr.port()),
+            domains: &[DOMAIN],
+            cert: &cert,
+            key: &key,
+            reset_seed_path: None,
+            fallback_addr: None,
+            idle_timeout_seconds: None,
+            envs: &[],
+            rust_log: "info",
+            capture_logs: true,
+        },
+        ClientArgs {
+            client_bin: &client_bin,
+            dns_port,
+            tcp_port,
+            domain: DOMAIN,
+            cert: Some(&cert),
+            keep_alive_interval: Some(1),
+            envs: &[],
+            rust_log: "info",
+            capture_logs: true,
+        },
+        "skipping target write error e2e test: server failed to start",
+        Duration::from_millis(0),
     ) {
-        let snapshot = log_snapshot(&client_logs);
-        panic!("client did not start listening\n{}", snapshot);
-    }
-    if !wait_for_log(&client_logs, "Connection ready", Duration::from_secs(10)) {
-        let snapshot = log_snapshot(&client_logs);
-        panic!("client did not become ready\n{}", snapshot);
-    }
+        Some(harness) => harness,
+        None => return,
+    };
+    let support::ServerClientHarness {
+        server: _server,
+        client: _client,
+        server_logs,
+        client_logs,
+    } = harness;
 
     let client_addr = SocketAddr::from(([127, 0, 0, 1], tcp_port));
     let mut app = TcpStream::connect_timeout(&client_addr, Duration::from_secs(2))

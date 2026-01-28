@@ -5,6 +5,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -61,6 +62,38 @@ pub struct LogCapture {
     pub lines: Arc<Mutex<VecDeque<String>>>,
 }
 
+pub struct TargetHarness<E> {
+    pub addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    conn_handles: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+    rx: Receiver<E>,
+    wake_on_drop: bool,
+}
+
+impl<E> TargetHarness<E> {
+    pub fn recv_event(&self, timeout: Duration) -> Option<E> {
+        self.rx.recv_timeout(timeout).ok()
+    }
+}
+
+impl<E> Drop for TargetHarness<E> {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if self.wake_on_drop {
+            let _ = TcpStream::connect_timeout(&self.addr, Duration::from_millis(200));
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        if let Ok(mut handles) = self.conn_handles.lock() {
+            for handle in handles.drain(..) {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
 pub struct ServerArgs<'a> {
     pub server_bin: &'a Path,
     pub dns_listen_host: Option<&'a str>,
@@ -87,6 +120,13 @@ pub struct ClientArgs<'a> {
     pub envs: &'a [(&'a str, &'a str)],
     pub rust_log: &'a str,
     pub capture_logs: bool,
+}
+
+pub struct ServerClientHarness {
+    pub server: ChildGuard,
+    pub client: ChildGuard,
+    pub server_logs: LogCapture,
+    pub client_logs: LogCapture,
 }
 
 pub fn workspace_root() -> PathBuf {
@@ -116,6 +156,14 @@ pub fn ensure_client_bin(root: &Path) -> PathBuf {
         .expect("failed to invoke cargo build for slipstream-client");
     assert!(status.success(), "cargo build -p slipstream-client failed");
     path
+}
+
+pub fn test_cert_and_key(root: &Path) -> (PathBuf, PathBuf) {
+    let cert = root.join("fixtures/certs/cert.pem");
+    let key = root.join("fixtures/certs/key.pem");
+    assert!(cert.exists(), "missing fixtures/certs/cert.pem");
+    assert!(key.exists(), "missing fixtures/certs/key.pem");
+    (cert, key)
 }
 
 pub fn pick_udp_port() -> io::Result<u16> {
@@ -182,6 +230,45 @@ pub fn spawn_client(args: ClientArgs<'_>) -> (ChildGuard, Option<LogCapture>) {
     spawn_process(&mut cmd, args.capture_logs, "slipstream-client")
 }
 
+pub fn spawn_server_client_ready(
+    server_args: ServerArgs<'_>,
+    client_args: ClientArgs<'_>,
+    server_fail_message: &str,
+    server_start_delay: Duration,
+) -> Option<ServerClientHarness> {
+    let (mut server, server_logs) = spawn_server(server_args);
+    let server_logs = server_logs.expect("server logs");
+    if server_start_delay > Duration::from_millis(0) {
+        thread::sleep(server_start_delay);
+    }
+    if server.has_exited() {
+        eprintln!("{}", server_fail_message);
+        return None;
+    }
+
+    let (client, client_logs) = spawn_client(client_args);
+    let client_logs = client_logs.expect("client logs");
+    if !wait_for_log(
+        &client_logs,
+        "Listening on TCP port",
+        Duration::from_secs(5),
+    ) {
+        let snapshot = log_snapshot(&client_logs);
+        panic!("client did not start listening\n{}", snapshot);
+    }
+    if !wait_for_log(&client_logs, "Connection ready", Duration::from_secs(10)) {
+        let snapshot = log_snapshot(&client_logs);
+        panic!("client did not become ready\n{}", snapshot);
+    }
+
+    Some(ServerClientHarness {
+        server,
+        client,
+        server_logs,
+        client_logs,
+    })
+}
+
 pub fn log_snapshot(logs: &LogCapture) -> String {
     let buffer = logs.lines.lock().expect("lock log buffer");
     if buffer.is_empty() {
@@ -206,6 +293,26 @@ pub fn wait_for_log(logs: &LogCapture, needle: &str, timeout: Duration) -> bool 
             }
             Err(mpsc::RecvTimeoutError::Timeout) => return false,
             Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
+pub fn wait_for_any_log(logs: &LogCapture, needles: &[&str], timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        match logs.rx.recv_timeout(remaining) {
+            Ok(line) => {
+                if needles.iter().any(|needle| line.contains(needle)) {
+                    return Some(line);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => return None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
         }
     }
 }
@@ -265,6 +372,102 @@ pub fn poke_client_with_payload(port: u16, timeout: Duration, payload: &[u8]) ->
         }
     }
     false
+}
+
+pub fn spawn_single_target<E, F>(
+    on_accept_error: Option<E>,
+    handler: F,
+) -> io::Result<TargetHarness<E>>
+where
+    E: Send + 'static,
+    F: FnOnce(TcpStream, Sender<E>, Arc<AtomicBool>) -> Option<thread::JoinHandle<()>>
+        + Send
+        + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop);
+    let conn_handles: Arc<Mutex<Vec<thread::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let conn_handles_clone = Arc::clone(&conn_handles);
+
+    let handle = thread::spawn(move || {
+        let accept = listener.accept();
+        if stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        match accept {
+            Ok((stream, _)) => {
+                if let Some(join) = handler(stream, tx, stop_flag) {
+                    if let Ok(mut handles) = conn_handles_clone.lock() {
+                        handles.push(join);
+                    }
+                }
+            }
+            Err(_) => {
+                if let Some(event) = on_accept_error {
+                    let _ = tx.send(event);
+                }
+            }
+        }
+    });
+
+    Ok(TargetHarness {
+        addr,
+        stop,
+        handle: Some(handle),
+        conn_handles,
+        rx,
+        wake_on_drop: true,
+    })
+}
+
+pub fn spawn_accept_loop_target<E, F>(handler: F) -> io::Result<TargetHarness<E>>
+where
+    E: Send + 'static,
+    F: FnMut(TcpStream, Sender<E>, Arc<AtomicBool>, usize) -> Option<thread::JoinHandle<()>>
+        + Send
+        + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?;
+    let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop);
+    let conn_handles: Arc<Mutex<Vec<thread::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let conn_handles_clone = Arc::clone(&conn_handles);
+
+    let handle = thread::spawn(move || {
+        let mut index = 0usize;
+        let mut handler = handler;
+        while !stop_flag.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if let Some(join) = handler(stream, tx.clone(), Arc::clone(&stop_flag), index) {
+                        if let Ok(mut handles) = conn_handles_clone.lock() {
+                            handles.push(join);
+                        }
+                    }
+                    index = index.saturating_add(1);
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(TargetHarness {
+        addr,
+        stop,
+        handle: Some(handle),
+        conn_handles,
+        rx,
+        wake_on_drop: false,
+    })
 }
 
 fn spawn_log_reader<R: std::io::Read + Send + 'static>(

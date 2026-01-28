@@ -1,16 +1,16 @@
 mod support;
 
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use support::{
-    ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, server_bin_path, spawn_client,
-    spawn_server, wait_for_log, ChildGuard, ClientArgs, LogCapture, ServerArgs,
+    ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, server_bin_path,
+    spawn_accept_loop_target, spawn_server_client_ready, test_cert_and_key, wait_for_log,
+    workspace_root, ChildGuard, ClientArgs, LogCapture, ServerArgs,
 };
 
 const ENV_ENABLE: &str = "SLIPSTREAM_FLOW_CONTROL_TEST";
@@ -38,119 +38,12 @@ enum TargetEvent {
     Accepted { index: usize, mode: TargetMode },
 }
 
-struct SplitTarget {
-    addr: SocketAddr,
-    stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-    conn_handles: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
-    rx: Receiver<TargetEvent>,
-}
-
-impl SplitTarget {
-    fn spawn() -> std::io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let addr = listener.local_addr()?;
-        let (tx, rx) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_flag = Arc::clone(&stop);
-        let conn_handles: Arc<Mutex<Vec<thread::JoinHandle<()>>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let conn_handles_clone = Arc::clone(&conn_handles);
-
-        let handle = thread::spawn(move || {
-            let mut index = 0usize;
-            while !stop_flag.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let mode = if index == 0 {
-                            TargetMode::Blackhole
-                        } else {
-                            TargetMode::Echo
-                        };
-                        let _ = tx.send(TargetEvent::Accepted { index, mode });
-                        let stop_conn = Arc::clone(&stop_flag);
-                        let join = thread::spawn(move || {
-                            let _ = stream.set_nodelay(true);
-                            match mode {
-                                TargetMode::Blackhole => {
-                                    while !stop_conn.load(Ordering::Relaxed) {
-                                        thread::sleep(Duration::from_millis(100));
-                                    }
-                                }
-                                TargetMode::Echo => {
-                                    let mut stream = stream;
-                                    let _ =
-                                        stream.set_read_timeout(Some(Duration::from_millis(200)));
-                                    let mut buf = [0u8; 4096];
-                                    while !stop_conn.load(Ordering::Relaxed) {
-                                        match stream.read(&mut buf) {
-                                            Ok(0) => break,
-                                            Ok(n) => {
-                                                if stream.write_all(&buf[..n]).is_err() {
-                                                    break;
-                                                }
-                                            }
-                                            Err(err)
-                                                if err.kind() == std::io::ErrorKind::TimedOut
-                                                    || err.kind()
-                                                        == std::io::ErrorKind::WouldBlock =>
-                                            {
-                                                continue;
-                                            }
-                                            Err(_) => break,
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                        if let Ok(mut handles) = conn_handles_clone.lock() {
-                            handles.push(join);
-                        }
-                        index = index.saturating_add(1);
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Ok(Self {
-            addr,
-            stop,
-            handle: Some(handle),
-            conn_handles,
-            rx,
-        })
-    }
-
-    fn recv_event(&self, timeout: Duration) -> Option<TargetEvent> {
-        self.rx.recv_timeout(timeout).ok()
-    }
-}
-
-impl Drop for SplitTarget {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-        if let Ok(mut handles) = self.conn_handles.lock() {
-            for handle in handles.drain(..) {
-                let _ = handle.join();
-            }
-        }
-    }
-}
-
 struct FlowControlHarness {
     _server: ChildGuard,
     _client: ChildGuard,
     server_logs: LogCapture,
     client_logs: LogCapture,
-    target: SplitTarget,
+    target: support::TargetHarness<TargetEvent>,
     client_addr: SocketAddr,
 }
 
@@ -163,14 +56,11 @@ fn setup_flow_control(envs: &[(&str, &str)]) -> Option<FlowControlHarness> {
         return None;
     }
 
-    let root = support::workspace_root();
+    let root = workspace_root();
     let client_bin = ensure_client_bin(&root);
     let server_bin = server_bin_path();
 
-    let cert = root.join("fixtures/certs/cert.pem");
-    let key = root.join("fixtures/certs/key.pem");
-    assert!(cert.exists(), "missing fixtures/certs/cert.pem");
-    assert!(key.exists(), "missing fixtures/certs/key.pem");
+    let (cert, key) = test_cert_and_key(&root);
 
     let dns_port = match pick_udp_port() {
         Ok(port) => port,
@@ -187,7 +77,47 @@ fn setup_flow_control(envs: &[(&str, &str)]) -> Option<FlowControlHarness> {
         }
     };
 
-    let target = match SplitTarget::spawn() {
+    let target = match spawn_accept_loop_target(|stream, tx, stop_flag, index| {
+        let mode = if index == 0 {
+            TargetMode::Blackhole
+        } else {
+            TargetMode::Echo
+        };
+        let _ = tx.send(TargetEvent::Accepted { index, mode });
+        let stop_conn = Arc::clone(&stop_flag);
+        Some(thread::spawn(move || {
+            let mut stream = stream;
+            let _ = stream.set_nodelay(true);
+            match mode {
+                TargetMode::Blackhole => {
+                    while !stop_conn.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                TargetMode::Echo => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let mut buf = [0u8; 4096];
+                    while !stop_conn.load(Ordering::Relaxed) {
+                        match stream.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if stream.write_all(&buf[..n]).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(err)
+                                if err.kind() == std::io::ErrorKind::TimedOut
+                                    || err.kind() == std::io::ErrorKind::WouldBlock =>
+                            {
+                                continue;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        }))
+    }) {
         Ok(target) => target,
         Err(err) => {
             eprintln!("skipping flow control e2e test: {}", err);
@@ -195,52 +125,41 @@ fn setup_flow_control(envs: &[(&str, &str)]) -> Option<FlowControlHarness> {
         }
     };
 
-    let (mut server, server_logs) = spawn_server(ServerArgs {
-        server_bin: &server_bin,
-        dns_listen_host: Some("127.0.0.1"),
-        dns_port,
-        target_address: &format!("127.0.0.1:{}", target.addr.port()),
-        domains: &[DOMAIN],
-        cert: &cert,
-        key: &key,
-        reset_seed_path: None,
-        fallback_addr: None,
-        idle_timeout_seconds: None,
-        envs,
-        rust_log: "info",
-        capture_logs: true,
-    });
-    let server_logs = server_logs.expect("server logs");
-    thread::sleep(Duration::from_millis(200));
-    if server.has_exited() {
-        eprintln!("skipping flow control e2e test: server failed to start");
-        return None;
-    }
-
-    let (client, client_logs) = spawn_client(ClientArgs {
-        client_bin: &client_bin,
-        dns_port,
-        tcp_port,
-        domain: DOMAIN,
-        cert: Some(&cert),
-        keep_alive_interval: Some(0),
-        envs,
-        rust_log: "debug",
-        capture_logs: true,
-    });
-    let client_logs = client_logs.expect("client logs");
-    if !wait_for_log(
-        &client_logs,
-        "Listening on TCP port",
-        Duration::from_secs(5),
-    ) {
-        let snapshot = log_snapshot(&client_logs);
-        panic!("client did not start listening\n{}", snapshot);
-    }
-    if !wait_for_log(&client_logs, "Connection ready", Duration::from_secs(10)) {
-        let snapshot = log_snapshot(&client_logs);
-        panic!("client did not become ready\n{}", snapshot);
-    }
+    let support::ServerClientHarness {
+        server,
+        client,
+        server_logs,
+        client_logs,
+    } = spawn_server_client_ready(
+        ServerArgs {
+            server_bin: &server_bin,
+            dns_listen_host: Some("127.0.0.1"),
+            dns_port,
+            target_address: &format!("127.0.0.1:{}", target.addr.port()),
+            domains: &[DOMAIN],
+            cert: &cert,
+            key: &key,
+            reset_seed_path: None,
+            fallback_addr: None,
+            idle_timeout_seconds: None,
+            envs,
+            rust_log: "info",
+            capture_logs: true,
+        },
+        ClientArgs {
+            client_bin: &client_bin,
+            dns_port,
+            tcp_port,
+            domain: DOMAIN,
+            cert: Some(&cert),
+            keep_alive_interval: Some(0),
+            envs,
+            rust_log: "debug",
+            capture_logs: true,
+        },
+        "skipping flow control e2e test: server failed to start",
+        Duration::from_millis(200),
+    )?;
 
     let client_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, tcp_port));
 
