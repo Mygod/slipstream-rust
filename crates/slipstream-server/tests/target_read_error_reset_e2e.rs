@@ -31,14 +31,14 @@ fn target_read_error_triggers_client_reset() {
     let dns_port = match pick_udp_port() {
         Ok(port) => port,
         Err(err) => {
-            eprintln!("skipping target write error e2e test: {}", err);
+            eprintln!("skipping target read error e2e test: {}", err);
             return;
         }
     };
     let tcp_port = match pick_tcp_port() {
         Ok(port) => port,
         Err(err) => {
-            eprintln!("skipping target write error e2e test: {}", err);
+            eprintln!("skipping target read error e2e test: {}", err);
             return;
         }
     };
@@ -80,7 +80,7 @@ fn target_read_error_triggers_client_reset() {
     ) {
         Ok(target) => target,
         Err(err) => {
-            eprintln!("skipping target write error e2e test: {}", err);
+            eprintln!("skipping target read error e2e test: {}", err);
             return;
         }
     };
@@ -112,7 +112,7 @@ fn target_read_error_triggers_client_reset() {
             rust_log: "info",
             capture_logs: true,
         },
-        "skipping target write error e2e test: server failed to start",
+        "skipping target read error e2e test: server failed to start",
         Duration::from_millis(0),
     ) {
         Some(harness) => harness,
