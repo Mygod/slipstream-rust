@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use slipstream_dns::{encode_query, is_response, QueryParams, CLASS_IN, RR_A};
 
-use support::{pick_udp_port, server_bin_path, spawn_server, workspace_root, ServerArgs};
+use support::{
+    pick_udp_port, server_bin_path, spawn_server, test_cert_and_key, workspace_root, ServerArgs,
+};
 
 struct EchoServer {
     addr: SocketAddr,
@@ -91,10 +93,7 @@ fn udp_fallback_e2e() {
     let root = workspace_root();
     let server_bin = server_bin_path();
 
-    let cert = root.join("fixtures/certs/cert.pem");
-    let key = root.join("fixtures/certs/key.pem");
-    assert!(cert.exists(), "missing fixtures/certs/cert.pem");
-    assert!(key.exists(), "missing fixtures/certs/key.pem");
+    let (cert, key) = test_cert_and_key(&root);
 
     let dns_port = match pick_udp_port() {
         Ok(port) => port,

@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use support::{
     ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, poke_client_with_payload,
-    server_bin_path, spawn_client, spawn_server, terminate_process, wait_for_log,
-    wait_for_log_since, workspace_root, ClientArgs, ServerArgs,
+    server_bin_path, spawn_client, spawn_server, terminate_process, test_cert_and_key,
+    wait_for_log, wait_for_log_since, workspace_root, ClientArgs, ServerArgs,
 };
 
 #[test]
@@ -16,10 +16,7 @@ fn restart_reconnects_idle_client() {
     let client_bin = ensure_client_bin(&root);
     let server_bin = server_bin_path();
 
-    let cert = root.join("fixtures/certs/cert.pem");
-    let key = root.join("fixtures/certs/key.pem");
-    assert!(cert.exists(), "missing fixtures/certs/cert.pem");
-    assert!(key.exists(), "missing fixtures/certs/key.pem");
+    let (cert, key) = test_cert_and_key(&root);
 
     let dns_port = match pick_udp_port() {
         Ok(port) => port,

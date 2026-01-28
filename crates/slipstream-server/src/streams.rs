@@ -769,6 +769,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     stream.flow.queued_bytes,
                     stream.flow.fin_offset
                 );
+                let _ = unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                 let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             }
         }
@@ -788,6 +789,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     stream.flow.queued_bytes,
                     stream.flow.fin_offset
                 );
+                let _ = unsafe { picoquic_stop_sending(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                 let _ = unsafe { picoquic_reset_stream(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
             }
         }
