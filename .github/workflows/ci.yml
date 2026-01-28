@@ -185,20 +185,12 @@ jobs:
       - name: Build slipstream-client
         shell: bash
         run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cargo build -p slipstream-client --release --target ${{ matrix.target }} --features openssl-vendored
-          else
-            cargo build -p slipstream-client --release --target ${{ matrix.target }}
-          fi
+          cargo build -p slipstream-client --release --target ${{ matrix.target }}
 
       - name: Build slipstream-server
         shell: bash
         run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cargo build -p slipstream-server --release --target ${{ matrix.target }} --features openssl-vendored
-          else
-            cargo build -p slipstream-server --release --target ${{ matrix.target }}
-          fi
+          cargo build -p slipstream-server --release --target ${{ matrix.target }}
 
       - name: Package binaries
         shell: bash
