@@ -502,79 +502,40 @@ pub(crate) fn spawn_acceptor(
 
 #[cfg(test)]
 mod test_hooks {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use slipstream_core::test_support::FailureCounter;
 
     pub(super) const FORCED_ADD_TO_STREAM_ERROR: i32 = -1;
     pub(super) const FORCED_MARK_ACTIVE_STREAM_ERROR: i32 = 0x400 + 36;
-    pub(super) static ADD_TO_STREAM_FAILS_LEFT: AtomicUsize = AtomicUsize::new(0);
-    pub(super) static MARK_ACTIVE_STREAM_FAILS_LEFT: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static ADD_TO_STREAM_FAILS_LEFT: FailureCounter = FailureCounter::new();
+    pub(super) static MARK_ACTIVE_STREAM_FAILS_LEFT: FailureCounter = FailureCounter::new();
 
     pub(super) fn set_add_to_stream_failures(count: usize) {
-        ADD_TO_STREAM_FAILS_LEFT.store(count, Ordering::SeqCst);
+        ADD_TO_STREAM_FAILS_LEFT.set(count);
     }
 
     pub(super) fn set_mark_active_stream_failures(count: usize) {
-        MARK_ACTIVE_STREAM_FAILS_LEFT.store(count, Ordering::SeqCst);
+        MARK_ACTIVE_STREAM_FAILS_LEFT.set(count);
     }
 
     pub(super) fn take_add_to_stream_failure() -> bool {
-        let mut current = ADD_TO_STREAM_FAILS_LEFT.load(Ordering::SeqCst);
-        while current > 0 {
-            match ADD_TO_STREAM_FAILS_LEFT.compare_exchange(
-                current,
-                current - 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return true,
-                Err(next) => current = next,
-            }
-        }
-        false
+        ADD_TO_STREAM_FAILS_LEFT.take()
     }
 
     pub(super) fn take_mark_active_stream_failure() -> bool {
-        let mut current = MARK_ACTIVE_STREAM_FAILS_LEFT.load(Ordering::SeqCst);
-        while current > 0 {
-            match MARK_ACTIVE_STREAM_FAILS_LEFT.compare_exchange(
-                current,
-                current - 1,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => return true,
-                Err(next) => current = next,
-            }
-        }
-        false
+        MARK_ACTIVE_STREAM_FAILS_LEFT.take()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slipstream_core::test_support::ResetOnDrop;
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot, Notify};
 
-    struct AddToStreamFailGuard;
-
-    impl Drop for AddToStreamFailGuard {
-        fn drop(&mut self) {
-            test_hooks::set_add_to_stream_failures(0);
-        }
-    }
-
-    struct MarkActiveFailGuard;
-
-    impl Drop for MarkActiveFailGuard {
-        fn drop(&mut self) {
-            test_hooks::set_mark_active_stream_failures(0);
-        }
-    }
-
     #[test]
     fn add_to_stream_fin_failure_removes_stream() {
-        let _guard = AddToStreamFailGuard;
+        let _guard = ResetOnDrop::new(|| test_hooks::set_add_to_stream_failures(0));
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let data_notify = Arc::new(Notify::new());
         let mut state = ClientState::new(command_tx, data_notify, false);
@@ -610,7 +571,7 @@ mod tests {
 
     #[test]
     fn mark_active_stream_failure_removes_stream() {
-        let _guard = MarkActiveFailGuard;
+        let _guard = ResetOnDrop::new(|| test_hooks::set_mark_active_stream_failures(0));
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .build()
