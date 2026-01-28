@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
 
+ 
+
 pub(crate) struct ServerState {
     target_addr: SocketAddr,
     streams: HashMap<StreamKey, ServerStream>,
@@ -778,6 +780,15 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     pending.store(true, Ordering::SeqCst);
                 }
                 let cnx = cnx_id as *mut picoquic_cnx_t;
+                #[cfg(test)]
+                let ret = if test_hooks::take_mark_active_stream_failure() {
+                    test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
+                } else {
+                    unsafe {
+                        picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut())
+                    }
+                };
+                #[cfg(not(test))]
                 let ret =
                     unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
                 if ret != 0 {
@@ -967,4 +978,96 @@ pub(crate) fn handle_shutdown(quic: *mut picoquic_quic_t, state: &mut ServerStat
     state.streams.clear();
     state.multi_streams.clear();
     true
+}
+
+#[cfg(test)]
+mod test_hooks {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(super) const FORCED_MARK_ACTIVE_STREAM_ERROR: i32 = 0x400 + 36;
+    pub(super) static MARK_ACTIVE_STREAM_FAILS_LEFT: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn set_mark_active_stream_failures(count: usize) {
+        MARK_ACTIVE_STREAM_FAILS_LEFT.store(count, Ordering::SeqCst);
+    }
+
+    pub(super) fn take_mark_active_stream_failure() -> bool {
+        let mut current = MARK_ACTIVE_STREAM_FAILS_LEFT.load(Ordering::SeqCst);
+        while current > 0 {
+            match MARK_ACTIVE_STREAM_FAILS_LEFT.compare_exchange(
+                current,
+                current - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(next) => current = next,
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::net::SocketAddr;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, watch};
+
+    struct MarkActiveFailGuard;
+
+    impl Drop for MarkActiveFailGuard {
+        fn drop(&mut self) {
+            test_hooks::set_mark_active_stream_failures(0);
+        }
+    }
+
+    #[test]
+    fn mark_active_stream_failure_should_remove_stream() {
+        let _guard = MarkActiveFailGuard;
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let target_addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        let mut state = ServerState::new(target_addr, command_tx, false, false);
+        let key = StreamKey {
+            cnx: 0x1,
+            stream_id: 4,
+        };
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        state.streams.insert(
+            key,
+            ServerStream {
+                write_tx: None,
+                data_rx: None,
+                send_pending: Some(Arc::new(AtomicBool::new(false))),
+                send_stash: None,
+                shutdown_tx,
+                tx_bytes: 0,
+                target_fin_pending: false,
+                close_after_flush: false,
+                pending_data: VecDeque::new(),
+                pending_fin: false,
+                fin_enqueued: false,
+                flow: FlowControlState::default(),
+            },
+        );
+
+        test_hooks::set_mark_active_stream_failures(1);
+
+        handle_command(
+            &mut state as *mut _,
+            Command::StreamClosed {
+                cnx_id: key.cnx,
+                stream_id: key.stream_id,
+            },
+        );
+
+        assert!(
+            !state.streams.contains_key(&key),
+            "stream state should be removed when mark_active_stream fails"
+        );
+    }
 }
