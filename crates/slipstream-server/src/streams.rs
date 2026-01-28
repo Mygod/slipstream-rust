@@ -767,6 +767,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 cnx: cnx_id,
                 stream_id,
             };
+            let mut remove_stream = false;
             if let Some(stream) = state.streams.get_mut(&key) {
                 stream.target_fin_pending = true;
                 stream.close_after_flush = true;
@@ -824,7 +825,11 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                         );
                         state.last_mark_active_fail_log_at = now;
                     }
+                    remove_stream = true;
                 }
+            }
+            if remove_stream {
+                shutdown_stream(state, key);
             }
         }
         Command::StreamReadable { cnx_id, stream_id } => {
