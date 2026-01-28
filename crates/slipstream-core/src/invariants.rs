@@ -1,4 +1,3 @@
-use std::fmt::Display;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct InvariantReporter {
@@ -30,15 +29,21 @@ impl InvariantReporter {
         }
     }
 
-    pub fn report<F>(&self, now_us: u64, message: impl Display, log: F)
+    pub fn report<M, L>(&self, now_us: u64, make_message: M, log: L)
     where
-        F: FnOnce(&str),
+        M: FnOnce() -> String,
+        L: FnOnce(&str),
     {
-        let message = message.to_string();
-        if self.should_log(now_us) {
-            log(&message);
+        let should_log = self.should_log(now_us);
+        let should_panic = cfg!(any(test, feature = "invariant-panic"));
+        if should_log || should_panic {
+            let message = make_message();
+            if should_log {
+                log(&message);
+            }
+            if should_panic {
+                panic!("{}", message);
+            }
         }
-        #[cfg(any(test, feature = "invariant-panic"))]
-        panic!("{}", message);
     }
 }

@@ -169,7 +169,10 @@ impl ClientState {
     }
 }
 
-fn report_invariant(message: String) {
+fn report_invariant<F>(message: F)
+where
+    F: FnOnce() -> String,
+{
     let now = unsafe { picoquic_current_time() };
     INVARIANT_REPORTER.report(now, message, |msg| error!("{}", msg));
 }
@@ -179,26 +182,30 @@ fn check_stream_invariants(state: &ClientState, stream_id: u64, context: &str) {
         return;
     };
     if stream.fin_enqueued && stream.data_rx.is_some() {
-        report_invariant(format!(
-            "client invariant violated: fin_enqueued with data_rx stream={} context={} queued={} fin_enqueued={} discarding={} tx_bytes={}",
-            stream_id,
-            context,
-            stream.flow.queued_bytes,
-            stream.fin_enqueued,
-            stream.flow.discarding,
-            stream.tx_bytes
-        ));
+        report_invariant(|| {
+            format!(
+                "client invariant violated: fin_enqueued with data_rx stream={} context={} queued={} fin_enqueued={} discarding={} tx_bytes={}",
+                stream_id,
+                context,
+                stream.flow.queued_bytes,
+                stream.fin_enqueued,
+                stream.flow.discarding,
+                stream.tx_bytes
+            )
+        });
     }
     if stream.fin_enqueued && stream.flow.queued_bytes == 0 && !stream.flow.discarding {
-        report_invariant(format!(
-            "client invariant violated: fin_enqueued with zero queue stream={} context={} queued={} fin_enqueued={} discarding={} rx_bytes={}",
-            stream_id,
-            context,
-            stream.flow.queued_bytes,
-            stream.fin_enqueued,
-            stream.flow.discarding,
-            stream.flow.rx_bytes
-        ));
+        report_invariant(|| {
+            format!(
+                "client invariant violated: fin_enqueued with zero queue stream={} context={} queued={} fin_enqueued={} discarding={} rx_bytes={}",
+                stream_id,
+                context,
+                stream.flow.queued_bytes,
+                stream.fin_enqueued,
+                stream.flow.discarding,
+                stream.flow.rx_bytes
+            )
+        });
     }
 }
 

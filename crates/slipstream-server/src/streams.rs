@@ -208,7 +208,10 @@ impl ServerState {
     }
 }
 
-fn report_invariant(message: String) {
+fn report_invariant<F>(message: F)
+where
+    F: FnOnce() -> String,
+{
     let now = unsafe { picoquic_current_time() };
     INVARIANT_REPORTER.report(now, message, |msg| error!("{}", msg));
 }
@@ -218,37 +221,43 @@ fn check_stream_invariants(state: &ServerState, key: StreamKey, context: &str) {
         return;
     };
     if stream.close_after_flush && !stream.target_fin_pending {
-        report_invariant(format!(
-            "server invariant violated: close_after_flush without target_fin_pending stream={} context={} queued={} pending_fin={} fin_enqueued={} target_fin_pending={} close_after_flush={}",
-            key.stream_id,
-            context,
-            stream.flow.queued_bytes,
-            stream.pending_fin,
-            stream.fin_enqueued,
-            stream.target_fin_pending,
-            stream.close_after_flush
-        ));
+        report_invariant(|| {
+            format!(
+                "server invariant violated: close_after_flush without target_fin_pending stream={} context={} queued={} pending_fin={} fin_enqueued={} target_fin_pending={} close_after_flush={}",
+                key.stream_id,
+                context,
+                stream.flow.queued_bytes,
+                stream.pending_fin,
+                stream.fin_enqueued,
+                stream.target_fin_pending,
+                stream.close_after_flush
+            )
+        });
     }
     if stream.pending_fin && stream.fin_enqueued {
-        report_invariant(format!(
-            "server invariant violated: pending_fin with fin_enqueued stream={} context={} queued={} pending_chunks={} target_fin_pending={} close_after_flush={}",
-            key.stream_id,
-            context,
-            stream.flow.queued_bytes,
-            stream.pending_data.len(),
-            stream.target_fin_pending,
-            stream.close_after_flush
-        ));
+        report_invariant(|| {
+            format!(
+                "server invariant violated: pending_fin with fin_enqueued stream={} context={} queued={} pending_chunks={} target_fin_pending={} close_after_flush={}",
+                key.stream_id,
+                context,
+                stream.flow.queued_bytes,
+                stream.pending_data.len(),
+                stream.target_fin_pending,
+                stream.close_after_flush
+            )
+        });
     }
     if stream.write_tx.is_some() != stream.send_pending.is_some() {
-        report_invariant(format!(
-            "server invariant violated: write_tx/send_pending mismatch stream={} context={} write_tx={} send_pending={} data_rx={}",
-            key.stream_id,
-            context,
-            stream.write_tx.is_some(),
-            stream.send_pending.is_some(),
-            stream.data_rx.is_some()
-        ));
+        report_invariant(|| {
+            format!(
+                "server invariant violated: write_tx/send_pending mismatch stream={} context={} write_tx={} send_pending={} data_rx={}",
+                key.stream_id,
+                context,
+                stream.write_tx.is_some(),
+                stream.send_pending.is_some(),
+                stream.data_rx.is_some()
+            )
+        });
     }
 }
 
