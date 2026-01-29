@@ -65,7 +65,7 @@ pub(crate) struct ClientBacklogSummary {
 
 pub(crate) struct AcceptorLimiter {
     max: AtomicUsize,
-    in_flight: AtomicUsize,
+    used: AtomicUsize,
     notify: Notify,
 }
 
@@ -73,7 +73,7 @@ impl AcceptorLimiter {
     fn new(limit: usize) -> Self {
         Self {
             max: AtomicUsize::new(limit),
-            in_flight: AtomicUsize::new(0),
+            used: AtomicUsize::new(0),
             notify: Notify::new(),
         }
     }
@@ -83,18 +83,25 @@ impl AcceptorLimiter {
         self.notify.notify_waiters();
     }
 
-    async fn acquire(self: &Arc<Self>) -> AcceptorPermit {
+    fn reset(&self) {
+        self.max.store(0, Ordering::SeqCst);
+        self.used.store(0, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    async fn reserve(self: &Arc<Self>) -> AcceptorReservation {
         loop {
             let max = self.max.load(Ordering::SeqCst);
-            let in_flight = self.in_flight.load(Ordering::SeqCst);
-            if in_flight < max {
+            let used = self.used.load(Ordering::SeqCst);
+            if used < max {
                 if self
-                    .in_flight
-                    .compare_exchange(in_flight, in_flight + 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .used
+                    .compare_exchange(used, used + 1, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    return AcceptorPermit {
+                    return AcceptorReservation {
                         limiter: Arc::clone(self),
+                        committed: false,
                     };
                 }
                 continue;
@@ -103,19 +110,28 @@ impl AcceptorLimiter {
         }
     }
 
-    fn release(&self) {
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+    fn release_reservation(&self) {
+        self.used.fetch_sub(1, Ordering::SeqCst);
         self.notify.notify_one();
     }
 }
 
-pub(crate) struct AcceptorPermit {
+pub(crate) struct AcceptorReservation {
     limiter: Arc<AcceptorLimiter>,
+    committed: bool,
 }
 
-impl Drop for AcceptorPermit {
+impl AcceptorReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for AcceptorReservation {
     fn drop(&mut self) {
-        self.limiter.release();
+        if !self.committed {
+            self.limiter.release_reservation();
+        }
     }
 }
 
@@ -239,7 +255,7 @@ impl ClientState {
         self.closing = false;
         self.multi_stream_mode = false;
         self.path_events.clear();
-        self.acceptor_backpressure.set_max(0);
+        self.acceptor_backpressure.reset();
         self.debug_enqueued_bytes = 0;
         self.debug_last_enqueue_at = 0;
     }
@@ -289,9 +305,6 @@ struct ClientStream {
     write_tx: mpsc::UnboundedSender<StreamWrite>,
     read_abort_tx: Option<oneshot::Sender<()>>,
     data_rx: Option<mpsc::Receiver<Vec<u8>>>,
-    // Held to release acceptor backpressure permits on drop.
-    #[allow(dead_code)]
-    acceptor_permit: Option<AcceptorPermit>,
     tx_bytes: u64,
     fin_enqueued: bool,
     flow: FlowControlState,
@@ -313,27 +326,12 @@ enum StreamWrite {
 }
 
 pub(crate) enum Command {
-    NewStream {
-        stream: TokioTcpStream,
-        permit: Option<AcceptorPermit>,
-    },
-    StreamData {
-        stream_id: u64,
-        data: Vec<u8>,
-    },
-    StreamClosed {
-        stream_id: u64,
-    },
-    StreamReadError {
-        stream_id: u64,
-    },
-    StreamWriteError {
-        stream_id: u64,
-    },
-    StreamWriteDrained {
-        stream_id: u64,
-        bytes: usize,
-    },
+    NewStream { stream: TokioTcpStream },
+    StreamData { stream_id: u64, data: Vec<u8> },
+    StreamClosed { stream_id: u64 },
+    StreamReadError { stream_id: u64 },
+    StreamWriteError { stream_id: u64 },
+    StreamWriteDrained { stream_id: u64, bytes: usize },
 }
 
 pub(crate) enum PathEvent {
@@ -609,21 +607,23 @@ pub(crate) fn spawn_acceptor(
 ) {
     tokio::spawn(async move {
         loop {
-            let permit = Some(acceptor_backpressure.acquire().await);
+            let reservation = acceptor_backpressure.reserve().await;
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    if command_tx
-                        .send(Command::NewStream { stream, permit })
-                        .is_err()
-                    {
+                    if command_tx.send(Command::NewStream { stream }).is_err() {
+                        drop(reservation);
                         break;
                     }
+                    reservation.commit();
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
-                    drop(permit);
+                    drop(reservation);
                     continue;
                 }
-                Err(_) => break,
+                Err(_) => {
+                    drop(reservation);
+                    break;
+                }
             }
         }
     });
@@ -695,7 +695,6 @@ mod tests {
                 write_tx,
                 read_abort_tx: Some(read_abort_tx),
                 data_rx: None,
-                acceptor_permit: None,
                 tx_bytes: 0,
                 fin_enqueued: false,
                 flow: FlowControlState::default(),
@@ -745,10 +744,7 @@ mod tests {
             handle_command(
                 std::ptr::null_mut(),
                 &mut state as *mut _,
-                Command::NewStream {
-                    stream,
-                    permit: None,
-                },
+                Command::NewStream { stream },
             );
 
             assert!(
@@ -831,7 +827,7 @@ pub(crate) fn handle_command(
 ) {
     let state = unsafe { &mut *state_ptr };
     match command {
-        Command::NewStream { stream, permit } => {
+        Command::NewStream { stream } => {
             let _ = stream.set_nodelay(true);
             let read_limit = stream_read_limit_chunks(
                 &stream,
@@ -884,7 +880,6 @@ pub(crate) fn handle_command(
                     write_tx,
                     read_abort_tx: Some(read_abort_tx),
                     data_rx: Some(data_rx),
-                    acceptor_permit: permit,
                     tx_bytes: 0,
                     fin_enqueued: false,
                     flow: FlowControlState::default(),
