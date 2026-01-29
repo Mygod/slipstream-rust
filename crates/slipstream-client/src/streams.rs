@@ -103,9 +103,14 @@ impl AcceptorLimiter {
                     .compare_exchange(used, used + 1, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
+                    let current_generation = self.generation.load(Ordering::SeqCst);
+                    if current_generation != generation {
+                        self.rollback_used();
+                        continue;
+                    }
                     return AcceptorReservation {
                         limiter: Arc::clone(self),
-                        generation,
+                        generation: current_generation,
                         committed: false,
                     };
                 }
@@ -119,6 +124,23 @@ impl AcceptorLimiter {
         if generation != self.generation.load(Ordering::SeqCst) {
             return;
         }
+        loop {
+            let used = self.used.load(Ordering::SeqCst);
+            if used == 0 {
+                return;
+            }
+            if self
+                .used
+                .compare_exchange(used, used - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.notify.notify_one();
+                return;
+            }
+        }
+    }
+
+    fn rollback_used(&self) {
         loop {
             let used = self.used.load(Ordering::SeqCst);
             if used == 0 {
