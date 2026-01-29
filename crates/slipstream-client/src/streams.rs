@@ -69,6 +69,8 @@ pub(crate) mod acceptor {
     use std::sync::Arc;
     use tokio::net::TcpListener as TokioTcpListener;
     use tokio::sync::{mpsc, Notify};
+    use tokio::time::{sleep, Duration};
+    use tracing::warn;
 
     #[derive(Clone)]
     /// Gate local TCP accepts on remote QUIC MAX_STREAMS credit.
@@ -302,9 +304,15 @@ pub(crate) mod acceptor {
                     drop(reservation);
                     true
                 }
-                Err(_) => {
+                Err(err) => {
                     drop(reservation);
-                    false
+                    warn!(
+                        "acceptor: accept failed kind={:?} err={}; keeping acceptor alive",
+                        err.kind(),
+                        err
+                    );
+                    sleep(Duration::from_millis(50)).await;
+                    true
                 }
             }
         }
