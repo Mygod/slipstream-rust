@@ -320,6 +320,7 @@ extern "C" {
         cnx: *mut picoquic_cnx_t,
         unique_path_id: u64,
     ) -> c_int;
+    pub fn slipstream_get_max_streams_bidir_remote(cnx: *mut picoquic_cnx_t) -> u64;
     pub fn slipstream_set_cc_override(alg_name: *const c_char);
     pub fn slipstream_set_default_path_mode(mode: c_int);
     pub fn slipstream_set_path_mode(cnx: *mut picoquic_cnx_t, path_id: c_int, mode: c_int);

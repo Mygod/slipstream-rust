@@ -9,7 +9,7 @@ use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
     picoquic_get_close_reasons, picoquic_get_cnx_state, picoquic_get_next_local_stream_id,
     picoquic_mark_active_stream, picoquic_provide_stream_data_buffer, picoquic_reset_stream,
-    picoquic_stop_sending, picoquic_stream_data_consumed,
+    picoquic_stop_sending, picoquic_stream_data_consumed, slipstream_get_max_streams_bidir_remote,
 };
 use slipstream_ffi::{abort_stream_bidi, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
@@ -22,7 +22,6 @@ use tracing::{debug, error, info, warn};
 const STREAM_READ_CHUNK_BYTES: usize = 4096;
 const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;
 const CLIENT_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
-const DEFAULT_ACCEPTOR_BACKPRESSURE_LIMIT: usize = 512;
 static INVARIANT_REPORTER: InvariantReporter = InvariantReporter::new(1_000_000);
 
 pub(crate) struct ClientState {
@@ -34,6 +33,8 @@ pub(crate) struct ClientState {
     data_notify: Arc<Notify>,
     path_events: Vec<PathEvent>,
     debug_streams: bool,
+    acceptor_backpressure: Arc<Semaphore>,
+    acceptor_limit: usize,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
 }
@@ -67,6 +68,8 @@ impl ClientState {
         command_tx: mpsc::UnboundedSender<Command>,
         data_notify: Arc<Notify>,
         debug_streams: bool,
+        acceptor_backpressure: Arc<Semaphore>,
+        acceptor_limit: usize,
     ) -> Self {
         Self {
             ready: false,
@@ -77,6 +80,8 @@ impl ClientState {
             data_notify,
             path_events: Vec::new(),
             debug_streams,
+            acceptor_backpressure,
+            acceptor_limit,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
         }
@@ -92,6 +97,16 @@ impl ClientState {
 
     pub(crate) fn streams_len(&self) -> usize {
         self.streams.len()
+    }
+
+    pub(crate) fn update_acceptor_limit(&mut self, cnx: *mut picoquic_cnx_t) {
+        let max_streams = unsafe { slipstream_get_max_streams_bidir_remote(cnx) };
+        let max_streams = usize::try_from(max_streams).unwrap_or(usize::MAX);
+        if max_streams > self.acceptor_limit {
+            self.acceptor_backpressure
+                .add_permits(max_streams - self.acceptor_limit);
+            self.acceptor_limit = max_streams;
+        }
     }
 
     pub(crate) fn debug_snapshot(&self) -> (u64, u64) {
@@ -301,6 +316,7 @@ pub(crate) unsafe extern "C" fn client_callback(
     match fin_or_event {
         picoquic_call_back_event_t::picoquic_callback_ready => {
             state.ready = true;
+            state.update_acceptor_limit(cnx);
             info!("Connection ready");
         }
         picoquic_call_back_event_t::picoquic_callback_stream_data
@@ -526,28 +542,25 @@ fn acceptor_backpressure_limit_override() -> Option<usize> {
     None
 }
 
-fn acceptor_backpressure_limit() -> usize {
-    acceptor_backpressure_limit_override().unwrap_or(DEFAULT_ACCEPTOR_BACKPRESSURE_LIMIT)
+fn initial_acceptor_backpressure_limit() -> usize {
+    acceptor_backpressure_limit_override().unwrap_or(0)
+}
+
+pub(crate) fn new_acceptor_backpressure() -> (Arc<Semaphore>, usize) {
+    let limit = initial_acceptor_backpressure_limit();
+    (Arc::new(Semaphore::new(limit)), limit)
 }
 
 pub(crate) fn spawn_acceptor(
     listener: TokioTcpListener,
     command_tx: mpsc::UnboundedSender<Command>,
+    acceptor_backpressure: Arc<Semaphore>,
 ) {
-    let backpressure_limit = acceptor_backpressure_limit();
-    let semaphore = if backpressure_limit == 0 {
-        None
-    } else {
-        Some(Arc::new(Semaphore::new(backpressure_limit)))
-    };
     tokio::spawn(async move {
         loop {
-            let permit = match semaphore.as_ref() {
-                Some(sem) => match sem.clone().acquire_owned().await {
-                    Ok(permit) => Some(permit),
-                    Err(_) => break,
-                },
-                None => None,
+            let permit = match acceptor_backpressure.clone().acquire_owned().await {
+                Ok(permit) => Some(permit),
+                Err(_) => break,
             };
             match listener.accept().await {
                 Ok((stream, _)) => {
@@ -622,7 +635,14 @@ mod tests {
         let _guard = ResetOnDrop::new(|| test_hooks::set_add_to_stream_failures(0));
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let data_notify = Arc::new(Notify::new());
-        let mut state = ClientState::new(command_tx, data_notify, false);
+        let (acceptor_backpressure, acceptor_limit) = new_acceptor_backpressure();
+        let mut state = ClientState::new(
+            command_tx,
+            data_notify,
+            false,
+            acceptor_backpressure,
+            acceptor_limit,
+        );
         let stream_id = 4;
         let (write_tx, _write_rx) = mpsc::unbounded_channel();
         let (read_abort_tx, _read_abort_rx) = oneshot::channel();
@@ -675,7 +695,14 @@ mod tests {
 
             let (command_tx, _command_rx) = mpsc::unbounded_channel();
             let data_notify = Arc::new(Notify::new());
-            let mut state = ClientState::new(command_tx, data_notify, false);
+            let (acceptor_backpressure, acceptor_limit) = new_acceptor_backpressure();
+            let mut state = ClientState::new(
+                command_tx,
+                data_notify,
+                false,
+                acceptor_backpressure,
+                acceptor_limit,
+            );
 
             test_hooks::set_mark_active_stream_failures(1);
 
@@ -710,7 +737,8 @@ mod tests {
                 .expect("bind listener");
             let addr = listener.local_addr().expect("listener addr");
             let (command_tx, mut command_rx) = mpsc::unbounded_channel();
-            spawn_acceptor(listener, command_tx);
+            let (acceptor_backpressure, _) = new_acceptor_backpressure();
+            spawn_acceptor(listener, command_tx, acceptor_backpressure);
 
             let mut clients = Vec::new();
             for _ in 0..3 {

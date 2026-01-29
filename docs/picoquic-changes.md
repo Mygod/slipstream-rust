@@ -100,6 +100,12 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
   - Why: DNS fallback must dequeue and route queued stateless packets (retry, server busy,
     stateless reset) to the matching peer without misrouting.
 
+- `cnx->max_stream_id_bidir_remote` and `cnx->remote_parameters_received`
+  - Wrapper: `slipstream_get_max_streams_bidir_remote` in
+    `crates/slipstream-ffi/cc/slipstream_poll.c`.
+  - Why: The client gates TCP accepts on the negotiated MAX_STREAMS limit to avoid
+    creating local connections that cannot send on QUIC yet.
+
 ## Public picoquic APIs relied on by slipstream
 
 - `picoquic_get_pacing_rate`
