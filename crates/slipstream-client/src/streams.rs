@@ -16,12 +16,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, error, info, warn};
 
 const STREAM_READ_CHUNK_BYTES: usize = 4096;
 const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;
 const CLIENT_WRITE_COALESCE_DEFAULT_BYTES: usize = 256 * 1024;
+const DEFAULT_ACCEPTOR_BACKPRESSURE_LIMIT: usize = 512;
 static INVARIANT_REPORTER: InvariantReporter = InvariantReporter::new(1_000_000);
 
 pub(crate) struct ClientState {
@@ -222,6 +223,9 @@ struct ClientStream {
     write_tx: mpsc::UnboundedSender<StreamWrite>,
     read_abort_tx: Option<oneshot::Sender<()>>,
     data_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    // Held to release acceptor backpressure permits on drop.
+    #[allow(dead_code)]
+    acceptor_permit: Option<OwnedSemaphorePermit>,
     tx_bytes: u64,
     fin_enqueued: bool,
     flow: FlowControlState,
@@ -243,12 +247,27 @@ enum StreamWrite {
 }
 
 pub(crate) enum Command {
-    NewStream(TokioTcpStream),
-    StreamData { stream_id: u64, data: Vec<u8> },
-    StreamClosed { stream_id: u64 },
-    StreamReadError { stream_id: u64 },
-    StreamWriteError { stream_id: u64 },
-    StreamWriteDrained { stream_id: u64, bytes: usize },
+    NewStream {
+        stream: TokioTcpStream,
+        permit: Option<OwnedSemaphorePermit>,
+    },
+    StreamData {
+        stream_id: u64,
+        data: Vec<u8>,
+    },
+    StreamClosed {
+        stream_id: u64,
+    },
+    StreamReadError {
+        stream_id: u64,
+    },
+    StreamWriteError {
+        stream_id: u64,
+    },
+    StreamWriteDrained {
+        stream_id: u64,
+        bytes: usize,
+    },
 }
 
 pub(crate) enum PathEvent {
@@ -497,19 +516,52 @@ fn handle_stream_data(
     check_stream_invariants(state, stream_id, "handle_stream_data");
 }
 
+#[cfg(test)]
+fn acceptor_backpressure_limit_override() -> Option<usize> {
+    test_hooks::acceptor_backpressure_limit()
+}
+
+#[cfg(not(test))]
+fn acceptor_backpressure_limit_override() -> Option<usize> {
+    None
+}
+
+fn acceptor_backpressure_limit() -> usize {
+    acceptor_backpressure_limit_override().unwrap_or(DEFAULT_ACCEPTOR_BACKPRESSURE_LIMIT)
+}
+
 pub(crate) fn spawn_acceptor(
     listener: TokioTcpListener,
     command_tx: mpsc::UnboundedSender<Command>,
 ) {
+    let backpressure_limit = acceptor_backpressure_limit();
+    let semaphore = if backpressure_limit == 0 {
+        None
+    } else {
+        Some(Arc::new(Semaphore::new(backpressure_limit)))
+    };
     tokio::spawn(async move {
         loop {
+            let permit = match semaphore.as_ref() {
+                Some(sem) => match sem.clone().acquire_owned().await {
+                    Ok(permit) => Some(permit),
+                    Err(_) => break,
+                },
+                None => None,
+            };
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    if command_tx.send(Command::NewStream(stream)).is_err() {
+                    if command_tx
+                        .send(Command::NewStream { stream, permit })
+                        .is_err()
+                    {
                         break;
                     }
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                    drop(permit);
+                    continue;
+                }
                 Err(_) => break,
             }
         }
@@ -546,6 +598,15 @@ mod test_hooks {
     pub(super) fn set_acceptor_backpressure_limit(limit: usize) {
         ACCEPTOR_BACKPRESSURE_LIMIT.store(limit, Ordering::SeqCst);
     }
+
+    pub(super) fn acceptor_backpressure_limit() -> Option<usize> {
+        let limit = ACCEPTOR_BACKPRESSURE_LIMIT.load(Ordering::SeqCst);
+        if limit == 0 {
+            None
+        } else {
+            Some(limit)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -572,6 +633,7 @@ mod tests {
                 write_tx,
                 read_abort_tx: Some(read_abort_tx),
                 data_rx: None,
+                acceptor_permit: None,
                 tx_bytes: 0,
                 fin_enqueued: false,
                 flow: FlowControlState::default(),
@@ -620,7 +682,10 @@ mod tests {
             handle_command(
                 std::ptr::null_mut(),
                 &mut state as *mut _,
-                Command::NewStream(stream),
+                Command::NewStream {
+                    stream,
+                    permit: None,
+                },
             );
 
             assert!(
@@ -702,7 +767,7 @@ pub(crate) fn handle_command(
 ) {
     let state = unsafe { &mut *state_ptr };
     match command {
-        Command::NewStream(stream) => {
+        Command::NewStream { stream, permit } => {
             let _ = stream.set_nodelay(true);
             let read_limit = stream_read_limit_chunks(
                 &stream,
@@ -755,6 +820,7 @@ pub(crate) fn handle_command(
                     write_tx,
                     read_abort_tx: Some(read_abort_tx),
                     data_rx: Some(data_rx),
+                    acceptor_permit: permit,
                     tx_bytes: 0,
                     fin_enqueued: false,
                     flow: FlowControlState::default(),

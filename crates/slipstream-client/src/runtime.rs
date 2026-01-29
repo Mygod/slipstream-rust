@@ -61,7 +61,7 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
     let mut dropped = 0usize;
     while let Ok(command) = command_rx.try_recv() {
         dropped += 1;
-        if let Command::NewStream(stream) = command {
+        if let Command::NewStream { stream, .. } = command {
             drop(stream);
         }
     }
