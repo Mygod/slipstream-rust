@@ -124,20 +124,25 @@ pub(crate) fn compile_cc(
     let mut cmd = Command::new(cc);
 
     if is_windows && !is_gcc {
-        // MSVC: cl.exe /c /Fo:output source.c /I include_dir
+        // MSVC: cl.exe /c /Fo:output source.c /I include_dir /D_WINDOWS [/D_WINDOWS64]
         cmd.arg("/c")
             .arg(format!("/Fo:{}", output.display()))
             .arg(source)
-            .arg(format!("/I{}", picoquic_include_dir.display()));
+            .arg("/D_WINDOWS");
+        if target.contains("x86_64") {
+            cmd.arg("/D_WINDOWS64");
+        }
+        cmd.arg(format!("/I{}", picoquic_include_dir.display()));
     } else {
-        // GCC/Clang: cc -c -fPIC -o output source.c -I include_dir
-        cmd.arg("-c")
-            .arg("-fPIC")
-            .arg("-o")
-            .arg(output)
-            .arg(source)
-            .arg("-I")
-            .arg(picoquic_include_dir);
+        // GCC/Clang: cc -c -fPIC -o output source.c -I include_dir [-D_WINDOWS [-D_WINDOWS64]]
+        cmd.arg("-c").arg("-fPIC").arg("-o").arg(output).arg(source);
+        if is_windows {
+            cmd.arg("-D_WINDOWS");
+            if target.contains("x86_64") {
+                cmd.arg("-D_WINDOWS64");
+            }
+        }
+        cmd.arg("-I").arg(picoquic_include_dir);
     }
 
     let status = cmd.status()?;
@@ -160,16 +165,26 @@ pub(crate) fn compile_cc_with_includes(
     let mut cmd = Command::new(cc);
 
     if is_windows && !is_gcc {
-        // MSVC: cl.exe /c /Fo:output source.c /I include_dir1 /I include_dir2
+        // MSVC: cl.exe /c /Fo:output source.c /D_WINDOWS [/D_WINDOWS64] /I dir1 /I dir2
         cmd.arg("/c")
             .arg(format!("/Fo:{}", output.display()))
-            .arg(source);
+            .arg(source)
+            .arg("/D_WINDOWS");
+        if target.contains("x86_64") {
+            cmd.arg("/D_WINDOWS64");
+        }
         for dir in include_dirs {
             cmd.arg(format!("/I{}", dir.display()));
         }
     } else {
-        // GCC/Clang: cc -c -fPIC -o output source.c -I include_dir1 -I include_dir2
+        // GCC/Clang: cc -c -fPIC -o output source.c [-D_WINDOWS [-D_WINDOWS64]] -I dir1 -I dir2
         cmd.arg("-c").arg("-fPIC").arg("-o").arg(output).arg(source);
+        if is_windows {
+            cmd.arg("-D_WINDOWS");
+            if target.contains("x86_64") {
+                cmd.arg("-D_WINDOWS64");
+            }
+        }
         for dir in include_dirs {
             cmd.arg("-I").arg(dir);
         }
