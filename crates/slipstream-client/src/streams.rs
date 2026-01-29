@@ -106,13 +106,14 @@ pub(crate) mod acceptor {
             self.limiter.reset();
         }
 
-        pub(crate) fn is_generation_current(&self, generation: usize) -> bool {
-            self.limiter.generation() == generation
-        }
-
         #[cfg(test)]
         pub(crate) fn set_test_limit(limit: usize) {
             TEST_ACCEPTOR_LIMIT.store(limit, Ordering::SeqCst);
+        }
+
+        #[cfg(test)]
+        pub(crate) async fn reserve_for_test(&self) -> AcceptorReservation {
+            self.limiter.reserve().await
         }
     }
 
@@ -237,19 +238,23 @@ pub(crate) mod acceptor {
         }
     }
 
-    struct AcceptorReservation {
+    pub(crate) struct AcceptorReservation {
         limiter: Arc<AcceptorLimiter>,
         generation: usize,
         committed: bool,
     }
 
     impl AcceptorReservation {
-        fn commit_if_fresh(mut self) -> Option<usize> {
-            if self.limiter.generation() != self.generation {
-                return None;
+        pub(crate) fn is_fresh(&self) -> bool {
+            self.limiter.generation() == self.generation
+        }
+
+        pub(crate) fn commit(mut self) -> bool {
+            if !self.is_fresh() {
+                return false;
             }
             self.committed = true;
-            Some(self.generation)
+            true
         }
     }
 
@@ -278,12 +283,15 @@ pub(crate) mod acceptor {
             let reservation = self.limiter.reserve().await;
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let Some(generation) = reservation.commit_if_fresh() else {
+                    if !reservation.is_fresh() {
                         drop(stream);
                         return true;
                     };
                     if command_tx
-                        .send(Command::NewStream { stream, generation })
+                        .send(Command::NewStream {
+                            stream,
+                            reservation,
+                        })
                         .is_err()
                     {
                         return false;
@@ -530,7 +538,7 @@ enum StreamWrite {
 pub(crate) enum Command {
     NewStream {
         stream: TokioTcpStream,
-        generation: usize,
+        reservation: acceptor::AcceptorReservation,
     },
     StreamData {
         stream_id: u64,
@@ -873,6 +881,8 @@ mod tests {
     #[test]
     fn mark_active_stream_failure_removes_stream() {
         let _guard = ResetOnDrop::new(|| test_hooks::set_mark_active_stream_failures(0));
+        let _limit_guard = ResetOnDrop::new(|| acceptor::ClientAcceptor::set_test_limit(0));
+        acceptor::ClientAcceptor::set_test_limit(1);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .build()
@@ -892,6 +902,7 @@ mod tests {
             let (command_tx, _command_rx) = mpsc::unbounded_channel();
             let data_notify = Arc::new(Notify::new());
             let acceptor = acceptor::ClientAcceptor::new();
+            let reservation = acceptor.reserve_for_test().await;
             let mut state = ClientState::new(command_tx, data_notify, false, acceptor);
 
             test_hooks::set_mark_active_stream_failures(1);
@@ -901,7 +912,7 @@ mod tests {
                 &mut state as *mut _,
                 Command::NewStream {
                     stream,
-                    generation: 0,
+                    reservation,
                 },
             );
 
@@ -985,19 +996,15 @@ pub(crate) fn handle_command(
 ) {
     let state = unsafe { &mut *state_ptr };
     match command {
-        Command::NewStream { stream, generation } => {
-            if !state.acceptor.is_generation_current(generation) {
+        Command::NewStream {
+            stream,
+            reservation,
+        } => {
+            if !reservation.is_fresh() {
                 drop(stream);
                 return;
             }
             let _ = stream.set_nodelay(true);
-            let read_limit = stream_read_limit_chunks(
-                &stream,
-                DEFAULT_TCP_RCVBUF_BYTES,
-                STREAM_READ_CHUNK_BYTES,
-            );
-            let (data_tx, data_rx) = mpsc::channel(read_limit);
-            let data_notify = state.data_notify.clone();
             #[cfg(test)]
             let forced_failure = test_hooks::take_mark_active_stream_failure();
             #[cfg(not(test))]
@@ -1014,6 +1021,42 @@ pub(crate) fn handle_command(
             };
             #[cfg(not(test))]
             let stream_id = unsafe { picoquic_get_next_local_stream_id(cnx, 0) };
+            #[cfg(test)]
+            let ret = if forced_failure {
+                test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
+            } else {
+                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
+            };
+            #[cfg(not(test))]
+            let ret =
+                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
+            if ret != 0 {
+                warn!(
+                    "stream {}: mark_active_stream failed ret={}",
+                    stream_id, ret
+                );
+                if !forced_failure {
+                    unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                }
+                return;
+            }
+            if !reservation.commit() {
+                warn!(
+                    "stream {}: acceptor generation changed during activation",
+                    stream_id
+                );
+                if !forced_failure {
+                    unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                }
+                return;
+            }
+            let read_limit = stream_read_limit_chunks(
+                &stream,
+                DEFAULT_TCP_RCVBUF_BYTES,
+                STREAM_READ_CHUNK_BYTES,
+            );
+            let (data_tx, data_rx) = mpsc::channel(read_limit);
+            let data_notify = state.data_notify.clone();
             let send_buffer_bytes = tcp_send_buffer_bytes(&stream)
                 .filter(|bytes| *bytes > 0)
                 .unwrap_or(CLIENT_WRITE_COALESCE_DEFAULT_BYTES);
@@ -1021,6 +1064,17 @@ pub(crate) fn handle_command(
             let (write_tx, write_rx) = mpsc::unbounded_channel();
             let command_tx = state.command_tx.clone();
             let (read_abort_tx, read_abort_rx) = oneshot::channel();
+            state.streams.insert(
+                stream_id,
+                ClientStream {
+                    write_tx,
+                    read_abort_tx: Some(read_abort_tx),
+                    data_rx: Some(data_rx),
+                    tx_bytes: 0,
+                    fin_enqueued: false,
+                    flow: FlowControlState::default(),
+                },
+            );
             spawn_client_reader(
                 stream_id,
                 read_half,
@@ -1035,17 +1089,6 @@ pub(crate) fn handle_command(
                 write_rx,
                 command_tx,
                 send_buffer_bytes,
-            );
-            state.streams.insert(
-                stream_id,
-                ClientStream {
-                    write_tx,
-                    read_abort_tx: Some(read_abort_tx),
-                    data_rx: Some(data_rx),
-                    tx_bytes: 0,
-                    fin_enqueued: false,
-                    flow: FlowControlState::default(),
-                },
             );
             if !state.multi_stream_mode && state.streams.len() > 1 {
                 state.multi_stream_mode = true;
@@ -1069,31 +1112,6 @@ pub(crate) fn handle_command(
                         );
                     },
                 );
-            }
-            #[cfg(test)]
-            let ret = if forced_failure {
-                test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
-            } else {
-                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
-            };
-            #[cfg(not(test))]
-            let ret =
-                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
-            if ret != 0 {
-                warn!(
-                    "stream {}: mark_active_stream failed ret={}",
-                    stream_id, ret
-                );
-                if let Some(mut stream) = state.streams.remove(&stream_id) {
-                    if let Some(read_abort_tx) = stream.read_abort_tx.take() {
-                        let _ = read_abort_tx.send(());
-                    }
-                    let _ = stream.write_tx.send(StreamWrite::Fin);
-                }
-                if !forced_failure {
-                    unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
-                }
-                return;
             }
             if state.debug_streams {
                 debug!("stream {}: accepted", stream_id);
