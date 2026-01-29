@@ -15,8 +15,8 @@ use crate::error::ClientError;
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
 use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
-    client_callback, drain_commands, drain_stream_data, handle_command, new_acceptor_backpressure,
-    spawn_acceptor, ClientState, Command,
+    acceptor::ClientAcceptor, client_callback, drain_commands, drain_stream_data, handle_command,
+    ClientState, Command,
 };
 use slipstream_core::{net::is_transient_udp_error, normalize_dual_stack_addr};
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
@@ -61,7 +61,7 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
     let mut dropped = 0usize;
     while let Ok(command) = command_rx.try_recv() {
         dropped += 1;
-        if let Command::NewStream { stream } = command {
+        if let Command::NewStream { stream, .. } = command {
             drop(stream);
         }
     }
@@ -75,7 +75,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let data_notify = Arc::new(Notify::new());
-    let acceptor_backpressure = new_acceptor_backpressure();
+    let acceptor = ClientAcceptor::new();
     let debug_streams = config.debug_streams;
     let tcp_host = config.tcp_listen_host;
     let tcp_port = config.tcp_listen_port;
@@ -105,7 +105,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             }
         }
     };
-    spawn_acceptor(listener, command_tx.clone(), acceptor_backpressure.clone());
+    acceptor.spawn(listener, command_tx.clone());
     info!("Listening on TCP port {} (host {})", tcp_port, bound_host);
 
     let alpn = CString::new(SLIPSTREAM_ALPN)
@@ -123,7 +123,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         command_tx,
         data_notify.clone(),
         debug_streams,
-        acceptor_backpressure,
+        acceptor,
     ));
     let state_ptr: *mut ClientState = &mut *state;
     let _state = state;
