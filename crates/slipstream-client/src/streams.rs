@@ -13,10 +13,11 @@ use slipstream_ffi::picoquic::{
 };
 use slipstream_ffi::{abort_stream_bidi, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
-use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{debug, error, info, warn};
 
 const STREAM_READ_CHUNK_BYTES: usize = 4096;
@@ -33,8 +34,7 @@ pub(crate) struct ClientState {
     data_notify: Arc<Notify>,
     path_events: Vec<PathEvent>,
     debug_streams: bool,
-    acceptor_backpressure: Arc<Semaphore>,
-    acceptor_limit: usize,
+    acceptor_backpressure: Arc<AcceptorLimiter>,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
 }
@@ -63,13 +63,68 @@ pub(crate) struct ClientBacklogSummary {
     pub(crate) tx_bytes: u64,
 }
 
+pub(crate) struct AcceptorLimiter {
+    max: AtomicUsize,
+    in_flight: AtomicUsize,
+    notify: Notify,
+}
+
+impl AcceptorLimiter {
+    fn new(limit: usize) -> Self {
+        Self {
+            max: AtomicUsize::new(limit),
+            in_flight: AtomicUsize::new(0),
+            notify: Notify::new(),
+        }
+    }
+
+    fn set_max(&self, limit: usize) {
+        self.max.store(limit, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    async fn acquire(self: &Arc<Self>) -> AcceptorPermit {
+        loop {
+            let max = self.max.load(Ordering::SeqCst);
+            let in_flight = self.in_flight.load(Ordering::SeqCst);
+            if in_flight < max {
+                if self
+                    .in_flight
+                    .compare_exchange(in_flight, in_flight + 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    return AcceptorPermit {
+                        limiter: Arc::clone(self),
+                    };
+                }
+                continue;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    fn release(&self) {
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+}
+
+pub(crate) struct AcceptorPermit {
+    limiter: Arc<AcceptorLimiter>,
+}
+
+impl Drop for AcceptorPermit {
+    fn drop(&mut self) {
+        self.limiter.release();
+    }
+}
+
 impl ClientState {
     pub(crate) fn new(
         command_tx: mpsc::UnboundedSender<Command>,
         data_notify: Arc<Notify>,
         debug_streams: bool,
-        acceptor_backpressure: Arc<Semaphore>,
-        acceptor_limit: usize,
+        acceptor_backpressure: Arc<AcceptorLimiter>,
     ) -> Self {
         Self {
             ready: false,
@@ -81,7 +136,6 @@ impl ClientState {
             path_events: Vec::new(),
             debug_streams,
             acceptor_backpressure,
-            acceptor_limit,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
         }
@@ -102,11 +156,7 @@ impl ClientState {
     pub(crate) fn update_acceptor_limit(&mut self, cnx: *mut picoquic_cnx_t) {
         let max_streams = unsafe { slipstream_get_max_streams_bidir_remote(cnx) };
         let max_streams = usize::try_from(max_streams).unwrap_or(usize::MAX);
-        if max_streams > self.acceptor_limit {
-            self.acceptor_backpressure
-                .add_permits(max_streams - self.acceptor_limit);
-            self.acceptor_limit = max_streams;
-        }
+        self.acceptor_backpressure.set_max(max_streams);
     }
 
     pub(crate) fn debug_snapshot(&self) -> (u64, u64) {
@@ -189,6 +239,7 @@ impl ClientState {
         self.closing = false;
         self.multi_stream_mode = false;
         self.path_events.clear();
+        self.acceptor_backpressure.set_max(0);
         self.debug_enqueued_bytes = 0;
         self.debug_last_enqueue_at = 0;
     }
@@ -240,7 +291,7 @@ struct ClientStream {
     data_rx: Option<mpsc::Receiver<Vec<u8>>>,
     // Held to release acceptor backpressure permits on drop.
     #[allow(dead_code)]
-    acceptor_permit: Option<OwnedSemaphorePermit>,
+    acceptor_permit: Option<AcceptorPermit>,
     tx_bytes: u64,
     fin_enqueued: bool,
     flow: FlowControlState,
@@ -264,7 +315,7 @@ enum StreamWrite {
 pub(crate) enum Command {
     NewStream {
         stream: TokioTcpStream,
-        permit: Option<OwnedSemaphorePermit>,
+        permit: Option<AcceptorPermit>,
     },
     StreamData {
         stream_id: u64,
@@ -546,22 +597,19 @@ fn initial_acceptor_backpressure_limit() -> usize {
     acceptor_backpressure_limit_override().unwrap_or(0)
 }
 
-pub(crate) fn new_acceptor_backpressure() -> (Arc<Semaphore>, usize) {
+pub(crate) fn new_acceptor_backpressure() -> Arc<AcceptorLimiter> {
     let limit = initial_acceptor_backpressure_limit();
-    (Arc::new(Semaphore::new(limit)), limit)
+    Arc::new(AcceptorLimiter::new(limit))
 }
 
 pub(crate) fn spawn_acceptor(
     listener: TokioTcpListener,
     command_tx: mpsc::UnboundedSender<Command>,
-    acceptor_backpressure: Arc<Semaphore>,
+    acceptor_backpressure: Arc<AcceptorLimiter>,
 ) {
     tokio::spawn(async move {
         loop {
-            let permit = match acceptor_backpressure.clone().acquire_owned().await {
-                Ok(permit) => Some(permit),
-                Err(_) => break,
-            };
+            let permit = Some(acceptor_backpressure.acquire().await);
             match listener.accept().await {
                 Ok((stream, _)) => {
                     if command_tx
@@ -635,14 +683,8 @@ mod tests {
         let _guard = ResetOnDrop::new(|| test_hooks::set_add_to_stream_failures(0));
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let data_notify = Arc::new(Notify::new());
-        let (acceptor_backpressure, acceptor_limit) = new_acceptor_backpressure();
-        let mut state = ClientState::new(
-            command_tx,
-            data_notify,
-            false,
-            acceptor_backpressure,
-            acceptor_limit,
-        );
+        let acceptor_backpressure = new_acceptor_backpressure();
+        let mut state = ClientState::new(command_tx, data_notify, false, acceptor_backpressure);
         let stream_id = 4;
         let (write_tx, _write_rx) = mpsc::unbounded_channel();
         let (read_abort_tx, _read_abort_rx) = oneshot::channel();
@@ -695,14 +737,8 @@ mod tests {
 
             let (command_tx, _command_rx) = mpsc::unbounded_channel();
             let data_notify = Arc::new(Notify::new());
-            let (acceptor_backpressure, acceptor_limit) = new_acceptor_backpressure();
-            let mut state = ClientState::new(
-                command_tx,
-                data_notify,
-                false,
-                acceptor_backpressure,
-                acceptor_limit,
-            );
+            let acceptor_backpressure = new_acceptor_backpressure();
+            let mut state = ClientState::new(command_tx, data_notify, false, acceptor_backpressure);
 
             test_hooks::set_mark_active_stream_failures(1);
 
@@ -737,7 +773,7 @@ mod tests {
                 .expect("bind listener");
             let addr = listener.local_addr().expect("listener addr");
             let (command_tx, mut command_rx) = mpsc::unbounded_channel();
-            let (acceptor_backpressure, _) = new_acceptor_backpressure();
+            let acceptor_backpressure = new_acceptor_backpressure();
             spawn_acceptor(listener, command_tx, acceptor_backpressure);
 
             let mut clients = Vec::new();

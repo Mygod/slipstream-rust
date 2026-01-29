@@ -75,7 +75,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let data_notify = Arc::new(Notify::new());
-    let (acceptor_backpressure, acceptor_limit) = new_acceptor_backpressure();
+    let acceptor_backpressure = new_acceptor_backpressure();
     let debug_streams = config.debug_streams;
     let tcp_host = config.tcp_listen_host;
     let tcp_port = config.tcp_listen_port;
@@ -124,7 +124,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         data_notify.clone(),
         debug_streams,
         acceptor_backpressure,
-        acceptor_limit,
     ));
     let state_ptr: *mut ClientState = &mut *state;
     let _state = state;
