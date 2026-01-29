@@ -519,11 +519,13 @@ pub(crate) fn spawn_acceptor(
 #[cfg(test)]
 mod test_hooks {
     use slipstream_core::test_support::FailureCounter;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     pub(super) const FORCED_ADD_TO_STREAM_ERROR: i32 = -1;
     pub(super) const FORCED_MARK_ACTIVE_STREAM_ERROR: i32 = 0x400 + 36;
     pub(super) static ADD_TO_STREAM_FAILS_LEFT: FailureCounter = FailureCounter::new();
     pub(super) static MARK_ACTIVE_STREAM_FAILS_LEFT: FailureCounter = FailureCounter::new();
+    pub(super) static ACCEPTOR_BACKPRESSURE_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
     pub(super) fn set_add_to_stream_failures(count: usize) {
         ADD_TO_STREAM_FAILS_LEFT.set(count);
@@ -540,6 +542,10 @@ mod test_hooks {
     pub(super) fn take_mark_active_stream_failure() -> bool {
         MARK_ACTIVE_STREAM_FAILS_LEFT.take()
     }
+
+    pub(super) fn set_acceptor_backpressure_limit(limit: usize) {
+        ACCEPTOR_BACKPRESSURE_LIMIT.store(limit, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
@@ -548,6 +554,7 @@ mod tests {
     use slipstream_core::test_support::ResetOnDrop;
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot, Notify};
+    use tokio::time::{sleep, timeout, Duration};
 
     #[test]
     fn add_to_stream_fin_failure_removes_stream() {
@@ -620,6 +627,45 @@ mod tests {
                 state.streams.is_empty(),
                 "stream state should be removed when mark_active_stream fails"
             );
+        });
+    }
+
+    #[test]
+    fn acceptor_backpressure_blocks_new_connections() {
+        let _guard = ResetOnDrop::new(|| test_hooks::set_acceptor_backpressure_limit(0));
+        test_hooks::set_acceptor_backpressure_limit(1);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+        rt.block_on(async {
+            let listener = TokioTcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+            spawn_acceptor(listener, command_tx);
+
+            let mut clients = Vec::new();
+            for _ in 0..3 {
+                clients.push(TokioTcpStream::connect(addr).await.expect("connect"));
+            }
+
+            sleep(Duration::from_millis(50)).await;
+
+            let _first = timeout(Duration::from_secs(1), command_rx.recv())
+                .await
+                .expect("first accept")
+                .expect("first command");
+            let second = timeout(Duration::from_millis(200), command_rx.recv()).await;
+
+            assert!(
+                second.is_err(),
+                "expected acceptor backpressure to block additional accepts while at limit"
+            );
+
+            drop(clients);
         });
     }
 }
