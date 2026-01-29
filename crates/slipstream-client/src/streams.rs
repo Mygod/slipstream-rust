@@ -66,6 +66,7 @@ pub(crate) struct ClientBacklogSummary {
 pub(crate) struct AcceptorLimiter {
     max: AtomicUsize,
     used: AtomicUsize,
+    generation: AtomicUsize,
     notify: Notify,
 }
 
@@ -74,6 +75,7 @@ impl AcceptorLimiter {
         Self {
             max: AtomicUsize::new(limit),
             used: AtomicUsize::new(0),
+            generation: AtomicUsize::new(0),
             notify: Notify::new(),
         }
     }
@@ -84,6 +86,7 @@ impl AcceptorLimiter {
     }
 
     fn reset(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.max.store(0, Ordering::SeqCst);
         self.used.store(0, Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -94,6 +97,7 @@ impl AcceptorLimiter {
             let max = self.max.load(Ordering::SeqCst);
             let used = self.used.load(Ordering::SeqCst);
             if used < max {
+                let generation = self.generation.load(Ordering::SeqCst);
                 if self
                     .used
                     .compare_exchange(used, used + 1, Ordering::SeqCst, Ordering::SeqCst)
@@ -101,6 +105,7 @@ impl AcceptorLimiter {
                 {
                     return AcceptorReservation {
                         limiter: Arc::clone(self),
+                        generation,
                         committed: false,
                     };
                 }
@@ -110,14 +115,30 @@ impl AcceptorLimiter {
         }
     }
 
-    fn release_reservation(&self) {
-        self.used.fetch_sub(1, Ordering::SeqCst);
-        self.notify.notify_one();
+    fn release_reservation(&self, generation: usize) {
+        if generation != self.generation.load(Ordering::SeqCst) {
+            return;
+        }
+        loop {
+            let used = self.used.load(Ordering::SeqCst);
+            if used == 0 {
+                return;
+            }
+            if self
+                .used
+                .compare_exchange(used, used - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                self.notify.notify_one();
+                return;
+            }
+        }
     }
 }
 
 pub(crate) struct AcceptorReservation {
     limiter: Arc<AcceptorLimiter>,
+    generation: usize,
     committed: bool,
 }
 
@@ -130,7 +151,7 @@ impl AcceptorReservation {
 impl Drop for AcceptorReservation {
     fn drop(&mut self) {
         if !self.committed {
-            self.limiter.release_reservation();
+            self.limiter.release_reservation(self.generation);
         }
     }
 }
