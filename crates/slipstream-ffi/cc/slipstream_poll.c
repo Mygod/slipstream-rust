@@ -67,3 +67,11 @@ int slipstream_get_path_id_from_unique(picoquic_cnx_t *cnx, uint64_t unique_path
     }
     return path_id;
 }
+
+uint64_t slipstream_get_max_streams_bidir_remote(picoquic_cnx_t *cnx) {
+    if (cnx == NULL || cnx->remote_parameters_received == 0) {
+        return 0;
+    }
+    /* STREAM_RANK_FROM_ID is 1-based and returns stream count, not a zero-based index. */
+    return STREAM_RANK_FROM_ID(cnx->max_stream_id_bidir_remote);
+}

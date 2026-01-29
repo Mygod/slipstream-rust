@@ -15,7 +15,7 @@ use slipstream_ffi::{abort_stream_bidi, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener as TokioTcpListener, TcpStream as TokioTcpStream};
+use tokio::net::TcpStream as TokioTcpStream;
 use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{debug, error, info, warn};
 
@@ -33,6 +33,7 @@ pub(crate) struct ClientState {
     data_notify: Arc<Notify>,
     path_events: Vec<PathEvent>,
     debug_streams: bool,
+    acceptor: acceptor::ClientAcceptor,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
 }
@@ -61,11 +62,297 @@ pub(crate) struct ClientBacklogSummary {
     pub(crate) tx_bytes: u64,
 }
 
+pub(crate) mod acceptor {
+    use super::Command;
+    use slipstream_ffi::picoquic::{picoquic_cnx_t, slipstream_get_max_streams_bidir_remote};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::net::TcpListener as TokioTcpListener;
+    use tokio::sync::{mpsc, Notify};
+
+    #[derive(Clone)]
+    /// Gate local TCP accepts on remote QUIC MAX_STREAMS credit.
+    ///
+    /// Credit is monotonic per connection: it only increases when the peer
+    /// sends MAX_STREAMS, and resets on reconnect. Generation checks ensure
+    /// stale accepts never leak across reconnect boundaries.
+    pub(crate) struct ClientAcceptor {
+        limiter: Arc<AcceptorLimiter>,
+    }
+
+    impl ClientAcceptor {
+        pub(crate) fn new() -> Self {
+            let limit = initial_acceptor_limit();
+            Self {
+                limiter: Arc::new(AcceptorLimiter::new(limit)),
+            }
+        }
+
+        pub(crate) fn spawn(
+            &self,
+            listener: TokioTcpListener,
+            command_tx: mpsc::UnboundedSender<Command>,
+        ) {
+            TcpAcceptor::new(listener, command_tx, Arc::clone(&self.limiter)).spawn();
+        }
+
+        pub(crate) fn update_limit(&self, cnx: *mut picoquic_cnx_t) {
+            let max_streams = unsafe { slipstream_get_max_streams_bidir_remote(cnx) };
+            let max_streams = usize::try_from(max_streams).unwrap_or(usize::MAX);
+            self.limiter.set_max(max_streams);
+        }
+
+        pub(crate) fn reset(&self) {
+            self.limiter.reset();
+        }
+
+        #[cfg(test)]
+        pub(crate) fn set_test_limit(limit: usize) {
+            TEST_ACCEPTOR_LIMIT.store(limit, Ordering::SeqCst);
+        }
+
+        #[cfg(test)]
+        pub(crate) async fn reserve_for_test(&self) -> AcceptorReservation {
+            self.limiter.reserve().await
+        }
+    }
+
+    pub(super) fn initial_acceptor_limit() -> usize {
+        initial_acceptor_limit_override().unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    static TEST_ACCEPTOR_LIMIT: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(test)]
+    fn initial_acceptor_limit_override() -> Option<usize> {
+        let limit = TEST_ACCEPTOR_LIMIT.load(Ordering::SeqCst);
+        if limit == 0 {
+            None
+        } else {
+            Some(limit)
+        }
+    }
+
+    #[cfg(not(test))]
+    fn initial_acceptor_limit_override() -> Option<usize> {
+        None
+    }
+
+    struct AcceptorLimiter {
+        max: AtomicUsize,
+        used: AtomicUsize,
+        generation: AtomicUsize,
+        notify: Notify,
+    }
+
+    impl AcceptorLimiter {
+        fn new(limit: usize) -> Self {
+            Self {
+                max: AtomicUsize::new(limit),
+                used: AtomicUsize::new(0),
+                generation: AtomicUsize::new(0),
+                notify: Notify::new(),
+            }
+        }
+
+        fn set_max(&self, limit: usize) {
+            self.max.store(limit, Ordering::SeqCst);
+            self.notify.notify_waiters();
+        }
+
+        fn generation(&self) -> usize {
+            self.generation.load(Ordering::SeqCst)
+        }
+
+        fn reset(&self) {
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.max.store(0, Ordering::SeqCst);
+            self.used.store(0, Ordering::SeqCst);
+            self.notify.notify_waiters();
+        }
+
+        async fn reserve(self: &Arc<Self>) -> AcceptorReservation {
+            loop {
+                let max = self.max.load(Ordering::SeqCst);
+                let used = self.used.load(Ordering::SeqCst);
+                if used < max {
+                    let generation = self.generation.load(Ordering::SeqCst);
+                    if self
+                        .used
+                        .compare_exchange(used, used + 1, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        let current_generation = self.generation.load(Ordering::SeqCst);
+                        if current_generation != generation {
+                            self.rollback_used();
+                            continue;
+                        }
+                        return AcceptorReservation {
+                            limiter: Arc::clone(self),
+                            generation: current_generation,
+                            committed: false,
+                        };
+                    }
+                    continue;
+                }
+                self.notify.notified().await;
+            }
+        }
+
+        fn release_reservation(&self, generation: usize) {
+            if generation != self.generation.load(Ordering::SeqCst) {
+                return;
+            }
+            loop {
+                let used = self.used.load(Ordering::SeqCst);
+                if used == 0 {
+                    return;
+                }
+                if self
+                    .used
+                    .compare_exchange(used, used - 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    self.notify.notify_one();
+                    return;
+                }
+            }
+        }
+
+        fn rollback_used(&self) {
+            loop {
+                let used = self.used.load(Ordering::SeqCst);
+                if used == 0 {
+                    return;
+                }
+                if self
+                    .used
+                    .compare_exchange(used, used - 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    self.notify.notify_one();
+                    return;
+                }
+            }
+        }
+    }
+
+    pub(crate) struct AcceptorReservation {
+        limiter: Arc<AcceptorLimiter>,
+        generation: usize,
+        committed: bool,
+    }
+
+    impl AcceptorReservation {
+        pub(crate) fn is_fresh(&self) -> bool {
+            self.limiter.generation() == self.generation
+        }
+
+        pub(crate) fn commit(mut self) -> bool {
+            if !self.is_fresh() {
+                return false;
+            }
+            self.committed = true;
+            true
+        }
+    }
+
+    impl Drop for AcceptorReservation {
+        fn drop(&mut self) {
+            if !self.committed {
+                self.limiter.release_reservation(self.generation);
+            }
+        }
+    }
+
+    struct AcceptorGate {
+        limiter: Arc<AcceptorLimiter>,
+    }
+
+    impl AcceptorGate {
+        fn new(limiter: Arc<AcceptorLimiter>) -> Self {
+            Self { limiter }
+        }
+
+        async fn accept_and_dispatch(
+            &self,
+            listener: &TokioTcpListener,
+            command_tx: &mpsc::UnboundedSender<Command>,
+        ) -> bool {
+            let reservation = self.limiter.reserve().await;
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    if !reservation.is_fresh() {
+                        drop(stream);
+                        return true;
+                    };
+                    if command_tx
+                        .send(Command::NewStream {
+                            stream,
+                            reservation,
+                        })
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    true
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                    drop(reservation);
+                    true
+                }
+                Err(_) => {
+                    drop(reservation);
+                    false
+                }
+            }
+        }
+    }
+
+    struct TcpAcceptor {
+        listener: TokioTcpListener,
+        command_tx: mpsc::UnboundedSender<Command>,
+        gate: AcceptorGate,
+    }
+
+    impl TcpAcceptor {
+        fn new(
+            listener: TokioTcpListener,
+            command_tx: mpsc::UnboundedSender<Command>,
+            acceptor_backpressure: Arc<AcceptorLimiter>,
+        ) -> Self {
+            Self {
+                listener,
+                command_tx,
+                gate: AcceptorGate::new(acceptor_backpressure),
+            }
+        }
+
+        async fn run(self) {
+            loop {
+                if !self
+                    .gate
+                    .accept_and_dispatch(&self.listener, &self.command_tx)
+                    .await
+                {
+                    break;
+                }
+            }
+        }
+
+        fn spawn(self) {
+            tokio::spawn(self.run());
+        }
+    }
+}
+
 impl ClientState {
     pub(crate) fn new(
         command_tx: mpsc::UnboundedSender<Command>,
         data_notify: Arc<Notify>,
         debug_streams: bool,
+        acceptor: acceptor::ClientAcceptor,
     ) -> Self {
         Self {
             ready: false,
@@ -76,6 +363,7 @@ impl ClientState {
             data_notify,
             path_events: Vec::new(),
             debug_streams,
+            acceptor,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
         }
@@ -91,6 +379,10 @@ impl ClientState {
 
     pub(crate) fn streams_len(&self) -> usize {
         self.streams.len()
+    }
+
+    pub(crate) fn update_acceptor_limit(&mut self, cnx: *mut picoquic_cnx_t) {
+        self.acceptor.update_limit(cnx);
     }
 
     pub(crate) fn debug_snapshot(&self) -> (u64, u64) {
@@ -173,6 +465,7 @@ impl ClientState {
         self.closing = false;
         self.multi_stream_mode = false;
         self.path_events.clear();
+        self.acceptor.reset();
         self.debug_enqueued_bytes = 0;
         self.debug_last_enqueue_at = 0;
     }
@@ -243,12 +536,27 @@ enum StreamWrite {
 }
 
 pub(crate) enum Command {
-    NewStream(TokioTcpStream),
-    StreamData { stream_id: u64, data: Vec<u8> },
-    StreamClosed { stream_id: u64 },
-    StreamReadError { stream_id: u64 },
-    StreamWriteError { stream_id: u64 },
-    StreamWriteDrained { stream_id: u64, bytes: usize },
+    NewStream {
+        stream: TokioTcpStream,
+        reservation: acceptor::AcceptorReservation,
+    },
+    StreamData {
+        stream_id: u64,
+        data: Vec<u8>,
+    },
+    StreamClosed {
+        stream_id: u64,
+    },
+    StreamReadError {
+        stream_id: u64,
+    },
+    StreamWriteError {
+        stream_id: u64,
+    },
+    StreamWriteDrained {
+        stream_id: u64,
+        bytes: usize,
+    },
 }
 
 pub(crate) enum PathEvent {
@@ -282,6 +590,7 @@ pub(crate) unsafe extern "C" fn client_callback(
     match fin_or_event {
         picoquic_call_back_event_t::picoquic_callback_ready => {
             state.ready = true;
+            state.update_acceptor_limit(cnx);
             info!("Connection ready");
         }
         picoquic_call_back_event_t::picoquic_callback_stream_data
@@ -497,25 +806,6 @@ fn handle_stream_data(
     check_stream_invariants(state, stream_id, "handle_stream_data");
 }
 
-pub(crate) fn spawn_acceptor(
-    listener: TokioTcpListener,
-    command_tx: mpsc::UnboundedSender<Command>,
-) {
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    if command_tx.send(Command::NewStream(stream)).is_err() {
-                        break;
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod test_hooks {
     use slipstream_core::test_support::FailureCounter;
@@ -547,14 +837,17 @@ mod tests {
     use super::*;
     use slipstream_core::test_support::ResetOnDrop;
     use std::sync::Arc;
+    use tokio::net::TcpListener as TokioTcpListener;
     use tokio::sync::{mpsc, oneshot, Notify};
+    use tokio::time::{sleep, timeout, Duration};
 
     #[test]
     fn add_to_stream_fin_failure_removes_stream() {
         let _guard = ResetOnDrop::new(|| test_hooks::set_add_to_stream_failures(0));
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let data_notify = Arc::new(Notify::new());
-        let mut state = ClientState::new(command_tx, data_notify, false);
+        let acceptor = acceptor::ClientAcceptor::new();
+        let mut state = ClientState::new(command_tx, data_notify, false, acceptor);
         let stream_id = 4;
         let (write_tx, _write_rx) = mpsc::unbounded_channel();
         let (read_abort_tx, _read_abort_rx) = oneshot::channel();
@@ -588,6 +881,8 @@ mod tests {
     #[test]
     fn mark_active_stream_failure_removes_stream() {
         let _guard = ResetOnDrop::new(|| test_hooks::set_mark_active_stream_failures(0));
+        let _limit_guard = ResetOnDrop::new(|| acceptor::ClientAcceptor::set_test_limit(0));
+        acceptor::ClientAcceptor::set_test_limit(1);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .build()
@@ -606,20 +901,65 @@ mod tests {
 
             let (command_tx, _command_rx) = mpsc::unbounded_channel();
             let data_notify = Arc::new(Notify::new());
-            let mut state = ClientState::new(command_tx, data_notify, false);
+            let acceptor = acceptor::ClientAcceptor::new();
+            let reservation = acceptor.reserve_for_test().await;
+            let mut state = ClientState::new(command_tx, data_notify, false, acceptor);
 
             test_hooks::set_mark_active_stream_failures(1);
 
             handle_command(
                 std::ptr::null_mut(),
                 &mut state as *mut _,
-                Command::NewStream(stream),
+                Command::NewStream {
+                    stream,
+                    reservation,
+                },
             );
 
             assert!(
                 state.streams.is_empty(),
                 "stream state should be removed when mark_active_stream fails"
             );
+        });
+    }
+
+    #[test]
+    fn acceptor_backpressure_blocks_new_connections() {
+        let _guard = ResetOnDrop::new(|| acceptor::ClientAcceptor::set_test_limit(0));
+        acceptor::ClientAcceptor::set_test_limit(1);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("build tokio runtime");
+        rt.block_on(async {
+            let listener = TokioTcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+            let acceptor = acceptor::ClientAcceptor::new();
+            acceptor.spawn(listener, command_tx);
+
+            let mut clients = Vec::new();
+            for _ in 0..3 {
+                clients.push(TokioTcpStream::connect(addr).await.expect("connect"));
+            }
+
+            sleep(Duration::from_millis(50)).await;
+
+            let _first = timeout(Duration::from_secs(1), command_rx.recv())
+                .await
+                .expect("first accept")
+                .expect("first command");
+            let second = timeout(Duration::from_millis(200), command_rx.recv()).await;
+
+            assert!(
+                second.is_err(),
+                "expected acceptor backpressure to block additional accepts while at limit"
+            );
+
+            drop(clients);
         });
     }
 }
@@ -656,15 +996,15 @@ pub(crate) fn handle_command(
 ) {
     let state = unsafe { &mut *state_ptr };
     match command {
-        Command::NewStream(stream) => {
+        Command::NewStream {
+            stream,
+            reservation,
+        } => {
+            if !reservation.is_fresh() {
+                drop(stream);
+                return;
+            }
             let _ = stream.set_nodelay(true);
-            let read_limit = stream_read_limit_chunks(
-                &stream,
-                DEFAULT_TCP_RCVBUF_BYTES,
-                STREAM_READ_CHUNK_BYTES,
-            );
-            let (data_tx, data_rx) = mpsc::channel(read_limit);
-            let data_notify = state.data_notify.clone();
             #[cfg(test)]
             let forced_failure = test_hooks::take_mark_active_stream_failure();
             #[cfg(not(test))]
@@ -681,6 +1021,42 @@ pub(crate) fn handle_command(
             };
             #[cfg(not(test))]
             let stream_id = unsafe { picoquic_get_next_local_stream_id(cnx, 0) };
+            #[cfg(test)]
+            let ret = if forced_failure {
+                test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
+            } else {
+                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
+            };
+            #[cfg(not(test))]
+            let ret =
+                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
+            if ret != 0 {
+                warn!(
+                    "stream {}: mark_active_stream failed ret={}",
+                    stream_id, ret
+                );
+                if !forced_failure {
+                    unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                }
+                return;
+            }
+            if !reservation.commit() {
+                warn!(
+                    "stream {}: acceptor generation changed during activation",
+                    stream_id
+                );
+                if !forced_failure {
+                    unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                }
+                return;
+            }
+            let read_limit = stream_read_limit_chunks(
+                &stream,
+                DEFAULT_TCP_RCVBUF_BYTES,
+                STREAM_READ_CHUNK_BYTES,
+            );
+            let (data_tx, data_rx) = mpsc::channel(read_limit);
+            let data_notify = state.data_notify.clone();
             let send_buffer_bytes = tcp_send_buffer_bytes(&stream)
                 .filter(|bytes| *bytes > 0)
                 .unwrap_or(CLIENT_WRITE_COALESCE_DEFAULT_BYTES);
@@ -688,6 +1064,17 @@ pub(crate) fn handle_command(
             let (write_tx, write_rx) = mpsc::unbounded_channel();
             let command_tx = state.command_tx.clone();
             let (read_abort_tx, read_abort_rx) = oneshot::channel();
+            state.streams.insert(
+                stream_id,
+                ClientStream {
+                    write_tx,
+                    read_abort_tx: Some(read_abort_tx),
+                    data_rx: Some(data_rx),
+                    tx_bytes: 0,
+                    fin_enqueued: false,
+                    flow: FlowControlState::default(),
+                },
+            );
             spawn_client_reader(
                 stream_id,
                 read_half,
@@ -702,17 +1089,6 @@ pub(crate) fn handle_command(
                 write_rx,
                 command_tx,
                 send_buffer_bytes,
-            );
-            state.streams.insert(
-                stream_id,
-                ClientStream {
-                    write_tx,
-                    read_abort_tx: Some(read_abort_tx),
-                    data_rx: Some(data_rx),
-                    tx_bytes: 0,
-                    fin_enqueued: false,
-                    flow: FlowControlState::default(),
-                },
             );
             if !state.multi_stream_mode && state.streams.len() > 1 {
                 state.multi_stream_mode = true;
@@ -736,31 +1112,6 @@ pub(crate) fn handle_command(
                         );
                     },
                 );
-            }
-            #[cfg(test)]
-            let ret = if forced_failure {
-                test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
-            } else {
-                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
-            };
-            #[cfg(not(test))]
-            let ret =
-                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
-            if ret != 0 {
-                warn!(
-                    "stream {}: mark_active_stream failed ret={}",
-                    stream_id, ret
-                );
-                if let Some(mut stream) = state.streams.remove(&stream_id) {
-                    if let Some(read_abort_tx) = stream.read_abort_tx.take() {
-                        let _ = read_abort_tx.send(());
-                    }
-                    let _ = stream.write_tx.send(StreamWrite::Fin);
-                }
-                if !forced_failure {
-                    unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
-                }
-                return;
             }
             if state.debug_streams {
                 debug!("stream {}: accepted", stream_id);
