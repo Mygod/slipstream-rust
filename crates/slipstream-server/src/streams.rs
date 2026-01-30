@@ -1206,13 +1206,14 @@ mod tests {
         };
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let send_pending = Arc::new(AtomicBool::new(true));
+        let send_pending_handle = Arc::clone(&send_pending);
 
         state.streams.insert(
             key,
             ServerStream {
                 write_tx: None,
                 data_rx: None,
-                send_pending: Some(send_pending),
+                send_pending: Some(send_pending_handle),
                 send_stash: None,
                 shutdown_tx,
                 tx_bytes: 0,
@@ -1238,6 +1239,11 @@ mod tests {
         assert!(
             !state.streams.contains_key(&key),
             "stream state should be removed when mark_active_stream fails"
+        );
+        assert_eq!(
+            Arc::strong_count(&send_pending),
+            1,
+            "send_pending should be dropped when the stream is removed"
         );
     }
 }
