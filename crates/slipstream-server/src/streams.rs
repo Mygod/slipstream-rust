@@ -908,13 +908,44 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 return;
             }
             let cnx = cnx_id as *mut picoquic_cnx_t;
+            #[cfg(test)]
+            let forced_failure = test_hooks::take_mark_active_stream_failure();
+            #[cfg(not(test))]
+            let forced_failure = false;
+            #[cfg(test)]
+            let ret = if forced_failure {
+                test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
+            } else {
+                assert!(
+                    cnx_id >= 0x1000,
+                    "mark_active_stream called with synthetic cnx_id; set test failure counter"
+                );
+                unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) }
+            };
+            #[cfg(not(test))]
             let ret =
                 unsafe { picoquic_mark_active_stream(cnx, stream_id, 1, std::ptr::null_mut()) };
-            if ret != 0 && state.debug_streams {
-                debug!(
-                    "stream {:?}: mark_active_stream readable failed ret={}",
-                    stream_id, ret
-                );
+            if ret != 0 {
+                if let Some(stream) = shutdown_stream(state, key) {
+                    warn!(
+                        "stream {:?}: mark_active_stream readable failed ret={} tx_bytes={} rx_bytes={} consumed_offset={} queued={} fin_offset={:?}",
+                        stream_id,
+                        ret,
+                        stream.tx_bytes,
+                        stream.flow.rx_bytes,
+                        stream.flow.consumed_offset,
+                        stream.flow.queued_bytes,
+                        stream.flow.fin_offset
+                    );
+                    if !forced_failure {
+                        unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+                    }
+                } else if state.debug_streams {
+                    debug!(
+                        "stream {:?}: mark_active_stream readable failed ret={}",
+                        stream_id, ret
+                    );
+                }
             }
         }
         Command::StreamReadError { cnx_id, stream_id } => {
@@ -1114,6 +1145,53 @@ mod tests {
         handle_command(
             &mut state as *mut _,
             Command::StreamClosed {
+                cnx_id: key.cnx,
+                stream_id: key.stream_id,
+            },
+        );
+
+        assert!(
+            !state.streams.contains_key(&key),
+            "stream state should be removed when mark_active_stream fails"
+        );
+    }
+
+    #[test]
+    fn mark_active_stream_readable_failure_should_not_leave_send_pending_stuck() {
+        let _guard = ResetOnDrop::new(|| test_hooks::set_mark_active_stream_failures(0));
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let target_addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        let mut state = ServerState::new(target_addr, command_tx, false, false);
+        let key = StreamKey {
+            cnx: 0x1,
+            stream_id: 4,
+        };
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let send_pending = Arc::new(AtomicBool::new(true));
+
+        state.streams.insert(
+            key,
+            ServerStream {
+                write_tx: None,
+                data_rx: None,
+                send_pending: Some(send_pending),
+                send_stash: None,
+                shutdown_tx,
+                tx_bytes: 0,
+                target_fin_pending: false,
+                close_after_flush: false,
+                pending_data: VecDeque::new(),
+                pending_fin: false,
+                fin_enqueued: false,
+                flow: FlowControlState::default(),
+            },
+        );
+
+        test_hooks::set_mark_active_stream_failures(1);
+
+        handle_command(
+            &mut state as *mut _,
+            Command::StreamReadable {
                 cnx_id: key.cnx,
                 stream_id: key.stream_id,
             },
