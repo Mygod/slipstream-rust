@@ -184,7 +184,7 @@ fn main() {
         domains,
         max_connections,
         idle_timeout_seconds: args.idle_timeout_seconds,
-        mtu: mtu,
+        mtu,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
     };
@@ -244,6 +244,9 @@ fn parse_mtu(s: &str) -> Result<u32, String> {
     let mtu: u32 = trimmed
         .parse()
         .map_err(|_| format!("Invalid MTU value: {}", trimmed))?;
+    if mtu == 0 {
+        return Err("MTU cannot be zero".to_string());
+    }
     Ok(mtu)
 }
 
