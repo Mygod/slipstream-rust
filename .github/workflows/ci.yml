@@ -68,7 +68,7 @@ jobs:
           RUST_BACKTRACE: "1"
         run: |
           cargo test -p slipstream-dns -- --ignored
-          cargo test -- --ignored
+          cargo test --workspace --exclude slipstream-dns -- --ignored
 
   cargo-audit:
     name: Cargo Audit
