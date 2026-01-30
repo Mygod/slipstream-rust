@@ -216,6 +216,7 @@ where
     INVARIANT_REPORTER.report(now, message, |msg| error!("{}", msg));
 }
 
+
 fn check_stream_invariants(state: &ServerState, key: StreamKey, context: &str) {
     let Some(stream) = state.streams.get(&key) else {
         return;
@@ -429,6 +430,44 @@ pub(crate) unsafe extern "C" fn server_callback(
                 let has_pending = pending_flag || has_stash;
 
                 if length == 0 {
+                    if pending_flag && !has_stash && !stream.target_fin_pending {
+                        let rx_empty = stream
+                            .data_rx
+                            .as_ref()
+                            .map(|rx| rx.is_empty())
+                            .unwrap_or(true);
+                        if rx_empty {
+                            let send_stash_bytes = stream
+                                .send_stash
+                                .as_ref()
+                                .map(|data| data.len())
+                                .unwrap_or(0);
+                            let queued_bytes = stream.flow.queued_bytes;
+                            let pending_chunks = stream.pending_data.len();
+                            let tx_bytes = stream.tx_bytes;
+                            let target_fin_pending = stream.target_fin_pending;
+                            let close_after_flush = stream.close_after_flush;
+                            let now = unsafe { picoquic_current_time() };
+                            INVARIANT_REPORTER.report(
+                                now,
+                                || {
+                                    format!(
+                                        "cnx {} stream {:?}: zero-length send callback saw pending flag with empty queue send_pending={} send_stash_bytes={} target_fin_pending={} close_after_flush={} queued={} pending_chunks={} tx_bytes={}",
+                                        key.cnx,
+                                        key.stream_id,
+                                        pending_flag,
+                                        send_stash_bytes,
+                                        target_fin_pending,
+                                        close_after_flush,
+                                        queued_bytes,
+                                        pending_chunks,
+                                        tx_bytes
+                                    )
+                                },
+                                |msg| warn!("{}", msg),
+                            );
+                        }
+                    }
                     let still_active = if has_pending || stream.target_fin_pending {
                         1
                     } else {
