@@ -43,6 +43,8 @@ struct Args {
     max_connections: u32,
     #[arg(long = "idle-timeout-seconds", default_value_t = 1200)]
     idle_timeout_seconds: u64,
+    #[arg(long = "mtu", short = 'm', default_value_t = 900, value_parser = parse_mtu)]
+    mtu: u32,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
     #[arg(long = "debug-commands")]
@@ -160,6 +162,16 @@ fn main() {
     } else {
         args.max_connections
     };
+    let mtu = if cli_provided(&matches, "mtu") {
+        args.mtu
+    } else if let Some(value) = sip003::last_option_value(&sip003_env.plugin_options, "mtu") {
+        parse_mtu(&value).unwrap_or_else(|err| {
+            tracing::error!("SIP003 env error: {}", err);
+            std::process::exit(2);
+        })
+    } else {
+        args.mtu
+    };
 
     let config = ServerConfig {
         dns_listen_host,
@@ -172,6 +184,7 @@ fn main() {
         domains,
         max_connections,
         idle_timeout_seconds: args.idle_timeout_seconds,
+        mtu: mtu,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
     };
@@ -224,6 +237,14 @@ fn parse_max_connections(input: &str) -> Result<u32, String> {
         return Err("max-connections must be at least 1".to_string());
     }
     Ok(value)
+}
+
+fn parse_mtu(s: &str) -> Result<u32, String> {
+    let trimmed = s.trim();
+    let mtu: u32 = trimmed
+        .parse()
+        .map_err(|_| format!("Invalid MTU value: {}", trimmed))?;
+    Ok(mtu)
 }
 
 fn cli_provided(matches: &clap::ArgMatches, id: &str) -> bool {
