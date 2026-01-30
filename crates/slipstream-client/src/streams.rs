@@ -42,12 +42,17 @@ pub(crate) struct ClientState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamSendState {
     Open,
+    Closing,
     FinQueued,
 }
 
 impl StreamSendState {
     fn is_closed(self) -> bool {
         matches!(self, StreamSendState::FinQueued)
+    }
+
+    fn can_queue_fin(self) -> bool {
+        matches!(self, StreamSendState::Open | StreamSendState::Closing)
     }
 }
 
@@ -1214,6 +1219,13 @@ pub(crate) fn drain_stream_data(cnx: *mut picoquic_cnx_t, state_ptr: *mut Client
     {
         let state = unsafe { &mut *state_ptr };
         slipstream_core::drain_stream_data!(state.streams, data_rx, pending, closed_streams);
+        for stream_id in &closed_streams {
+            if let Some(stream) = state.streams.get_mut(stream_id) {
+                if stream.send_state == StreamSendState::Open {
+                    stream.send_state = StreamSendState::Closing;
+                }
+            }
+        }
     }
     for (stream_id, data) in pending {
         handle_command(cnx, state_ptr, Command::StreamData { stream_id, data });
@@ -1380,7 +1392,7 @@ pub(crate) fn handle_command(
             let should_send_fin = state
                 .streams
                 .get(&stream_id)
-                .is_some_and(|stream| stream.send_state == StreamSendState::Open);
+                .is_some_and(|stream| stream.send_state.can_queue_fin());
             if !should_send_fin {
                 return;
             }
