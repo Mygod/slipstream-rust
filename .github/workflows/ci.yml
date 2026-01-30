@@ -42,6 +42,34 @@ jobs:
       - name: IPv4 listener check
         run: ./scripts/verify_ipv4_listener.sh
 
+  rust-tests-ignored:
+    name: Rust Tests (Ignored)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Check out slipstream-rust
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libssl-dev python3
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run ignored tests
+        env:
+          RUST_BACKTRACE: "1"
+        run: |
+          cargo test -p slipstream-dns -- --ignored
+          cargo test --workspace --exclude slipstream-dns -- --ignored
+
   cargo-audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
