@@ -36,6 +36,7 @@ pub(crate) struct ClientState {
     acceptor: acceptor::ClientAcceptor,
     debug_enqueued_bytes: u64,
     debug_last_enqueue_at: u64,
+    acceptor_limit_logged: bool,
 }
 
 #[derive(Default)]
@@ -98,10 +99,11 @@ pub(crate) mod acceptor {
             TcpAcceptor::new(listener, command_tx, Arc::clone(&self.limiter)).spawn();
         }
 
-        pub(crate) fn update_limit(&self, cnx: *mut picoquic_cnx_t) {
+        pub(crate) fn update_limit(&self, cnx: *mut picoquic_cnx_t) -> usize {
             let max_streams = unsafe { slipstream_get_max_streams_bidir_remote(cnx) };
             let max_streams = usize::try_from(max_streams).unwrap_or(usize::MAX);
             self.limiter.set_max(max_streams);
+            max_streams
         }
 
         pub(crate) fn reset(&self) {
@@ -353,6 +355,46 @@ pub(crate) mod acceptor {
             tokio::spawn(self.run());
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::AcceptorLimiter;
+        use std::sync::Arc;
+        use tokio::time::{timeout, Duration};
+
+        #[test]
+        fn acceptor_unblocks_after_stream_limit_increase() {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("build tokio runtime");
+            rt.block_on(async {
+                let limiter = Arc::new(AcceptorLimiter::new(1024));
+
+                for _ in 0..1024 {
+                    let reservation = limiter.reserve().await;
+                    assert!(reservation.commit(), "reservation commit should succeed");
+                }
+
+                let blocked = timeout(Duration::from_millis(50), limiter.reserve()).await;
+                assert!(
+                    blocked.is_err(),
+                    "expected acceptor to block once stream credit is exhausted"
+                );
+
+                // Simulate a peer MAX_STREAMS update after previous streams close.
+                limiter.set_max(1025);
+
+                let reservation = timeout(Duration::from_secs(1), limiter.reserve())
+                    .await
+                    .expect("reservation should unblock after limit increase");
+                assert!(
+                    reservation.commit(),
+                    "reservation should commit after limit increase"
+                );
+            });
+        }
+    }
 }
 
 impl ClientState {
@@ -374,6 +416,7 @@ impl ClientState {
             acceptor,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
+            acceptor_limit_logged: false,
         }
     }
 
@@ -390,7 +433,11 @@ impl ClientState {
     }
 
     pub(crate) fn update_acceptor_limit(&mut self, cnx: *mut picoquic_cnx_t) {
-        self.acceptor.update_limit(cnx);
+        let max_streams = self.acceptor.update_limit(cnx);
+        if !self.acceptor_limit_logged && max_streams > 0 {
+            self.acceptor_limit_logged = true;
+            info!("acceptor: initial_max_streams_bidir_remote={}", max_streams);
+        }
     }
 
     pub(crate) fn debug_snapshot(&self) -> (u64, u64) {
@@ -476,6 +523,7 @@ impl ClientState {
         self.acceptor.reset();
         self.debug_enqueued_bytes = 0;
         self.debug_last_enqueue_at = 0;
+        self.acceptor_limit_logged = false;
     }
 }
 
@@ -598,8 +646,8 @@ pub(crate) unsafe extern "C" fn client_callback(
     match fin_or_event {
         picoquic_call_back_event_t::picoquic_callback_ready => {
             state.ready = true;
-            state.update_acceptor_limit(cnx);
             info!("Connection ready");
+            state.update_acceptor_limit(cnx);
         }
         picoquic_call_back_event_t::picoquic_callback_stream_data
         | picoquic_call_back_event_t::picoquic_callback_stream_fin => {
