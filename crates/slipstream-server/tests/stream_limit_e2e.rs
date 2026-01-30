@@ -29,10 +29,7 @@ fn parse_stream_limit_line(line: &str) -> Option<usize> {
 
 fn derive_stream_limit(logs: &support::LogCapture) -> usize {
     let snapshot = log_snapshot(logs);
-    if let Some(limit) = snapshot
-        .lines()
-        .find_map(parse_stream_limit_line)
-    {
+    if let Some(limit) = snapshot.lines().find_map(parse_stream_limit_line) {
         return limit;
     }
 
