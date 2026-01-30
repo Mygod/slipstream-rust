@@ -216,7 +216,6 @@ where
     INVARIANT_REPORTER.report(now, message, |msg| error!("{}", msg));
 }
 
-
 fn check_stream_invariants(state: &ServerState, key: StreamKey, context: &str) {
     let Some(stream) = state.streams.get(&key) else {
         return;
