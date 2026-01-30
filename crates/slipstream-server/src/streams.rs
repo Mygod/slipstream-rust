@@ -6,6 +6,8 @@ use slipstream_core::flow_control::{
     FlowControlState, HasFlowControlState, PromoteEntry, StreamReceiveConfig, StreamReceiveOps,
 };
 use slipstream_core::invariants::InvariantReporter;
+#[cfg(test)]
+use slipstream_core::test_support::FailureCounter;
 use slipstream_ffi::picoquic::{
     picoquic_call_back_event_t, picoquic_close, picoquic_close_immediate, picoquic_cnx_t,
     picoquic_current_time, picoquic_get_first_cnx, picoquic_get_next_cnx,
@@ -33,6 +35,8 @@ pub(crate) struct ServerState {
     command_counts: CommandCounts,
     last_command_report: Instant,
     last_mark_active_fail_log_at: u64,
+    #[cfg(test)]
+    mark_active_stream_failures: FailureCounter,
 }
 
 #[derive(Default)]
@@ -94,6 +98,8 @@ impl ServerState {
             command_counts: CommandCounts::default(),
             last_command_report: Instant::now(),
             last_mark_active_fail_log_at: 0,
+            #[cfg(test)]
+            mark_active_stream_failures: FailureCounter::new(),
         }
     }
 
@@ -205,6 +211,19 @@ impl ServerState {
             }
         }
         summaries
+    }
+}
+
+#[cfg(test)]
+mod test_helpers {
+    use super::ServerState;
+
+    pub(super) fn set_mark_active_stream_failures(state: &mut ServerState, count: usize) {
+        state.mark_active_stream_failures.set(count);
+    }
+
+    pub(super) fn take_mark_active_stream_failure(state: &ServerState) -> bool {
+        state.mark_active_stream_failures.take()
     }
 }
 
@@ -863,7 +882,15 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                 stream_id,
             };
             let mut remove_stream = false;
-            if let Some(stream) = state.streams.get_mut(&key) {
+            if state.streams.contains_key(&key) {
+                #[cfg(test)]
+                let forced_failure = test_helpers::take_mark_active_stream_failure(state);
+                #[cfg(not(test))]
+                let forced_failure = false;
+
+                let Some(stream) = state.streams.get_mut(&key) else {
+                    return;
+                };
                 stream.target_fin_pending = true;
                 stream.close_after_flush = true;
                 if state.debug_streams {
@@ -876,10 +903,6 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                     pending.store(true, Ordering::SeqCst);
                 }
                 let cnx = cnx_id as *mut picoquic_cnx_t;
-                #[cfg(test)]
-                let forced_failure = test_hooks::take_mark_active_stream_failure();
-                #[cfg(not(test))]
-                let forced_failure = false;
                 #[cfg(test)]
                 let ret = if forced_failure {
                     test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
@@ -945,11 +968,11 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
             if !state.streams.contains_key(&key) {
                 return;
             }
-            let cnx = cnx_id as *mut picoquic_cnx_t;
             #[cfg(test)]
-            let forced_failure = test_hooks::take_mark_active_stream_failure();
+            let forced_failure = test_helpers::take_mark_active_stream_failure(state);
             #[cfg(not(test))]
             let forced_failure = false;
+            let cnx = cnx_id as *mut picoquic_cnx_t;
             #[cfg(test)]
             let ret = if forced_failure {
                 test_hooks::FORCED_MARK_ACTIVE_STREAM_ERROR
@@ -1124,24 +1147,12 @@ pub(crate) fn handle_shutdown(quic: *mut picoquic_quic_t, state: &mut ServerStat
 
 #[cfg(test)]
 mod test_hooks {
-    use slipstream_core::test_support::FailureCounter;
-
     pub(super) const FORCED_MARK_ACTIVE_STREAM_ERROR: i32 = 0x400 + 36;
-    pub(super) static MARK_ACTIVE_STREAM_FAILS_LEFT: FailureCounter = FailureCounter::new();
-
-    pub(super) fn set_mark_active_stream_failures(count: usize) {
-        MARK_ACTIVE_STREAM_FAILS_LEFT.set(count);
-    }
-
-    pub(super) fn take_mark_active_stream_failure() -> bool {
-        MARK_ACTIVE_STREAM_FAILS_LEFT.take()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slipstream_core::test_support::ResetOnDrop;
     use std::collections::VecDeque;
     use std::net::SocketAddr;
     use std::sync::atomic::AtomicBool;
@@ -1150,7 +1161,6 @@ mod tests {
 
     #[test]
     fn mark_active_stream_failure_should_remove_stream() {
-        let _guard = ResetOnDrop::new(|| test_hooks::set_mark_active_stream_failures(0));
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let target_addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let mut state = ServerState::new(target_addr, command_tx, false, false);
@@ -1178,7 +1188,7 @@ mod tests {
             },
         );
 
-        test_hooks::set_mark_active_stream_failures(1);
+        test_helpers::set_mark_active_stream_failures(&mut state, 1);
 
         handle_command(
             &mut state as *mut _,
@@ -1196,7 +1206,6 @@ mod tests {
 
     #[test]
     fn mark_active_stream_readable_failure_should_not_leave_send_pending_stuck() {
-        let _guard = ResetOnDrop::new(|| test_hooks::set_mark_active_stream_failures(0));
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let target_addr = SocketAddr::from(([127, 0, 0, 1], 0));
         let mut state = ServerState::new(target_addr, command_tx, false, false);
@@ -1226,7 +1235,7 @@ mod tests {
             },
         );
 
-        test_hooks::set_mark_active_stream_failures(1);
+        test_helpers::set_mark_active_stream_failures(&mut state, 1);
 
         handle_command(
             &mut state as *mut _,
