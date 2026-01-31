@@ -85,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let openssl_paths = resolve_openssl_paths();
     let target = env::var("TARGET").unwrap_or_default();
+    let is_windows = target.contains("windows") || target.contains("pc-windows");
     let auto_build = env_flag("PICOQUIC_AUTO_BUILD", true);
     let explicit_picoquic_include = env::var_os("PICOQUIC_INCLUDE_DIR").is_some();
     let explicit_picoquic_lib = env::var_os("PICOQUIC_LIB_DIR").is_some();
@@ -225,6 +226,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if cfg!(feature = "openssl-static") {
             println!("cargo:rustc-link-lib=static=ssl");
             println!("cargo:rustc-link-lib=static=crypto");
+        } else if is_windows {
+            if let Ok(openssl_lib_dir) = env::var("OPENSSL_LIB_DIR") {
+                println!("cargo:rustc-link-search=native={}", openssl_lib_dir);
+            }
+            println!("cargo:rustc-link-lib=dylib=libssl");
+            println!("cargo:rustc-link-lib=dylib=libcrypto");
         } else {
             println!("cargo:rustc-link-lib=dylib=ssl");
             println!("cargo:rustc-link-lib=dylib=crypto");
@@ -232,7 +239,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !target.contains("android") {
-        println!("cargo:rustc-link-lib=dylib=pthread");
+        if is_windows {
+            println!("cargo:rustc-link-lib=dylib=ws2_32");
+            println!("cargo:rustc-link-lib=dylib=bcrypt");
+        } else {
+            println!("cargo:rustc-link-lib=dylib=pthread");
+        }
     } else {
         maybe_link_android_builtins(&target, &cc);
     }
