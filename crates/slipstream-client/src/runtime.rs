@@ -70,7 +70,8 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let domain_len = config.domain.len();
-    let mtu = compute_mtu(domain_len)?;
+    let mtu = slipstream_dns::max_payload_len_for_domain(config.domain)
+        .map_err(|err| ClientError::new(err.to_string()))? as u32;
     let udp = bind_udp_socket().await?;
 
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
