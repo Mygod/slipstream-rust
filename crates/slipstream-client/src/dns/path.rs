@@ -86,7 +86,7 @@ pub(crate) fn add_paths(
         if ret == 0 && path_id >= 0 {
             resolver.added = true;
             resolver.path_id = path_id;
-            info!("Added path {}", resolver.addr);
+            info!("MULTIPATH: Successfully added secondary path to {} (path_id={})", resolver.addr, path_id);
             continue;
         }
         resolver.probe_attempts = resolver.probe_attempts.saturating_add(1);

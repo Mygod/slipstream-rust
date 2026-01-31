@@ -154,7 +154,8 @@ fn main() {
             tracing::error!("SIP003 env error: {}", err);
             std::process::exit(2);
         })
-    };
+    }
+    .or_else(|| Some("bbr".to_string()));
 
     let cert = if args.cert.is_some() {
         args.cert.clone()

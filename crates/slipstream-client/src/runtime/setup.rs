@@ -10,7 +10,7 @@ pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
             "Domain name is too long for DNS transport",
         ));
     }
-    let mtu = ((240.0 - domain_len as f64) / 1.6) as u32;
+    let mtu = ((220.0 - domain_len as f64) / 1.6) as u32;
     if mtu == 0 {
         return Err(ClientError::new(
             "MTU computed to zero; check domain length",

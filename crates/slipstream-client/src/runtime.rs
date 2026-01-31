@@ -23,13 +23,13 @@ use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
     configure_quic_with_custom,
     picoquic::{
-        picoquic_close, picoquic_cnx_t, picoquic_connection_id_t, picoquic_create,
+        picoquic_close, picoquic_create,
         picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
         picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
         picoquic_enable_path_callbacks_default, picoquic_get_next_wake_delay,
-        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_has_ready_stream,
+        picoquic_prepare_packet_ex, picoquic_set_callback, slipstream_has_ready_stream,
         slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm, slipstream_set_cc_override,
-        slipstream_set_default_path_mode, PICOQUIC_CONNECTION_ID_MAX_SIZE,
+        slipstream_set_default_path_mode,
         PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
@@ -230,6 +230,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
+        let mut current_resolver_index = 0usize;
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -358,31 +359,48 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 let mut addr_to: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
                 let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
                 let mut if_index: libc::c_int = 0;
-                let mut log_cid = picoquic_connection_id_t {
-                    id: [0; PICOQUIC_CONNECTION_ID_MAX_SIZE],
-                    id_len: 0,
-                };
-                let mut last_cnx: *mut picoquic_cnx_t = std::ptr::null_mut();
+                let mut send_msg_size: libc::size_t = 0;
+                
+                let mut packet_produced = false;
+                let resolver_count = resolvers.len();
+                
+                // Stealth Load Balancing: Round-Robin iteration
+                for i in 0..resolver_count {
+                    let idx = (current_resolver_index + i) % resolver_count;
+                    let resolver = &mut resolvers[idx];
+                    
+                    // Skip if path is not yet established (path_id < 0)
+                    if resolver.path_id < 0 {
+                        continue;
+                    }
 
-                let ret = unsafe {
-                    picoquic_prepare_next_packet_ex(
-                        quic,
-                        current_time,
-                        send_buf.as_mut_ptr(),
-                        send_buf.len(),
-                        &mut send_length,
-                        &mut addr_to,
-                        &mut addr_from,
-                        &mut if_index,
-                        &mut log_cid,
-                        &mut last_cnx,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if ret < 0 {
-                    return Err(ClientError::new("Failed preparing outbound QUIC packet"));
+                    // Attempt to generate packet for this specific path
+                    let ret = unsafe {
+                        picoquic_prepare_packet_ex(
+                            cnx,
+                            resolver.path_id,
+                            current_time,
+                            send_buf.as_mut_ptr(),
+                            mtu as usize,
+                            &mut send_length,
+                            &mut addr_to,
+                            &mut addr_from,
+                            &mut if_index,
+                            &mut send_msg_size,
+                        )
+                    };
+
+                    if ret == 0 && send_length > 0 {
+                        // Packet produced!
+                        packet_produced = true;
+                        // Rotate to next resolver for the next packet
+                        current_resolver_index = (idx + 1) % resolver_count;
+                        break; 
+                    }
                 }
-                if send_length == 0 {
+
+                if !packet_produced {
+                    // No packet produced from any path
                     zero_send_loops = zero_send_loops.saturating_add(1);
                     let streams_len = unsafe { (*state_ptr).streams_len() };
                     if streams_len > 0 {

@@ -9,7 +9,7 @@ use slipstream_ffi::picoquic::{
     picoquic_add_to_stream, picoquic_call_back_event_t, picoquic_cnx_t, picoquic_current_time,
     picoquic_get_close_reasons, picoquic_get_cnx_state, picoquic_get_next_local_stream_id,
     picoquic_mark_active_stream, picoquic_provide_stream_data_buffer, picoquic_reset_stream,
-    picoquic_stop_sending, picoquic_stream_data_consumed,
+    picoquic_stop_sending, picoquic_stream_data_consumed, slipstream_is_flow_blocked,
 };
 use slipstream_ffi::{abort_stream_bidi, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::HashMap;
@@ -1214,6 +1214,10 @@ pub(crate) fn drain_commands(
 }
 
 pub(crate) fn drain_stream_data(cnx: *mut picoquic_cnx_t, state_ptr: *mut ClientState) {
+    if unsafe { slipstream_is_flow_blocked(cnx) } != 0 {
+        return;
+    }
+
     let mut pending = Vec::new();
     let mut closed_streams = Vec::new();
     {

@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
-const DEFAULT_STREAM_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
-const DEFAULT_CONN_RESERVE_BYTES: usize = 64 * 1024;
+const DEFAULT_STREAM_QUEUE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_CONN_RESERVE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Default)]
 pub struct FlowControlState {
