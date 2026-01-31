@@ -247,6 +247,12 @@ fn parse_mtu(s: &str) -> Result<u32, String> {
     if mtu == 0 {
         return Err("MTU cannot be zero".to_string());
     }
+    if mtu > slipstream_ffi::picoquic::PICOQUIC_MAX_PACKET_SIZE as u32 {
+        return Err(format!(
+            "MTU cannot exceed {} (PICOQUIC_MAX_PACKET_SIZE)",
+            slipstream_ffi::picoquic::PICOQUIC_MAX_PACKET_SIZE
+        ));
+    }
     Ok(mtu)
 }
 
