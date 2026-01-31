@@ -118,7 +118,7 @@ Otherwise, the response is ignored (including NAME_ERROR, which signals no data)
 - EDNS0 is always included on outbound messages and advertises udp_payload=1232;
   incoming messages are accepted regardless of OPT presence.
 - Client MTU is derived from the domain length: floor((240 - domain_len) / 1.6).
-- Server MTU defaults to 900 and can be configured via the `--mtu` / `-m` flag.
+- Server MTU defaults to 900 and can be configured via the `--mtu` / `-m` flag (up to PICOQUIC_MAX_PACKET_SIZE).
 
 ## References
 
