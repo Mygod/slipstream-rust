@@ -38,7 +38,7 @@ certificates are not verified.
 - Client ALPN: `picoquic_sample` (must match server ALPN).
 - Client SNI: `test.example.com`.
 - Server ALPN: `picoquic_sample`.
-- Server QUIC MTU: `900`.
+- Server MTU defaults to `900` bytes.
   Update `crates/slipstream-client/src/client.rs` and `crates/slipstream-server/src/server.rs`
   together to keep client/server ALPN in sync.
 

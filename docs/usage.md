@@ -63,6 +63,7 @@ Common flags:
 - --dns-listen-port <PORT> (default: 53)
 - --target-address <HOST:PORT> (default: 127.0.0.1:5201)
 - --max-connections <COUNT> (default: 256; caps concurrent QUIC connections)
+- --mtu <COUNT> (default: 900)
 - --fallback <HOST:PORT> (optional; forward non-DNS packets to this UDP endpoint)
 - --idle-timeout-seconds <SECONDS> (default: 1200; set to 0 to disable)
 - --reset-seed <PATH> (optional; 32 hex chars / 16 bytes; auto-created if missing)
