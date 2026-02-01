@@ -54,6 +54,8 @@ struct Args {
     cert: Option<String>,
     #[arg(long = "keep-alive-interval", short = 't', default_value_t = 400)]
     keep_alive_interval: u16,
+    #[arg(long = "debug")]
+    debug: bool,
     #[arg(long = "debug-poll")]
     debug_poll: bool,
     #[arg(long = "debug-streams")]
@@ -61,9 +63,9 @@ struct Args {
 }
 
 fn main() {
-    init_logging();
     let matches = Args::command().get_matches();
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    init_logging(args.debug);
     let sip003_env = sip003::read_sip003_env().unwrap_or_else(|err| {
         tracing::error!("SIP003 env error: {}", err);
         std::process::exit(2);
@@ -154,7 +156,8 @@ fn main() {
             tracing::error!("SIP003 env error: {}", err);
             std::process::exit(2);
         })
-    };
+    }
+    .or_else(|| Some("bbr".to_string()));
 
     let cert = if args.cert.is_some() {
         args.cert.clone()
@@ -205,13 +208,25 @@ fn main() {
     }
 }
 
-fn init_logging() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .without_time()
-        .try_init();
+fn init_logging(debug_mode: bool) {
+    let filter = if debug_mode {
+        EnvFilter::new("debug")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+
+    if debug_mode {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .without_time()
+            .try_init();
+    }
 }
 
 fn parse_domain(input: &str) -> Result<String, String> {

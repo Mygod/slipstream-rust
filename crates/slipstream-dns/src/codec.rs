@@ -64,6 +64,38 @@ pub fn decode_query_with_domains(
         });
     }
 
+    // Check if payload is in EDNS0 OPT record (high-speed mode)
+    if let Some(opt_payload) = try_extract_opt_payload(packet, &header) {
+        // Verify the question matches one of our domains
+        let matches_domain = domains.iter().any(|domain| {
+            let domain_with_dot = if domain.ends_with('.') {
+                domain.to_string()
+            } else {
+                format!("{}.", domain)
+            };
+            question.name == domain_with_dot
+        });
+
+        if !matches_domain {
+            return Err(DecodeQueryError::Reply {
+                id: header.id,
+                rd,
+                cd,
+                question: Some(question),
+                rcode: Rcode::NameError,
+            });
+        }
+
+        return Ok(DecodedQuery {
+            id: header.id,
+            rd,
+            cd,
+            question,
+            payload: opt_payload,
+        });
+    }
+
+    // Fall back to QNAME encoding (legacy/resilient mode)
     let subdomain_raw = match extract_subdomain_multi(&question.name, domains) {
         Ok(subdomain_raw) => subdomain_raw,
         Err(rcode) => {
@@ -108,6 +140,77 @@ pub fn decode_query_with_domains(
         question,
         payload,
     })
+}
+
+/// Try to extract payload from EDNS0 OPT record
+/// Returns Some(payload) if found, None otherwise
+fn try_extract_opt_payload(packet: &[u8], header: &crate::wire::Header) -> Option<Vec<u8>> {
+    // EDNS0 is in Additional Records section (ARCOUNT)
+    if header.arcount == 0 {
+        return None;
+    }
+
+    // Skip over question section
+    let mut offset = header.offset;
+    for _ in 0..header.qdcount {
+        let (_, new_offset) = parse_name(packet, offset).ok()?;
+        offset = new_offset;
+        if offset + 4 > packet.len() {
+            return None;
+        }
+        offset += 4; // Skip QTYPE and QCLASS
+    }
+
+    // Skip over answer and authority sections
+    for _ in 0..(header.ancount + header.nscount) {
+        let (_, new_offset) = parse_name(packet, offset).ok()?;
+        offset = new_offset;
+        if offset + 10 > packet.len() {
+            return None;
+        }
+        offset += 8; // Skip TYPE, CLASS, TTL
+        let rdlen = read_u16(packet, offset)? as usize;
+        offset += 2;
+        if offset + rdlen > packet.len() {
+            return None;
+        }
+        offset += rdlen;
+    }
+
+    // Check additional records for OPT
+    for _ in 0..header.arcount {
+        let _name_start = offset;
+        let (name, new_offset) = parse_name(packet, offset).ok()?;
+        offset = new_offset;
+
+        if offset + 10 > packet.len() {
+            return None;
+        }
+
+        let rr_type = read_u16(packet, offset)?;
+        offset += 2;
+        let _class = read_u16(packet, offset)?;
+        offset += 2;
+        let _ttl = read_u32(packet, offset)?;
+        offset += 4;
+        let rdlen = read_u16(packet, offset)? as usize;
+        offset += 2;
+
+        if offset + rdlen > packet.len() {
+            return None;
+        }
+
+        // Check if this is an OPT record with root name
+        if rr_type == RR_OPT && name.is_empty() {
+            // Extract the payload from RDATA
+            let payload = packet[offset..offset + rdlen].to_vec();
+            return Some(payload);
+        }
+
+        offset += rdlen;
+    }
+
+    None
 }
 
 pub fn encode_query(params: &QueryParams<'_>) -> Result<Vec<u8>, DnsError> {
