@@ -11,7 +11,6 @@ use crate::wire::{
     write_u32,
 };
 
-
 pub fn decode_query(packet: &[u8], domain: &str) -> Result<DecodedQuery, DecodeQueryError> {
     decode_query_with_domains(packet, &[domain])
 }
@@ -183,11 +182,11 @@ fn try_extract_opt_payload(packet: &[u8], header: &crate::wire::Header) -> Optio
         let _name_start = offset;
         let (name, new_offset) = parse_name(packet, offset).ok()?;
         offset = new_offset;
-        
+
         if offset + 10 > packet.len() {
             return None;
         }
-        
+
         let rr_type = read_u16(packet, offset)?;
         offset += 2;
         let _class = read_u16(packet, offset)?;
@@ -196,18 +195,18 @@ fn try_extract_opt_payload(packet: &[u8], header: &crate::wire::Header) -> Optio
         offset += 4;
         let rdlen = read_u16(packet, offset)? as usize;
         offset += 2;
-        
+
         if offset + rdlen > packet.len() {
             return None;
         }
-        
+
         // Check if this is an OPT record with root name
         if rr_type == RR_OPT && name.is_empty() {
             // Extract the payload from RDATA
             let payload = packet[offset..offset + rdlen].to_vec();
             return Some(payload);
         }
-        
+
         offset += rdlen;
     }
 

@@ -955,7 +955,7 @@ mod tests {
             let _guard = ResetOnDrop::new(|| test_hooks::set_add_to_stream_failures(0));
             let _limit_guard = ResetOnDrop::new(|| acceptor::ClientAcceptor::set_test_limit(0));
             acceptor::ClientAcceptor::set_test_limit(100);
-            
+
             let (command_tx, _command_rx) = mpsc::unbounded_channel();
             let data_notify = Arc::new(Notify::new());
             let acceptor = acceptor::ClientAcceptor::new();

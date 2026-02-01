@@ -23,14 +23,13 @@ use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
     configure_quic_with_custom,
     picoquic::{
-        picoquic_close, picoquic_create,
-        picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
-        picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
+        picoquic_close, picoquic_create, picoquic_create_client_cnx, picoquic_current_time,
+        picoquic_disable_keep_alive, picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
         picoquic_enable_path_callbacks_default, picoquic_get_next_wake_delay,
         picoquic_prepare_packet_ex, picoquic_set_callback, slipstream_has_ready_stream,
         slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm, slipstream_set_cc_override,
-        slipstream_set_default_path_mode,
-        PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
+        slipstream_set_default_path_mode, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
+        PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
 };
@@ -360,15 +359,15 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
                 let mut if_index: libc::c_int = 0;
                 let mut send_msg_size: libc::size_t = 0;
-                
+
                 let mut packet_produced = false;
                 let resolver_count = resolvers.len();
-                
+
                 // Stealth Load Balancing: Round-Robin iteration
                 for i in 0..resolver_count {
                     let idx = (current_resolver_index + i) % resolver_count;
                     let resolver = &mut resolvers[idx];
-                    
+
                     // Skip if path is not yet established (path_id < 0)
                     if resolver.path_id < 0 {
                         continue;
@@ -399,7 +398,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                         packet_produced = true;
                         // Rotate to next resolver for the next packet
                         current_resolver_index = (idx + 1) % resolver_count;
-                        break; 
+                        break;
                     } else if ret == 0 && i == resolver_count - 1 && resolver_count > 1 {
                         // Log only if no packet produced after checking all resolvers
                         // (To avoid spam, logic here is slightly imperfect but useful for now)

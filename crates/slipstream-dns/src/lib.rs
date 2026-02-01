@@ -105,21 +105,24 @@ fn base32_len(payload_len: usize) -> usize {
 }
 
 /// Helper function for encoding query with OPT payload
-fn encode_query_with_opt_payload(params: &QueryParams<'_>, opt_payload: &[u8]) -> Result<Vec<u8>, DnsError> {
+fn encode_query_with_opt_payload(
+    params: &QueryParams<'_>,
+    opt_payload: &[u8],
+) -> Result<Vec<u8>, DnsError> {
     use codec::encode_query;
-    
+
     // First encode the basic query
     let mut packet = encode_query(params)?;
-    
+
     // Now we need to replace the OPT record with one containing our payload
     // The basic encode_query adds an empty OPT record (11 bytes) at the end
     // We need to replace it with an OPT record containing the payload
-    
+
     // Remove the empty OPT record (last 11 bytes)
     if packet.len() >= 11 {
         packet.truncate(packet.len() - 11);
     }
-    
+
     // Add OPT record with payload
     // NAME: root (0x00)
     packet.push(0);
@@ -134,13 +137,15 @@ fn encode_query_with_opt_payload(params: &QueryParams<'_>, opt_payload: &[u8]) -
     packet.extend_from_slice(&rdlen.to_be_bytes());
     // RDATA: our payload
     packet.extend_from_slice(opt_payload);
-    
+
     Ok(packet)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_qname, max_payload_len_for_domain, build_query_with_edns0_payload, MAX_EDNS0_PAYLOAD};
+    use super::{
+        build_qname, build_query_with_edns0_payload, max_payload_len_for_domain, MAX_EDNS0_PAYLOAD,
+    };
 
     #[test]
     fn build_qname_rejects_payload_overflow() {
