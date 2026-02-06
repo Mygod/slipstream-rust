@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "FFI bindings and runtime helpers for picoquic in Slipstream"
 license = "Apache-2.0"
-repository = "https://github.com/Mygod/slipstream-rust"
+repository = "https://github.com/Fox-Fig/slipstream-rust-plus"
 readme = "../../README.md"
 
 [dependencies]
