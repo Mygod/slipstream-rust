@@ -21,7 +21,7 @@ We took the original Slipstream and gave it **superpowers**:
 
 ```mermaid
 %%{init: {'theme': 'dark'}}%%
-xy-chart-beta
+xychart-beta
     title "Download Speed Comparison (MB/s)"
     x-axis [dnstt, Slipstream (C), Rust (Auth), Rust Plus]
     y-axis "MB/s" 0..520
@@ -102,14 +102,14 @@ On your server outside the firewall:
 
 ```mermaid
 graph LR
-    User[👤 You] -->|1. TCP Traffic| Client[My Computer]
-    Client -->|2. Encrypted QUIC in DNS| R1[DNS 1.1.1.1]
-    Client -->|2. Encrypted QUIC in DNS| R2[DNS 8.8.8.8]
-    Client -->|2. Encrypted QUIC in DNS| R3[DNS 9.9.9.9]
-    R1 -->|3. Forward| Server[☁️ Remote VPS]
-    R2 -->|3. Forward| Server
-    R3 -->|3. Forward| Server
-    Server -->|4. Internet| World[🌍 The Internet]
+    User[👤 You] --> Client[My Computer]
+    Client --> R1[DNS 1.1.1.1]
+    Client --> R2[DNS 8.8.8.8]
+    Client --> R3[DNS 9.9.9.9]
+    R1 --> Server[☁️ Remote VPS]
+    R2 --> Server
+    R3 --> Server
+    Server --> World[🌍 The Internet]
 ```
 
 ---

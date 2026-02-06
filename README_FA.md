@@ -21,7 +21,7 @@
 
 ```mermaid
 %%{init: {'theme': 'dark'}}%%
-xy-chart-beta
+xychart-beta
     title "مقایسه سرعت دانلود (مگابایت بر ثانیه)"
     x-axis [dnstt, Slipstream (C), Rust (Auth), Rust Plus]
     y-axis "MB/s" 0..520
@@ -102,14 +102,14 @@ cargo build -p slipstream-client -p slipstream-server --release
 
 ```mermaid
 graph LR
-    User[👤 شما] -->|1. ترافیک اینترنت| Client[کامپیوتر من]
-    Client -->|2. داده مخفی| R1[DNS 1.1.1.1]
-    Client -->|2. داده مخفی| R2[DNS 8.8.8.8]
-    Client -->|2. داده مخفی| R3[DNS 9.9.9.9]
-    R1 -->|3. ارسال| Server[☁️ سرور خارج]
-    R2 -->|3. ارسال| Server
-    R3 -->|3. ارسال| Server
-    Server -->|4. اینترنت آزاد| World[🌍 اینترنت]
+    User[👤 شما] --> Client[کامپیوتر من]
+    Client --> R1[DNS 1.1.1.1]
+    Client --> R2[DNS 8.8.8.8]
+    Client --> R3[DNS 9.9.9.9]
+    R1 --> Server[☁️ سرور خارج]
+    R2 --> Server
+    R3 --> Server
+    Server --> World[🌍 اینترنت]
 ```
 
 ---
