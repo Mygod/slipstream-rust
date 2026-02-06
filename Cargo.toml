@@ -11,7 +11,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 description = "High-performance DNS tunnel carrying QUIC packets over DNS"
-license = "Apache-2.0"
+license = "GPL-3.0-only"
 repository = "https://github.com/Fox-Fig/slipstream-rust-plus"
 readme = "README.md"
 

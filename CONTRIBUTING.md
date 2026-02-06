@@ -1,51 +1,18 @@
+[⬅️ Back to README](README.md)
+
 # Contributing
 
-Thanks for your interest in Slipstream Rust.
+We welcome contributions to **Slipstream Rust Plus**!
 
-## Before you start
+## License Exception for Upstream Contribution
 
-- Please read AGENTS.md for repo-specific guidelines and commands.
-- Keep changes focused and easy to review.
-- Use ASCII unless a file already uses Unicode.
+Although this project is licensed under the **GNU General Public License v3.0 (GPLv3)**, the author grants the maintainers of the original upstream project (`Mygod/slipstream-rust`) the right to include, distribute, and modify the contributions made in this fork under the terms of the **Apache License 2.0**.
 
-## Development workflow
+This ensures that any improvements made here can be legally merged back into the upstream project if desired, while maintaining the strong copyleft protections of GPLv3 for this fork.
 
-Format:
+## How to Contribute
 
-```
-cargo fmt
-```
-
-Tests:
-
-```
-cargo test -p slipstream-dns
-cargo test
-```
-
-DNS behavior changes:
-
-- Update fixtures/vectors/dns-vectors.json via:
-
-```
-./scripts/gen_vectors.sh
-```
-
-- Update the protocol docs (docs/protocol.md and docs/dns-codec.md).
-
-Interop:
-
-- See docs/interop.md for local harnesses.
-
-## Style notes
-
-- Rust formatting is enforced by cargo fmt.
-- Shell scripts use 2-space indentation and strict mode.
-- C/Python use 4-space indentation.
-
-## Pull requests
-
-- Provide a short summary and rationale.
-- Include commands run (tests, benchmarks, interop, etc.).
-- Cargo.lock is committed for reproducible releases (this repo ships binaries).
-  Include it when dependency versions change.
+1.  Fork the repository.
+2.  Create a new branch for your feature or bugfix.
+3.  Commit your changes.
+4.  Push to your fork and submit a Pull Request.
