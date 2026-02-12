@@ -25,6 +25,15 @@ use tracing::{debug, error, warn};
 
 static INVARIANT_REPORTER: InvariantReporter = InvariantReporter::new(1_000_000);
 
+/// picoquic error codes that indicate the stream is already gone or terminal.
+/// Aborting (STOP_SENDING + RESET) would be redundant or harmful.
+const PICOQUIC_CANNOT_SET_ACTIVE_STREAM: i32 = 0x400 + 36;
+const PICOQUIC_INVALID_STREAM_ID: i32 = 0x400 + 14;
+
+fn is_terminal_mark_error(ret: i32) -> bool {
+    ret == PICOQUIC_CANNOT_SET_ACTIVE_STREAM || ret == PICOQUIC_INVALID_STREAM_ID
+}
+
 pub(crate) struct ServerState {
     target_addr: SocketAddr,
     streams: HashMap<StreamKey, ServerStream>,
@@ -171,6 +180,41 @@ impl ServerState {
             }
         }
         metrics
+    }
+
+    /// Re-mark streams stuck with `target_fin_pending` so picoquic re-schedules
+    /// their `prepare_to_send` callback. Returns `(remarked, cleaned_up)` counts.
+    /// If re-marking fails (e.g. picoquic already sent FIN/RESET), the stream
+    /// is aborted and removed to prevent permanent stalls.
+    pub(crate) fn remark_stalled_fin_streams(
+        &mut self,
+        cnx_id: usize,
+        cnx: *mut picoquic_cnx_t,
+    ) -> (usize, usize) {
+        let stalled: Vec<u64> = self
+            .streams
+            .iter()
+            .filter(|(key, stream)| key.cnx == cnx_id && stream.target_fin_pending)
+            .map(|(key, _)| key.stream_id)
+            .collect();
+        let mut remarked = 0;
+        let mut cleaned = 0;
+        for sid in stalled {
+            let ret = unsafe { picoquic_mark_active_stream(cnx, sid, 1, std::ptr::null_mut()) };
+            if ret == 0 {
+                remarked += 1;
+            } else {
+                let key = StreamKey {
+                    cnx: cnx_id,
+                    stream_id: sid,
+                };
+                if shutdown_stream(self, key).is_some() && !is_terminal_mark_error(ret) {
+                    unsafe { abort_stream_bidi(cnx, sid, SLIPSTREAM_INTERNAL_ERROR) };
+                }
+                cleaned += 1;
+            }
+        }
+        (remarked, cleaned)
     }
 
     pub(crate) fn stream_send_backlog_summaries(
@@ -949,7 +993,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                         );
                         state.last_mark_active_fail_log_at = now;
                     }
-                    if !forced_failure {
+                    if !forced_failure && !is_terminal_mark_error(ret) {
                         unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                     }
                     remove_stream = true;
@@ -998,7 +1042,7 @@ pub(crate) fn handle_command(state_ptr: *mut ServerState, command: Command) {
                         stream.flow.queued_bytes,
                         stream.flow.fin_offset
                     );
-                    if !forced_failure {
+                    if !forced_failure && !is_terminal_mark_error(ret) {
                         unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                     }
                 } else if state.debug_streams {

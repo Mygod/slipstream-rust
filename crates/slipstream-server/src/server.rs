@@ -440,6 +440,20 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                         );
                         last_flow_block_log_at = loop_time;
                     }
+                    // Re-mark stalled streams so picoquic re-schedules their
+                    // prepare_to_send callback and the pending FIN can be sent.
+                    // Streams that fail re-marking are cleaned up to prevent
+                    // permanent stalls.
+                    let (remarked, cleaned) =
+                        unsafe { (&mut *state_ptr).remark_stalled_fin_streams(cnx_id, slot.cnx) };
+                    if remarked > 0 || cleaned > 0 {
+                        tracing::debug!(
+                            "stalled fin streams cnx={}: remarked={} cleaned={}",
+                            cnx_id,
+                            remarked,
+                            cleaned,
+                        );
+                    }
                 }
             }
 
