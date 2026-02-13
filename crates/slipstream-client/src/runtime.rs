@@ -216,7 +216,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             picoquic_set_callback(cnx, Some(client_callback), state_ptr as *mut _);
             picoquic_enable_path_callbacks(cnx, 1);
             if config.keep_alive_interval > 0 {
-                picoquic_enable_keep_alive(cnx, config.keep_alive_interval as u64 * 1000);
+                picoquic_enable_keep_alive(cnx, config.keep_alive_interval as u64 * 1_000_000);
             } else {
                 picoquic_disable_keep_alive(cnx);
             }
