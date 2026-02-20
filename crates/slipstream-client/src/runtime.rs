@@ -9,7 +9,7 @@ use self::setup::{bind_tcp_listener, bind_udp_socket, compute_mtu, map_io};
 use crate::dns::{
     add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
     refresh_resolver_path, resolve_resolvers, resolver_mode_to_c, send_poll_queries,
-    sockaddr_storage_to_socket_addr, DnsResponseContext,
+    sockaddr_storage_to_socket_addr, DnsResponseContext, ResolverState,
 };
 use crate::error::ClientError;
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
@@ -66,6 +66,49 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
         }
     }
     dropped
+}
+
+fn total_pending_polls(resolvers: &[ResolverState]) -> usize {
+    resolvers
+        .iter()
+        .map(|resolver| resolver.pending_polls)
+        .sum()
+}
+
+fn total_inflight_polls(resolvers: &[ResolverState]) -> usize {
+    resolvers
+        .iter()
+        .map(|resolver| resolver.inflight_poll_ids.len())
+        .sum()
+}
+
+fn total_dns_responses(resolvers: &[ResolverState]) -> u64 {
+    resolvers
+        .iter()
+        .map(|resolver| resolver.debug.dns_responses)
+        .sum()
+}
+
+fn select_active_poll_target(
+    cnx: *mut picoquic_cnx_t,
+    resolvers: &mut [ResolverState],
+) -> Option<usize> {
+    let modes = [ResolverMode::Recursive, ResolverMode::Authoritative];
+    for mode in modes {
+        for idx in 0..resolvers.len() {
+            if resolvers[idx].mode != mode {
+                continue;
+            }
+            let ready = {
+                let resolver = &mut resolvers[idx];
+                refresh_resolver_path(cnx, resolver)
+            };
+            if ready {
+                return Some(idx);
+            }
+        }
+    }
+    None
 }
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
@@ -232,6 +275,12 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
+        let active_poll_cap_us = config.active_poll_cap_ms.saturating_mul(1_000).max(1);
+        let active_poll_base_us = DNS_POLL_SLICE_US.min(active_poll_cap_us);
+        let mut active_poll_backoff_us = active_poll_base_us;
+        let mut next_active_poll_at = current_time;
+        let mut last_dns_responses_total = 0u64;
+        let (mut last_enqueued_bytes_total, _) = unsafe { (*state_ptr).debug_snapshot() };
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -475,6 +524,43 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     last_flow_block_log_at = now;
                 }
             }
+            let mut force_authoritative_poll_path = None;
+            let now = unsafe { picoquic_current_time() };
+            let pending_polls_sum = total_pending_polls(&resolvers);
+            let inflight_polls_sum = total_inflight_polls(&resolvers);
+            let dns_responses_total = total_dns_responses(&resolvers);
+            let (enqueued_bytes_total, _) = unsafe { (*state_ptr).debug_snapshot() };
+            let has_useful_progress = dns_responses_total > last_dns_responses_total
+                || enqueued_bytes_total > last_enqueued_bytes_total;
+            if has_useful_progress {
+                active_poll_backoff_us = active_poll_base_us;
+                next_active_poll_at = now.saturating_add(active_poll_backoff_us);
+            }
+
+            let active_streams = streams_len > 0;
+            let no_poll_work = pending_polls_sum == 0 && inflight_polls_sum == 0;
+            if active_streams && no_poll_work && now >= next_active_poll_at {
+                if let Some(target_idx) = select_active_poll_target(cnx, &mut resolvers) {
+                    if resolvers[target_idx].mode == ResolverMode::Recursive {
+                        resolvers[target_idx].pending_polls =
+                            resolvers[target_idx].pending_polls.max(1);
+                    } else {
+                        force_authoritative_poll_path = Some(resolvers[target_idx].path_id);
+                    }
+                    active_poll_backoff_us = active_poll_backoff_us
+                        .saturating_mul(2)
+                        .min(active_poll_cap_us);
+                    next_active_poll_at = now.saturating_add(active_poll_backoff_us);
+                } else {
+                    next_active_poll_at = now.saturating_add(active_poll_base_us);
+                }
+            }
+            if !active_streams {
+                active_poll_backoff_us = active_poll_base_us;
+                next_active_poll_at = now;
+            }
+            last_dns_responses_total = dns_responses_total;
+            last_enqueued_bytes_total = enqueued_bytes_total;
             for resolver in resolvers.iter_mut() {
                 if !refresh_resolver_path(cnx, resolver) {
                     continue;
@@ -491,6 +577,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                         let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
                         if has_ready_stream && !flow_blocked {
                             poll_deficit = 0;
+                        }
+                        if force_authoritative_poll_path == Some(resolver.path_id) {
+                            poll_deficit = poll_deficit.max(1);
                         }
                         if poll_deficit > 0 && resolver.debug.enabled {
                             debug!(

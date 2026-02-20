@@ -54,6 +54,12 @@ struct Args {
     cert: Option<String>,
     #[arg(long = "keep-alive-interval", short = 't', default_value_t = 400)]
     keep_alive_interval: u16,
+    #[arg(
+        long = "active-poll-cap-ms",
+        default_value_t = 10_000u64,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    active_poll_cap_ms: u64,
     #[arg(long = "debug-poll")]
     debug_poll: bool,
     #[arg(long = "debug-streams")]
@@ -177,6 +183,16 @@ fn main() {
             });
         keep_alive_override.unwrap_or(args.keep_alive_interval)
     };
+    let active_poll_cap_ms = if cli_provided(&matches, "active_poll_cap_ms") {
+        args.active_poll_cap_ms
+    } else {
+        let active_poll_cap_override = parse_active_poll_cap_ms(&sip003_env.plugin_options)
+            .unwrap_or_else(|err| {
+                tracing::error!("SIP003 env error: {}", err);
+                std::process::exit(2);
+            });
+        active_poll_cap_override.unwrap_or(args.active_poll_cap_ms)
+    };
 
     let config = ClientConfig {
         tcp_listen_host: &tcp_listen_host,
@@ -187,6 +203,7 @@ fn main() {
         domain: &domain,
         cert: cert.as_deref(),
         keep_alive_interval: keep_alive_interval as usize,
+        active_poll_cap_ms,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
     };
@@ -363,6 +380,23 @@ fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<
     Ok(last)
 }
 
+fn parse_active_poll_cap_ms(options: &[sip003::Sip003Option]) -> Result<Option<u64>, String> {
+    let mut last = None;
+    for option in options {
+        if option.key == "active-poll-cap-ms" {
+            let value = option.value.trim();
+            let parsed = value
+                .parse::<u64>()
+                .map_err(|_| format!("Invalid active-poll-cap-ms value: {}", value))?;
+            if parsed == 0 {
+                return Err("active-poll-cap-ms must be >= 1".to_string());
+            }
+            last = Some(parsed);
+        }
+    }
+    Ok(last)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,5 +521,30 @@ mod tests {
         let parsed = parse_resolvers_from_options(&options).expect("options should parse");
         assert!(parsed.resolvers.is_empty());
         assert!(parsed.authoritative_remote);
+    }
+
+    #[test]
+    fn active_poll_cap_uses_last_value() {
+        let options = vec![
+            sip003::Sip003Option {
+                key: "active-poll-cap-ms".to_string(),
+                value: "5000".to_string(),
+            },
+            sip003::Sip003Option {
+                key: "active-poll-cap-ms".to_string(),
+                value: "12000".to_string(),
+            },
+        ];
+        let parsed = parse_active_poll_cap_ms(&options).expect("options should parse");
+        assert_eq!(parsed, Some(12_000));
+    }
+
+    #[test]
+    fn active_poll_cap_rejects_zero() {
+        let options = vec![sip003::Sip003Option {
+            key: "active-poll-cap-ms".to_string(),
+            value: "0".to_string(),
+        }];
+        assert!(parse_active_poll_cap_ms(&options).is_err());
     }
 }
