@@ -68,18 +68,21 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
     dropped
 }
 
-fn total_pending_polls(resolvers: &[ResolverState]) -> usize {
-    resolvers
-        .iter()
-        .map(|resolver| resolver.pending_polls)
-        .sum()
-}
-
-fn total_inflight_polls(resolvers: &[ResolverState]) -> usize {
-    resolvers
-        .iter()
-        .map(|resolver| resolver.inflight_poll_ids.len())
-        .sum()
+fn active_poll_work(cnx: *mut picoquic_cnx_t, resolvers: &mut [ResolverState]) -> (usize, usize) {
+    let mut pending = 0usize;
+    let mut inflight = 0usize;
+    for resolver in resolvers.iter_mut() {
+        if !refresh_resolver_path(cnx, resolver) {
+            // Late responses can repopulate queue state after a path drop; keep them
+            // from blocking global active polling while the resolver is unreachable.
+            resolver.pending_polls = 0;
+            resolver.inflight_poll_ids.clear();
+            continue;
+        }
+        pending = pending.saturating_add(resolver.pending_polls);
+        inflight = inflight.saturating_add(resolver.inflight_poll_ids.len());
+    }
+    (pending, inflight)
 }
 
 fn total_dns_responses(resolvers: &[ResolverState]) -> u64 {
@@ -526,8 +529,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             }
             let mut force_authoritative_poll_path = None;
             let now = unsafe { picoquic_current_time() };
-            let pending_polls_sum = total_pending_polls(&resolvers);
-            let inflight_polls_sum = total_inflight_polls(&resolvers);
+            let (pending_polls_sum, inflight_polls_sum) = active_poll_work(cnx, &mut resolvers);
             let dns_responses_total = total_dns_responses(&resolvers);
             let (enqueued_bytes_total, _) = unsafe { (*state_ptr).debug_snapshot() };
             let has_useful_progress = dns_responses_total > last_dns_responses_total
