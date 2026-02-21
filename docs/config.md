@@ -47,7 +47,7 @@ certificates are not verified.
 - `--max-connections`
   Caps concurrent QUIC connections and sizes internal connection tables (default: 256).
 - `--idle-timeout-seconds`
-  Closes idle QUIC connections after the given number of seconds (default: 1200).
+  Closes idle QUIC connections after the given number of seconds (default: 60).
   Set to 0 to disable idle GC.
 - `--reset-seed`
   Path to a 32-hex-char (16-byte) stateless reset seed. If the file does not

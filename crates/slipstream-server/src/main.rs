@@ -41,7 +41,7 @@ struct Args {
     domains: Vec<String>,
     #[arg(long = "max-connections", default_value_t = 256, value_parser = parse_max_connections)]
     max_connections: u32,
-    #[arg(long = "idle-timeout-seconds", default_value_t = 1200)]
+    #[arg(long = "idle-timeout-seconds", default_value_t = 60)]
     idle_timeout_seconds: u64,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
