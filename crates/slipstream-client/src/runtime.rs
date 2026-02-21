@@ -68,11 +68,11 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
     dropped
 }
 
-fn active_poll_work(resolvers: &mut [ResolverState]) -> (usize, usize) {
+fn active_poll_work(cnx: *mut picoquic_cnx_t, resolvers: &mut [ResolverState]) -> (usize, usize) {
     let mut pending = 0usize;
     let mut inflight = 0usize;
     for resolver in resolvers.iter_mut() {
-        let reachable = resolver.added && resolver.path_id >= 0;
+        let reachable = refresh_resolver_path(cnx, resolver);
         if !reachable {
             // Late responses can repopulate queue state after a path drop; keep them
             // from blocking global active polling while the resolver is unreachable.
@@ -537,7 +537,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             }
             let mut force_authoritative_poll_path = None;
             let now = unsafe { picoquic_current_time() };
-            let (pending_polls_sum, inflight_polls_sum) = active_poll_work(&mut resolvers);
+            let (pending_polls_sum, inflight_polls_sum) = active_poll_work(cnx, &mut resolvers);
             let polls_sent_before = total_polls_sent(&resolvers);
             let mut scheduled_active_poll = false;
             let dns_responses_total = total_dns_responses(&resolvers);

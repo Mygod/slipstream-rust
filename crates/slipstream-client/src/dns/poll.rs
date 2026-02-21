@@ -84,7 +84,6 @@ pub(crate) async fn send_poll_queries(
         resolver.local_addr_storage = Some(unsafe { std::ptr::read(local_addr_storage) });
         resolver.debug.send_packets = resolver.debug.send_packets.saturating_add(1);
         resolver.debug.send_bytes = resolver.debug.send_bytes.saturating_add(send_length as u64);
-        resolver.debug.polls_sent = resolver.debug.polls_sent.saturating_add(1);
 
         let poll_id = *dns_id;
         let qname = build_qname(&send_buf[..send_length], config.domain)
@@ -112,6 +111,7 @@ pub(crate) async fn send_poll_queries(
             }
             return Err(ClientError::new(err.to_string()));
         }
+        resolver.debug.polls_sent = resolver.debug.polls_sent.saturating_add(1);
         if resolver.mode == ResolverMode::Authoritative {
             resolver.inflight_poll_ids.insert(poll_id, current_time);
         }
