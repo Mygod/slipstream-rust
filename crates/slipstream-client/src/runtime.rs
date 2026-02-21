@@ -106,15 +106,11 @@ fn select_active_poll_target(
 ) -> Option<usize> {
     let modes = [ResolverMode::Recursive, ResolverMode::Authoritative];
     for mode in modes {
-        for idx in 0..resolvers.len() {
-            if resolvers[idx].mode != mode {
+        for (idx, resolver) in resolvers.iter_mut().enumerate() {
+            if resolver.mode != mode {
                 continue;
             }
-            let ready = {
-                let resolver = &mut resolvers[idx];
-                refresh_resolver_path(cnx, resolver)
-            };
-            if ready {
+            if refresh_resolver_path(cnx, resolver) {
                 return Some(idx);
             }
         }
