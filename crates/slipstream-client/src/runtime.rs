@@ -536,14 +536,14 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let polls_sent_before = total_polls_sent(&resolvers);
             let mut scheduled_active_poll = false;
             let dns_responses_total = total_dns_responses(&resolvers);
+            let needs_active_polling = streams_len > 0 && !has_ready_stream;
+            let no_poll_work = pending_polls_sum == 0 && inflight_polls_sum == 0;
             let has_useful_progress = dns_responses_total > last_dns_responses_total;
-            if has_useful_progress {
+            if has_useful_progress && (!needs_active_polling || !no_poll_work) {
                 active_poll_backoff_us = active_poll_base_us;
                 next_active_poll_at = now.saturating_add(active_poll_backoff_us);
             }
 
-            let needs_active_polling = streams_len > 0 && !has_ready_stream;
-            let no_poll_work = pending_polls_sum == 0 && inflight_polls_sum == 0;
             if needs_active_polling && no_poll_work && now >= next_active_poll_at {
                 if let Some(target_idx) = select_active_poll_target(cnx, &mut resolvers) {
                     scheduled_active_poll = true;
