@@ -68,11 +68,12 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
     dropped
 }
 
-fn active_poll_work(cnx: *mut picoquic_cnx_t, resolvers: &mut [ResolverState]) -> (usize, usize) {
+fn active_poll_work(resolvers: &mut [ResolverState]) -> (usize, usize) {
     let mut pending = 0usize;
     let mut inflight = 0usize;
     for resolver in resolvers.iter_mut() {
-        if !refresh_resolver_path(cnx, resolver) {
+        let reachable = resolver.added && resolver.path_id >= 0;
+        if !reachable {
             // Late responses can repopulate queue state after a path drop; keep them
             // from blocking global active polling while the resolver is unreachable.
             resolver.pending_polls = 0;
@@ -89,6 +90,13 @@ fn total_dns_responses(resolvers: &[ResolverState]) -> u64 {
     resolvers
         .iter()
         .map(|resolver| resolver.debug.dns_responses)
+        .sum()
+}
+
+fn total_polls_sent(resolvers: &[ResolverState]) -> u64 {
+    resolvers
+        .iter()
+        .map(|resolver| resolver.debug.polls_sent)
         .sum()
 }
 
@@ -529,7 +537,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             }
             let mut force_authoritative_poll_path = None;
             let now = unsafe { picoquic_current_time() };
-            let (pending_polls_sum, inflight_polls_sum) = active_poll_work(cnx, &mut resolvers);
+            let (pending_polls_sum, inflight_polls_sum) = active_poll_work(&mut resolvers);
+            let polls_sent_before = total_polls_sent(&resolvers);
+            let mut scheduled_active_poll = false;
             let dns_responses_total = total_dns_responses(&resolvers);
             let (enqueued_bytes_total, _) = unsafe { (*state_ptr).debug_snapshot() };
             let has_useful_progress = dns_responses_total > last_dns_responses_total
@@ -539,25 +549,22 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 next_active_poll_at = now.saturating_add(active_poll_backoff_us);
             }
 
-            let active_streams = streams_len > 0;
+            let needs_active_polling = streams_len > 0 && !has_ready_stream;
             let no_poll_work = pending_polls_sum == 0 && inflight_polls_sum == 0;
-            if active_streams && no_poll_work && now >= next_active_poll_at {
+            if needs_active_polling && no_poll_work && now >= next_active_poll_at {
                 if let Some(target_idx) = select_active_poll_target(cnx, &mut resolvers) {
+                    scheduled_active_poll = true;
                     if resolvers[target_idx].mode == ResolverMode::Recursive {
                         resolvers[target_idx].pending_polls =
                             resolvers[target_idx].pending_polls.max(1);
                     } else {
                         force_authoritative_poll_path = Some(resolvers[target_idx].path_id);
                     }
-                    active_poll_backoff_us = active_poll_backoff_us
-                        .saturating_mul(2)
-                        .min(active_poll_cap_us);
-                    next_active_poll_at = now.saturating_add(active_poll_backoff_us);
                 } else {
                     next_active_poll_at = now.saturating_add(active_poll_base_us);
                 }
             }
-            if !active_streams {
+            if !needs_active_polling {
                 active_poll_backoff_us = active_poll_base_us;
                 next_active_poll_at = now;
             }
@@ -649,6 +656,18 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                         }
                     }
                 }
+            }
+            if needs_active_polling && scheduled_active_poll {
+                let poll_retry_now = unsafe { picoquic_current_time() };
+                let polls_sent_after = total_polls_sent(&resolvers);
+                if polls_sent_after > polls_sent_before {
+                    active_poll_backoff_us = active_poll_backoff_us
+                        .saturating_mul(2)
+                        .min(active_poll_cap_us);
+                } else {
+                    active_poll_backoff_us = active_poll_base_us;
+                }
+                next_active_poll_at = poll_retry_now.saturating_add(active_poll_backoff_us);
             }
 
             let report_time = unsafe { picoquic_current_time() };
