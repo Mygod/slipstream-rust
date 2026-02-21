@@ -93,6 +93,13 @@ fn total_dns_responses(resolvers: &[ResolverState]) -> u64 {
         .sum()
 }
 
+fn total_poll_completions(resolvers: &[ResolverState]) -> u64 {
+    resolvers
+        .iter()
+        .map(|resolver| resolver.debug.poll_completions)
+        .sum()
+}
+
 fn total_polls_sent(resolvers: &[ResolverState]) -> u64 {
     resolvers
         .iter()
@@ -287,6 +294,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut active_poll_backoff_us = active_poll_base_us;
         let mut next_active_poll_at = current_time;
         let mut last_dns_responses_total = 0u64;
+        let mut last_poll_completions_total = 0u64;
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -536,10 +544,14 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let polls_sent_before = total_polls_sent(&resolvers);
             let mut scheduled_active_poll = false;
             let dns_responses_total = total_dns_responses(&resolvers);
+            let poll_completions_total = total_poll_completions(&resolvers);
             let needs_active_polling = streams_len > 0 && !has_ready_stream;
             let no_poll_work = pending_polls_sum == 0 && inflight_polls_sum == 0;
             let has_useful_progress = dns_responses_total > last_dns_responses_total;
-            if has_useful_progress && (!needs_active_polling || !no_poll_work) {
+            let poll_response_completed = poll_completions_total > last_poll_completions_total;
+            if has_useful_progress
+                && (!needs_active_polling || !no_poll_work || poll_response_completed)
+            {
                 active_poll_backoff_us = active_poll_base_us;
                 next_active_poll_at = now.saturating_add(active_poll_backoff_us);
             }
@@ -562,6 +574,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 next_active_poll_at = now;
             }
             last_dns_responses_total = dns_responses_total;
+            last_poll_completions_total = poll_completions_total;
             for resolver in resolvers.iter_mut() {
                 if !refresh_resolver_path(cnx, resolver) {
                     continue;

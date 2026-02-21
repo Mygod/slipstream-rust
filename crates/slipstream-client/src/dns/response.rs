@@ -72,8 +72,11 @@ pub(crate) fn handle_dns_response(
             }
             resolver.debug.dns_responses = resolver.debug.dns_responses.saturating_add(1);
             if let Some(response_id) = response_id {
-                if resolver.mode == ResolverMode::Authoritative {
-                    resolver.inflight_poll_ids.remove(&response_id);
+                if resolver.mode == ResolverMode::Authoritative
+                    && resolver.inflight_poll_ids.remove(&response_id).is_some()
+                {
+                    resolver.debug.poll_completions =
+                        resolver.debug.poll_completions.saturating_add(1);
                 }
             }
             if resolver.mode == ResolverMode::Recursive {
@@ -84,8 +87,10 @@ pub(crate) fn handle_dns_response(
     } else if let Some(response_id) = response_id {
         if let Some(resolver) = find_resolver_by_addr(ctx.resolvers, peer) {
             resolver.debug.dns_responses = resolver.debug.dns_responses.saturating_add(1);
-            if resolver.mode == ResolverMode::Authoritative {
-                resolver.inflight_poll_ids.remove(&response_id);
+            if resolver.mode == ResolverMode::Authoritative
+                && resolver.inflight_poll_ids.remove(&response_id).is_some()
+            {
+                resolver.debug.poll_completions = resolver.debug.poll_completions.saturating_add(1);
             }
         }
     }
