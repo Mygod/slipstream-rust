@@ -14,7 +14,7 @@ const MAX_POLL_BURST: usize = PICOQUIC_PACKET_LOOP_RECV_MAX;
 
 pub(crate) struct DnsResponseContext<'a> {
     pub(crate) quic: *mut picoquic_quic_t,
-    pub(crate) local_addr_storage: &'a libc::sockaddr_storage,
+    pub(crate) local_addr_storage: &'a slipstream_ffi::SockaddrStorage,
     pub(crate) resolvers: &'a mut [ResolverState],
 }
 

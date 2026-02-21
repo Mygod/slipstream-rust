@@ -86,7 +86,7 @@ pub(crate) fn drain_path_events(
 }
 
 fn path_peer_addr(cnx: *mut picoquic_cnx_t, unique_path_id: u64) -> Option<SocketAddr> {
-    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut storage: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
     let ret = unsafe { picoquic_get_path_addr(cnx, unique_path_id, 2, &mut storage) };
     if ret != 0 {
         return None;

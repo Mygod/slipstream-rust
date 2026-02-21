@@ -28,7 +28,24 @@ pub(crate) fn build_picoquic(
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join(".picoquic-build"));
 
-    let mut command = Command::new(script);
+    let mut command = if cfg!(windows) {
+        // On Windows, find Git Bash explicitly to avoid WSL bash.exe from System32
+        let git_bash_paths = [
+            PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+            PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+        ];
+
+        let bash_exe = git_bash_paths
+            .iter()
+            .find(|path| path.exists())
+            .ok_or("Git Bash not found. Please install Git for Windows.")?;
+
+        let mut cmd = Command::new(bash_exe);
+        cmd.arg(&script);
+        cmd
+    } else {
+        Command::new(script)
+    };
     command
         .env("PICOQUIC_DIR", picoquic_dir)
         .env("PICOQUIC_BUILD_DIR", build_dir)

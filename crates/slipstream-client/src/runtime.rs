@@ -355,8 +355,8 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             for _ in 0..packet_loop_send_max {
                 let current_time = unsafe { picoquic_current_time() };
                 let mut send_length: libc::size_t = 0;
-                let mut addr_to: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-                let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+                let mut addr_to: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
+                let mut addr_from: slipstream_ffi::SockaddrStorage = unsafe { std::mem::zeroed() };
                 let mut if_index: libc::c_int = 0;
                 let mut log_cid = picoquic_connection_id_t {
                     id: [0; PICOQUIC_CONNECTION_ID_MAX_SIZE],

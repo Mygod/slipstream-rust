@@ -7,10 +7,16 @@ license = "Apache-2.0"
 repository = "https://github.com/Mygod/slipstream-rust"
 readme = "../../README.md"
 
+[build-dependencies]
+cc = "1.0"
+
 [dependencies]
 libc = "0.2"
 openssl-sys = { version = "0.9", optional = true, features = ["vendored"] }
 slipstream-core = { path = "../slipstream-core" }
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winsock2", "ws2def", "ws2ipdef"] }
 
 [features]
 default = []
