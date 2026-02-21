@@ -19,7 +19,7 @@ Common flags:
 - --cert <PATH> (optional; PEM-encoded server certificate for strict leaf pinning)
 - --authoritative <IP:PORT> (repeatable; mark a resolver path as authoritative and use pacing-based polling)
 - --gso (currently not implemented in the Rust loop; prints a warning)
-- --keep-alive-interval <SECONDS> (default: 400)
+- --keep-alive-interval <MILLISECONDS> (default: 400)
 
 Example:
 
