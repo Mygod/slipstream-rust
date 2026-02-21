@@ -291,7 +291,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut active_poll_backoff_us = active_poll_base_us;
         let mut next_active_poll_at = current_time;
         let mut last_dns_responses_total = 0u64;
-        let (mut last_enqueued_bytes_total, _) = unsafe { (*state_ptr).debug_snapshot() };
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -541,9 +540,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let polls_sent_before = total_polls_sent(&resolvers);
             let mut scheduled_active_poll = false;
             let dns_responses_total = total_dns_responses(&resolvers);
-            let (enqueued_bytes_total, _) = unsafe { (*state_ptr).debug_snapshot() };
-            let has_useful_progress = dns_responses_total > last_dns_responses_total
-                || enqueued_bytes_total > last_enqueued_bytes_total;
+            let has_useful_progress = dns_responses_total > last_dns_responses_total;
             if has_useful_progress {
                 active_poll_backoff_us = active_poll_base_us;
                 next_active_poll_at = now.saturating_add(active_poll_backoff_us);
@@ -569,7 +566,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 next_active_poll_at = now;
             }
             last_dns_responses_total = dns_responses_total;
-            last_enqueued_bytes_total = enqueued_bytes_total;
             for resolver in resolvers.iter_mut() {
                 if !refresh_resolver_path(cnx, resolver) {
                     continue;
