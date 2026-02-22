@@ -72,6 +72,26 @@ cargo run -p slipstream-client -- \
 
 Note: You can also run the client against a resolver that forwards to the server. For local testing, see the interop docs.
 
+## Production note: conntrack for UDP/53
+
+For a public `slipstream-server` on port 53, tune conntrack above many distro defaults.
+
+Recommended baseline:
+
+```conf
+net.netfilter.nf_conntrack_max = 262144
+net.netfilter.nf_conntrack_udp_timeout = 15
+net.netfilter.nf_conntrack_udp_timeout_stream = 60
+```
+
+Sizing tiers:
+
+- 1 GB RAM: `131072`
+- 2-4 GB RAM: `262144`
+- 8 GB+ RAM: `524288`
+
+Keep steady-state `conntrack -C` below about 60% of `nf_conntrack_max`.
+
 ## Benchmarks (local snapshot)
 
 All results below are end-to-end completion times in seconds (lower is better),
