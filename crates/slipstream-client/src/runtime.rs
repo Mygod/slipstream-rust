@@ -129,11 +129,17 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let _state = state;
 
     let mut reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
+    let mut primary_idx: usize = 0;
 
     loop {
         let mut resolvers = resolve_resolvers(config.resolvers, mtu, config.debug_poll)?;
         if resolvers.is_empty() {
             return Err(ClientError::new("At least one resolver is required"));
+        }
+        if !resolvers.is_empty() {
+            let rotate_by = primary_idx % resolvers.len();
+            resolvers.rotate_left(rotate_by);
+            primary_idx = primary_idx.wrapping_add(1);
         }
 
         let mut local_addr_storage = socket_addr_to_storage(udp.local_addr().map_err(map_io)?);
