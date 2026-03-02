@@ -129,9 +129,18 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let _state = state;
 
     let mut reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
+    let mut primary_idx: usize = 0;
 
     loop {
-        let mut resolvers = resolve_resolvers(config.resolvers, mtu, config.debug_poll)?;
+        let mut resolver_specs: Vec<_> = config.resolvers.to_vec();
+
+        if !resolver_specs.is_empty() {
+            let rotate_by = primary_idx % resolver_specs.len();
+            resolver_specs.rotate_left(rotate_by);
+            primary_idx = primary_idx.wrapping_add(1);
+        }
+
+        let mut resolvers = resolve_resolvers(resolver_specs.as_slice(), mtu, config.debug_poll)?;
         if resolvers.is_empty() {
             return Err(ClientError::new("At least one resolver is required"));
         }
