@@ -1,15 +1,16 @@
 use crate::config::{ensure_cert_key, load_or_create_reset_seed, ResetSeed};
 use crate::udp_fallback::{handle_packet, FallbackManager, PacketContext, MAX_UDP_PACKET_SIZE};
+use libc::c_void;
 use slipstream_core::{
     net::{bind_first_resolved, bind_udp_socket_addr, is_transient_udp_error},
     normalize_dual_stack_addr, resolve_host_port, HostPort,
 };
 use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
 use slipstream_ffi::picoquic::{
-    picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_delete_cnx,
-    picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_prepare_packet_ex, picoquic_quic_t,
-    slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_server_cc_algorithm,
-    PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
+    picoquic_cnx_t, picoquic_connection_id_t, picoquic_create, picoquic_current_time,
+    picoquic_delete_cnx, picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_prepare_packet_ex,
+    picoquic_quic_t, slipstream_has_ready_stream, slipstream_is_flow_blocked,
+    slipstream_server_cc_algorithm, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
 use slipstream_ffi::{
     configure_quic_with_custom, socket_addr_to_storage, take_crypto_errors, QuicGuard,
@@ -19,7 +20,7 @@ use std::ffi::CString;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket as TokioUdpSocket;
@@ -49,6 +50,44 @@ extern "C" fn handle_sigterm(_signum: libc::c_int) {
     SHOULD_SHUTDOWN.store(true, Ordering::Relaxed);
 }
 
+/// QUIC-LB plaintext CID callback (config_rotation=0, 1 byte server_id + 6 byte nonce = 8 bytes total).
+/// Uses 8 bytes so picoquic's default local_cnxid_length (8) matches without calling picoquic_set_default_connection_id_length.
+///
+/// # Safety
+/// `cnx_id_cb_data` must point to a valid `u8` (server_id) for the QUIC context lifetime.
+unsafe extern "C" fn quic_lb_cnx_id_callback(
+    _quic: *mut picoquic_quic_t,
+    _cnx_id_local: picoquic_connection_id_t,
+    _cnx_id_remote: picoquic_connection_id_t,
+    cnx_id_cb_data: *mut c_void,
+    cnx_id_returned: *mut picoquic_connection_id_t,
+) {
+    if cnx_id_cb_data.is_null() || cnx_id_returned.is_null() {
+        return;
+    }
+    let server_id = *cnx_id_cb_data.cast::<u8>();
+    const CONFIG_ROTATION: u8 = 0;
+    const LENGTH_AFTER_FIRST: u8 = 7; // 8 bytes total: first octet (1) + server_id (1) + nonce (6)
+    let first_octet = (CONFIG_ROTATION << 6) | LENGTH_AFTER_FIRST;
+    (*cnx_id_returned).id[0] = first_octet;
+    (*cnx_id_returned).id[1] = server_id;
+    let mut nonce = [0u8; 6];
+    if getrandom::getrandom(&mut nonce).is_err() {
+        static QUIC_LB_NONCE_FALLBACK: AtomicU32 = AtomicU32::new(0);
+        let c = QUIC_LB_NONCE_FALLBACK.fetch_add(1, Ordering::Relaxed);
+        nonce[..4].copy_from_slice(&c.to_le_bytes());
+        // bytes 4..6 left zero or could add more entropy
+    }
+    std::ptr::copy_nonoverlapping(
+        nonce.as_ptr(),
+        std::ptr::addr_of_mut!((*cnx_id_returned).id)
+            .cast::<u8>()
+            .add(2),
+        6,
+    );
+    (*cnx_id_returned).id_len = 8;
+}
+
 #[derive(Debug)]
 pub struct ServerError {
     message: String,
@@ -70,6 +109,7 @@ impl fmt::Display for ServerError {
 
 impl std::error::Error for ServerError {}
 
+#[derive(Debug)]
 pub struct ServerConfig {
     pub dns_listen_host: String,
     pub dns_listen_port: u16,
@@ -83,6 +123,8 @@ pub struct ServerConfig {
     pub idle_timeout_seconds: u64,
     pub debug_streams: bool,
     pub debug_commands: bool,
+    /// QUIC-LB server_id for stateless LB routing (plaintext CIDs).
+    pub quic_lb_server_id: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -207,6 +249,26 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         .as_ref()
         .map(|seed| seed.bytes.as_ptr())
         .unwrap_or(std::ptr::null());
+    let quic_lb_server_id_storage: Option<Box<u8>> = config.quic_lb_server_id.map(Box::new);
+    if let Some(ref sid) = quic_lb_server_id_storage {
+        tracing::info!("QUIC-LB enabled: server_id={}", **sid);
+    }
+    let (cnx_id_callback, cnx_id_cb_data) = match &quic_lb_server_id_storage {
+        Some(b) => (
+            Some(
+                quic_lb_cnx_id_callback
+                    as unsafe extern "C" fn(
+                        *mut picoquic_quic_t,
+                        picoquic_connection_id_t,
+                        picoquic_connection_id_t,
+                        *mut c_void,
+                        *mut picoquic_connection_id_t,
+                    ),
+            ),
+            b.as_ref() as *const u8 as *mut c_void,
+        ),
+        None => (None, std::ptr::null_mut()),
+    };
     let quic = unsafe {
         picoquic_create(
             config.max_connections,
@@ -216,8 +278,8 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             alpn.as_ptr(),
             Some(server_callback),
             state_ptr as *mut _,
-            None,
-            std::ptr::null_mut(),
+            cnx_id_callback,
+            cnx_id_cb_data,
             reset_seed_ptr,
             current_time,
             std::ptr::null_mut(),
