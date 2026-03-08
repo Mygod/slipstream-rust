@@ -1,13 +1,13 @@
 use crate::config::{ensure_cert_key, load_or_create_reset_seed, ResetSeed};
 use crate::udp_fallback::{handle_packet, FallbackManager, PacketContext, MAX_UDP_PACKET_SIZE};
+use libc::c_void;
 use slipstream_core::{
     net::{bind_first_resolved, bind_udp_socket_addr, is_transient_udp_error},
     normalize_dual_stack_addr, resolve_host_port, HostPort,
 };
 use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
-use libc::c_void;
 use slipstream_ffi::picoquic::{
-    picoquic_connection_id_t, picoquic_cnx_t, picoquic_create, picoquic_current_time,
+    picoquic_cnx_t, picoquic_connection_id_t, picoquic_create, picoquic_current_time,
     picoquic_delete_cnx, picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_prepare_packet_ex,
     picoquic_quic_t, slipstream_has_ready_stream, slipstream_is_flow_blocked,
     slipstream_server_cc_algorithm, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
@@ -80,7 +80,9 @@ unsafe extern "C" fn quic_lb_cnx_id_callback(
     }
     std::ptr::copy_nonoverlapping(
         nonce.as_ptr(),
-        std::ptr::addr_of_mut!((*cnx_id_returned).id).cast::<u8>().add(2),
+        std::ptr::addr_of_mut!((*cnx_id_returned).id)
+            .cast::<u8>()
+            .add(2),
         6,
     );
     (*cnx_id_returned).id_len = 8;
@@ -249,20 +251,20 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         .unwrap_or(std::ptr::null());
     let mut quic_lb_server_id_holder = config.quic_lb_server_id;
     if let Some(sid) = config.quic_lb_server_id {
-        tracing::info!(
-            "QUIC-LB enabled: server_id={}",
-            sid
-        );
+        tracing::info!("QUIC-LB enabled: server_id={}", sid);
     }
     let (cnx_id_callback, cnx_id_cb_data) = match quic_lb_server_id_holder.as_mut() {
         Some(id) => (
-            Some(quic_lb_cnx_id_callback as unsafe extern "C" fn(
-                *mut picoquic_quic_t,
-                picoquic_connection_id_t,
-                picoquic_connection_id_t,
-                *mut c_void,
-                *mut picoquic_connection_id_t,
-            )),
+            Some(
+                quic_lb_cnx_id_callback
+                    as unsafe extern "C" fn(
+                        *mut picoquic_quic_t,
+                        picoquic_connection_id_t,
+                        picoquic_connection_id_t,
+                        *mut c_void,
+                        *mut picoquic_connection_id_t,
+                    ),
+            ),
             id as *mut u8 as *mut c_void,
         ),
         None => (None, std::ptr::null_mut()),
