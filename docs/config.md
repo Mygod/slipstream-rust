@@ -56,9 +56,9 @@ certificates are not verified.
   survive restarts.
 - `--quic-lb-server-id` (0–255)
   When set, the server generates QUIC-LB plaintext connection IDs (config
-  rotation 0, 1-byte server_id, 4-byte nonce) so a QUIC-LB-aware load balancer
-  can route by server_id statelessly. Each backend in a pool should use a
-  distinct value (e.g. 0, 1, 2). SIP003 plugin option: `quic_lb_server_id=N`.
+  rotation 0, 1-byte server_id, 6-byte nonce; 8 bytes total) so a QUIC-LB-aware
+  load balancer can route by server_id statelessly. Each backend in a pool
+  should use a distinct value (e.g. 0, 1, 2). SIP003 plugin option: `quic_lb_server_id=N`.
 
 ## picoquic build environment
 

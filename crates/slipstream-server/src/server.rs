@@ -249,12 +249,12 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         .as_ref()
         .map(|seed| seed.bytes.as_ptr())
         .unwrap_or(std::ptr::null());
-    let mut quic_lb_server_id_holder = config.quic_lb_server_id;
-    if let Some(sid) = config.quic_lb_server_id {
-        tracing::info!("QUIC-LB enabled: server_id={}", sid);
+    let quic_lb_server_id_storage: Option<Box<u8>> = config.quic_lb_server_id.map(Box::new);
+    if let Some(ref sid) = quic_lb_server_id_storage {
+        tracing::info!("QUIC-LB enabled: server_id={}", **sid);
     }
-    let (cnx_id_callback, cnx_id_cb_data) = match quic_lb_server_id_holder.as_mut() {
-        Some(id) => (
+    let (cnx_id_callback, cnx_id_cb_data) = match &quic_lb_server_id_storage {
+        Some(b) => (
             Some(
                 quic_lb_cnx_id_callback
                     as unsafe extern "C" fn(
@@ -265,7 +265,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                         *mut picoquic_connection_id_t,
                     ),
             ),
-            id as *mut u8 as *mut c_void,
+            b.as_ref() as *const u8 as *mut c_void,
         ),
         None => (None, std::ptr::null_mut()),
     };
