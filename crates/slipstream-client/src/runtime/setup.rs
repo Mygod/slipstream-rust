@@ -1,8 +1,7 @@
 use crate::error::ClientError;
 use slipstream_core::net::{bind_first_resolved, bind_tcp_listener_addr, bind_udp_socket_addr};
-use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use tokio::net::{lookup_host, TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
+use tokio::net::{TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
 use tracing::warn;
 
 pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {

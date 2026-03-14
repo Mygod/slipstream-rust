@@ -62,7 +62,7 @@ fn decode_slot(
     domains: &[&str],
     quic: *mut picoquic_quic_t,
     current_time: u64,
-    local_addr_storage: &libc::sockaddr_storage,
+    local_addr_storage: &slipstream_ffi::SockaddrStorage,
 ) -> Result<DecodeSlotOutcome, ServerError> {
     match decode_query_with_domains(packet, domains) {
         Ok(query) => {

@@ -1,7 +1,4 @@
-use slipstream_ffi::picoquic::{
-    picoquic_cnx_t, picoquic_incoming_packet_ex, picoquic_quic_t, slipstream_disable_ack_delay,
-};
-#[cfg(not(windows))]
+use slipstream_ffi::picoquic::picoquic_quic_t;
 use slipstream_ffi::socket_addr_to_storage;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
