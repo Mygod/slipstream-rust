@@ -217,6 +217,7 @@ jobs:
           $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
           $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe |
             Select-Object -First 1
+          $platformToolset = "v143"
           $windowsSdk = Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Include") -Directory |
             Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } |
             Sort-Object { [version]$_.Name } -Descending |
@@ -245,14 +246,14 @@ jobs:
             git fetch --depth 1 origin $picotlsCommit
             git checkout -q $picotlsCommit
             git submodule update --init --recursive
-            & $msbuild "/p:Configuration=Release" "/p:Platform=x64" "/p:WindowsTargetPlatformVersion=$windowsSdk" /m picotlsvs\picotlsvs.sln
+            & $msbuild "/p:Configuration=Release" "/p:Platform=x64" "/p:PlatformToolset=$platformToolset" "/p:WindowsTargetPlatformVersion=$windowsSdk" /m picotlsvs\picotlsvs.sln
           } finally {
             Pop-Location
           }
 
           Push-Location (Join-Path $repo "vendor\picoquic")
           try {
-            & $msbuild "/p:Configuration=Release" "/p:Platform=x64" "/p:WindowsTargetPlatformVersion=$windowsSdk" /m picoquic.sln /t:picoquic
+            & $msbuild "/p:Configuration=Release" "/p:Platform=x64" "/p:PlatformToolset=$platformToolset" "/p:WindowsTargetPlatformVersion=$windowsSdk" /m picoquic.sln /t:picoquic
           } finally {
             Pop-Location
           }
