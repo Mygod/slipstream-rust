@@ -219,7 +219,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
     for lib in picoquic_libs.libs {
-        if is_windows && matches!(lib, "picoquic_core" | "picoquic-core" | "picoquic") {
+        if is_windows && needs_whole_archive_windows(lib) {
             println!("cargo:rustc-link-lib=static:+whole-archive={}", lib);
         } else {
             println!("cargo:rustc-link-lib=static={}", lib);
@@ -306,4 +306,23 @@ fn add_parent_dir(dirs: &mut Vec<PathBuf>, path: &Path) {
     if let Some(parent) = path.parent() {
         push_unique_dir(dirs, parent.to_path_buf());
     }
+}
+
+fn needs_whole_archive_windows(lib: &str) -> bool {
+    matches!(
+        lib,
+        "picoquic_core"
+            | "picoquic-core"
+            | "picoquic"
+            | "picotls_core"
+            | "picotls-core"
+            | "picotls_openssl"
+            | "picotls-openssl"
+            | "picotls_minicrypto"
+            | "picotls-minicrypto"
+            | "picotls_minicrypto_deps"
+            | "picotls-minicrypto-deps"
+            | "picotls_fusion"
+            | "picotls-fusion"
+    )
 }
