@@ -35,8 +35,8 @@ Notes:
 
 - Resolver addresses may be IPv4 or bracketed IPv6; mixed families are supported.
 - IPv6 resolvers must be bracketed, for example: [2001:db8::1]:53.
-- When binding the default `--tcp-listen-host ::`, slipstream falls back to `0.0.0.0` if IPv6 is unavailable on the host.
-- IPv4 resolvers require an IPv6 dual-stack UDP socket; slipstream attempts to set IPV6_V6ONLY=0, but some OSes may still require sysctl changes.
+- When IPv6 is unavailable, slipstream falls back to `0.0.0.0` for the default `--tcp-listen-host ::` listener and for its local UDP socket.
+- When IPv6 is available, slipstream uses an IPv6 dual-stack UDP socket for mixed-family resolver support; if `IPV6_V6ONLY=0` is disallowed, some OSes may still require sysctl changes. In IPv4-only fallback mode, only IPv4 resolvers are usable.
 - Provide --cert to enable strict leaf pinning; omit it for legacy/no-verification behavior.
 - The pinned certificate must match the server leaf exactly; CA bundles are not supported.
 - Resolver order follows the CLI; the first resolver becomes path 0.

@@ -8,6 +8,29 @@ use tracing::warn;
 
 use super::debug::DebugMetrics;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PeerAddrMode {
+    Native,
+    DualStack,
+}
+
+impl PeerAddrMode {
+    pub(crate) fn from_local_addr(addr: SocketAddr) -> Self {
+        if matches!(addr, SocketAddr::V6(_)) {
+            Self::DualStack
+        } else {
+            Self::Native
+        }
+    }
+
+    pub(crate) fn canonicalize(self, addr: SocketAddr) -> SocketAddr {
+        match self {
+            Self::Native => addr,
+            Self::DualStack => normalize_dual_stack_addr(addr),
+        }
+    }
+}
+
 pub(crate) struct ResolverState {
     pub(crate) addr: SocketAddr,
     pub(crate) storage: libc::sockaddr_storage,
@@ -38,13 +61,14 @@ pub(crate) fn resolve_resolvers(
     resolvers: &[ResolverSpec],
     mtu: u32,
     debug_poll: bool,
+    peer_addr_mode: PeerAddrMode,
 ) -> Result<Vec<ResolverState>, ClientError> {
     let mut resolved = Vec::with_capacity(resolvers.len());
     let mut seen = HashMap::new();
     for (idx, resolver) in resolvers.iter().enumerate() {
         let addr = resolve_host_port(&resolver.resolver)
             .map_err(|err| ClientError::new(err.to_string()))?;
-        let addr = normalize_dual_stack_addr(addr);
+        let addr = peer_addr_mode.canonicalize(addr);
         if let Some(existing_mode) = seen.get(&addr) {
             return Err(ClientError::new(format!(
                 "Duplicate resolver address {} (modes: {:?} and {:?})",
@@ -100,9 +124,10 @@ pub(crate) fn sockaddr_storage_to_socket_addr(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_resolvers;
+    use super::{resolve_resolvers, PeerAddrMode};
     use slipstream_core::{AddressFamily, HostPort};
     use slipstream_ffi::{ResolverMode, ResolverSpec};
+    use std::net::SocketAddr;
 
     #[test]
     fn rejects_duplicate_resolver_addr() {
@@ -125,9 +150,25 @@ mod tests {
             },
         ];
 
-        match resolve_resolvers(&resolvers, 900, false) {
+        match resolve_resolvers(&resolvers, 900, false, PeerAddrMode::DualStack) {
             Ok(_) => panic!("expected duplicate resolver error"),
             Err(err) => assert!(err.to_string().contains("Duplicate resolver address")),
         }
+    }
+
+    #[test]
+    fn keeps_ipv4_resolver_family_without_dual_stack_mapping() {
+        let resolvers = vec![ResolverSpec {
+            resolver: HostPort {
+                host: "127.0.0.1".to_string(),
+                port: 8853,
+                family: AddressFamily::V4,
+            },
+            mode: ResolverMode::Recursive,
+        }];
+
+        let resolved = resolve_resolvers(&resolvers, 900, false, PeerAddrMode::Native)
+            .expect("resolve resolver");
+        assert!(matches!(resolved[0].addr, SocketAddr::V4(_)));
     }
 }

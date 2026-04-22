@@ -2,7 +2,6 @@ use crate::error::ClientError;
 use slipstream_core::net::{
     bind_first_resolved_with_ipv4_fallback, bind_tcp_listener_addr, bind_udp_socket_addr,
 };
-use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use tokio::net::{TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
 
 pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
@@ -21,8 +20,15 @@ pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
 }
 
 pub(crate) async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {
-    let bind_addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0));
-    bind_udp_socket_addr(bind_addr, "UDP socket").map_err(map_io)
+    bind_first_resolved_with_ipv4_fallback(
+        "::",
+        0,
+        |addr| bind_udp_socket_addr(addr, "UDP socket"),
+        "UDP socket",
+    )
+    .await
+    .map(|(socket, _)| socket)
+    .map_err(map_io)
 }
 
 pub(crate) async fn bind_tcp_listener(

@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use tokio::net::UdpSocket as TokioUdpSocket;
 
 use super::path::refresh_resolver_path;
-use super::resolver::{sockaddr_storage_to_socket_addr, ResolverState};
-use slipstream_core::normalize_dual_stack_addr;
+use super::resolver::{sockaddr_storage_to_socket_addr, PeerAddrMode, ResolverState};
 
 const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 5_000_000;
 
@@ -38,6 +37,7 @@ pub(crate) async fn send_poll_queries(
     local_addr_storage: &mut libc::sockaddr_storage,
     dns_id: &mut u16,
     resolver: &mut ResolverState,
+    peer_addr_mode: PeerAddrMode,
     remaining: &mut usize,
     send_buf: &mut [u8],
 ) -> Result<(), ClientError> {
@@ -103,7 +103,7 @@ pub(crate) async fn send_poll_queries(
         let packet = encode_query(&params).map_err(|err| ClientError::new(err.to_string()))?;
 
         let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
-        let dest = normalize_dual_stack_addr(dest);
+        let dest = peer_addr_mode.canonicalize(dest);
         if let Err(err) = udp.send_to(&packet, dest).await {
             if is_transient_udp_error(&err) {
                 remaining_count = remaining_count.saturating_add(1);
