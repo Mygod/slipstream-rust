@@ -152,7 +152,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install cmake pkgconfiglite strawberryperl -y
+          choco install pkgconfiglite strawberryperl -y
 
           # Find and configure OpenSSL
           $opensslPaths = @(
@@ -170,6 +170,7 @@ jobs:
               if ($libDir) {
                 echo "OPENSSL_DIR=$path" >> $env:GITHUB_ENV
                 echo "OPENSSL_ROOT_DIR=$path" >> $env:GITHUB_ENV
+                echo "OPENSSL64DIR=$path" >> $env:GITHUB_ENV
                 echo "OPENSSL_LIB_DIR=$libDir" >> $env:GITHUB_ENV
                 echo "OPENSSL_INCLUDE_DIR=$path\include" >> $env:GITHUB_ENV
                 Write-Host "OpenSSL configured at $path (libs in $libDir)"
@@ -204,6 +205,63 @@ jobs:
               break
             }
           }
+
+      - name: Build picoquic with upstream Windows flow
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $repo = (Get-Location).Path
+          $picotlsDir = Join-Path $repo "vendor\picotls"
+          $picotlsCommit = "5a4461d8a3948d9d26bf861e7d90cb80d8093515"
+          $stageDir = Join-Path $repo ".picoquic-build\windows\x64\Release"
+
+          if (!(Test-Path $picotlsDir)) {
+            git clone https://github.com/h2o/picotls $picotlsDir
+          }
+
+          $libcrypto = Get-ChildItem -Path $env:OPENSSL_LIB_DIR -Filter "libcrypto*.lib" |
+            Select-Object -First 1
+          if (!$libcrypto) {
+            throw "Could not find libcrypto import library under $env:OPENSSL_LIB_DIR"
+          }
+          Copy-Item -Force $libcrypto.FullName (Join-Path $env:OPENSSL64DIR "libcrypto.lib")
+
+          Push-Location $picotlsDir
+          try {
+            git fetch --depth 1 origin $picotlsCommit
+            git checkout -q $picotlsCommit
+            git submodule update --init --recursive
+            msbuild "/p:Configuration=Release" "/p:Platform=x64" /m picotlsvs\picotlsvs.sln
+          } finally {
+            Pop-Location
+          }
+
+          Push-Location (Join-Path $repo "vendor\picoquic")
+          try {
+            msbuild "/p:Configuration=Release" "/p:Platform=x64" /m picoquic.sln /t:picoquic
+          } finally {
+            Pop-Location
+          }
+
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          $libCandidates = @(
+            (Join-Path $repo "vendor\picoquic\x64\Release\picoquic.lib"),
+            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-core.lib"),
+            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-openssl.lib"),
+            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-minicrypto.lib"),
+            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-minicrypto-deps.lib"),
+            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-fusion.lib")
+          )
+          foreach ($libPath in $libCandidates) {
+            if (Test-Path $libPath) {
+              Copy-Item -Force $libPath $stageDir
+            }
+          }
+
+          echo "PICOQUIC_AUTO_BUILD=0" >> $env:GITHUB_ENV
+          echo "PICOQUIC_INCLUDE_DIR=$repo\vendor\picoquic\picoquic" >> $env:GITHUB_ENV
+          echo "PICOQUIC_LIB_DIR=$stageDir" >> $env:GITHUB_ENV
+          echo "PICOTLS_INCLUDE_DIR=$repo\vendor\picotls\include" >> $env:GITHUB_ENV
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

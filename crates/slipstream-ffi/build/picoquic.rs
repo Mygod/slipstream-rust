@@ -255,18 +255,30 @@ fn has_picoquic_libs(dir: &Path) -> bool {
 }
 
 fn resolve_picoquic_libs_single_dir(dir: &Path) -> Option<Vec<&'static str>> {
-    const REQUIRED: [(&str, &str); 4] = [
-        ("picoquic_core", "picoquic-core"),
-        ("picotls_core", "picotls-core"),
-        ("picotls_openssl", "picotls-openssl"),
-        ("picotls_minicrypto", "picotls-minicrypto"),
+    const REQUIRED: [(&[&str], &[&str]); 4] = [
+        (
+            &["picoquic_core", "picoquic-core", "picoquic"],
+            &["a", "lib"],
+        ),
+        (&["picotls_core", "picotls-core"], &["a", "lib"]),
+        (&["picotls_openssl", "picotls-openssl"], &["a", "lib"]),
+        (&["picotls_minicrypto", "picotls-minicrypto"], &["a", "lib"]),
     ];
     let mut libs = Vec::with_capacity(REQUIRED.len() + 1);
-    for (underscored, hyphenated) in REQUIRED {
-        libs.push(find_lib_variant(dir, underscored, hyphenated)?);
+    for (names, extensions) in REQUIRED {
+        libs.push(find_lib_variant(dir, names, extensions)?);
     }
-    if let Some(fusion) = find_lib_variant(dir, "picotls_fusion", "picotls-fusion") {
+    if let Some(fusion) =
+        find_lib_variant(dir, &["picotls_fusion", "picotls-fusion"], &["a", "lib"])
+    {
         libs.insert(3, fusion);
+    }
+    if let Some(deps) = find_lib_variant(
+        dir,
+        &["picotls_minicrypto_deps", "picotls-minicrypto-deps"],
+        &["a", "lib"],
+    ) {
+        libs.push(deps);
     }
     Some(libs)
 }
@@ -275,27 +287,57 @@ fn resolve_picoquic_libs_split(
     picoquic_dir: &Path,
     picotls_dir: &Path,
 ) -> Option<Vec<&'static str>> {
-    let picoquic_core = find_lib_variant(picoquic_dir, "picoquic_core", "picoquic-core")?;
-    let picotls_core = find_lib_variant(picotls_dir, "picotls_core", "picotls-core")?;
-    let picotls_minicrypto =
-        find_lib_variant(picotls_dir, "picotls_minicrypto", "picotls-minicrypto")?;
-    let picotls_openssl = find_lib_variant(picotls_dir, "picotls_openssl", "picotls-openssl")?;
+    let picoquic_core = find_lib_variant(
+        picoquic_dir,
+        &["picoquic_core", "picoquic-core", "picoquic"],
+        &["a", "lib"],
+    )?;
+    let picotls_core = find_lib_variant(
+        picotls_dir,
+        &["picotls_core", "picotls-core"],
+        &["a", "lib"],
+    )?;
+    let picotls_minicrypto = find_lib_variant(
+        picotls_dir,
+        &["picotls_minicrypto", "picotls-minicrypto"],
+        &["a", "lib"],
+    )?;
+    let picotls_openssl = find_lib_variant(
+        picotls_dir,
+        &["picotls_openssl", "picotls-openssl"],
+        &["a", "lib"],
+    )?;
     let mut libs = vec![picoquic_core, picotls_core, picotls_openssl];
-    if let Some(fusion) = find_lib_variant(picotls_dir, "picotls_fusion", "picotls-fusion") {
+    if let Some(fusion) = find_lib_variant(
+        picotls_dir,
+        &["picotls_fusion", "picotls-fusion"],
+        &["a", "lib"],
+    ) {
         libs.push(fusion);
     }
     libs.push(picotls_minicrypto);
+    if let Some(deps) = find_lib_variant(
+        picotls_dir,
+        &["picotls_minicrypto_deps", "picotls-minicrypto-deps"],
+        &["a", "lib"],
+    ) {
+        libs.push(deps);
+    }
     Some(libs)
 }
 
-fn find_lib_variant<'a>(dir: &Path, underscored: &'a str, hyphenated: &'a str) -> Option<&'a str> {
-    let underscored_path = dir.join(format!("lib{}.a", underscored));
-    if underscored_path.exists() {
-        return Some(underscored);
-    }
-    let hyphen_path = dir.join(format!("lib{}.a", hyphenated));
-    if hyphen_path.exists() {
-        return Some(hyphenated);
+fn find_lib_variant<'a>(dir: &Path, names: &[&'a str], extensions: &[&str]) -> Option<&'a str> {
+    for name in names {
+        for extension in extensions {
+            let path = match *extension {
+                "a" => dir.join(format!("lib{}.a", name)),
+                "lib" => dir.join(format!("{}.lib", name)),
+                _ => continue,
+            };
+            if path.exists() {
+                return Some(name);
+            }
+        }
     }
     None
 }
