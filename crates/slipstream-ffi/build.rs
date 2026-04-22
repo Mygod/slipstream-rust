@@ -219,7 +219,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
     for lib in picoquic_libs.libs {
-        println!("cargo:rustc-link-lib=static={}", lib);
+        if is_windows && matches!(lib, "picoquic_core" | "picoquic-core" | "picoquic") {
+            println!("cargo:rustc-link-lib=static:+whole-archive={}", lib);
+        } else {
+            println!("cargo:rustc-link-lib=static={}", lib);
+        }
     }
 
     if !cfg!(feature = "openssl-vendored") {
