@@ -26,9 +26,12 @@ Initialize the picoquic submodule:
 git submodule update --init --recursive
 ```
 
-`cargo build` will auto-build picoquic via `./scripts/build_picoquic.sh` when
-libs are missing (outputs to `.picoquic-build/`). Set `PICOQUIC_AUTO_BUILD=0`
-to disable or see `docs/build.md` for manual control.
+On non-Windows hosts, `cargo build` will auto-build picoquic via
+`./scripts/build_picoquic.sh` when libs are missing (outputs to
+`.picoquic-build/`). Windows targets are only supported from a Windows host:
+build picotls and picoquic with the upstream Visual Studio flow, then set
+`PICOQUIC_AUTO_BUILD=0`, `PICOQUIC_INCLUDE_DIR`, `PICOQUIC_LIB_DIR`, and
+`PICOTLS_INCLUDE_DIR`. See `docs/build.md` for details.
 
 Build the Rust binaries:
 

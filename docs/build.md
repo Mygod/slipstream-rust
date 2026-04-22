@@ -18,7 +18,7 @@ Initialize it before building:
 git submodule update --init --recursive
 ```
 
-## Default build (auto-build picoquic)
+## Default build (non-Windows hosts)
 
 The build script in crates/slipstream-ffi will auto-build picoquic if the
 headers and libs are missing. It uses vendor/picoquic and writes outputs to
@@ -35,7 +35,28 @@ You can disable auto-build with:
 PICOQUIC_AUTO_BUILD=0 cargo build -p slipstream-client -p slipstream-server
 ```
 
-## Manual picoquic build
+Windows targets are not supported from Linux hosts in this repo.
+
+## Windows target build
+
+Windows builds are only supported from a Windows host. The supported path is
+to build picotls and picoquic with their upstream Visual Studio solutions, then
+point Cargo at the resulting headers and libraries:
+
+```
+PICOQUIC_AUTO_BUILD=0 cargo build -p slipstream-client -p slipstream-server
+```
+
+Set these environment variables before running Cargo:
+
+- `PICOQUIC_INCLUDE_DIR`: picoquic headers
+- `PICOQUIC_LIB_DIR`: directory containing `picoquic.lib` and picotls `.lib` files
+- `PICOTLS_INCLUDE_DIR`: picotls headers
+
+The GitHub Actions Windows job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+shows the supported layout.
+
+## Manual picoquic build (non-Windows hosts)
 
 If you prefer to build picoquic yourself, run:
 
