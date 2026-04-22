@@ -320,8 +320,6 @@ fn needs_whole_archive_windows(lib: &str) -> bool {
             | "picotls-openssl"
             | "picotls_minicrypto"
             | "picotls-minicrypto"
-            | "picotls_minicrypto_deps"
-            | "picotls-minicrypto-deps"
             | "picotls_fusion"
             | "picotls-fusion"
     )
