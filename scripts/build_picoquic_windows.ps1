@@ -24,7 +24,7 @@ function Invoke-Git {
 
     & git -C $WorkingDir @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "git failed in $WorkingDir: git $($Arguments -join ' ')"
+        throw "git failed in ${WorkingDir}: git $($Arguments -join ' ')"
     }
 }
 
