@@ -273,13 +273,7 @@ fn resolve_picoquic_libs_single_dir(dir: &Path) -> Option<Vec<&'static str>> {
     {
         libs.insert(3, fusion);
     }
-    if let Some(deps) = find_lib_variant(
-        dir,
-        &["picotls_minicrypto_deps", "picotls-minicrypto-deps"],
-        &["a", "lib"],
-    ) {
-        libs.push(deps);
-    }
+    append_picotls_minicrypto_support_libs(dir, &mut libs);
     Some(libs)
 }
 
@@ -316,14 +310,27 @@ fn resolve_picoquic_libs_split(
         libs.push(fusion);
     }
     libs.push(picotls_minicrypto);
+    append_picotls_minicrypto_support_libs(picotls_dir, &mut libs);
+    Some(libs)
+}
+
+fn append_picotls_minicrypto_support_libs(dir: &Path, libs: &mut Vec<&'static str>) {
+    if let (Some(cifra), Some(microecc)) = (
+        find_lib_variant(dir, &["cifra"], &["lib"]),
+        find_lib_variant(dir, &["microecc"], &["lib"]),
+    ) {
+        libs.push(cifra);
+        libs.push(microecc);
+        return;
+    }
+
     if let Some(deps) = find_lib_variant(
-        picotls_dir,
+        dir,
         &["picotls_minicrypto_deps", "picotls-minicrypto-deps"],
         &["a", "lib"],
     ) {
         libs.push(deps);
     }
-    Some(libs)
 }
 
 fn find_lib_variant<'a>(dir: &Path, names: &[&'a str], extensions: &[&str]) -> Option<&'a str> {

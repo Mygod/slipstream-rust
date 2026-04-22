@@ -215,6 +215,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let picoquic_libs = resolve_picoquic_libs(&picoquic_lib_dir)
         .ok_or_else(|| missing_picoquic_libs_message(is_windows).to_string())?;
+    if is_windows && !has_windows_minicrypto_support_libs(&picoquic_libs.libs) {
+        return Err(
+            "Missing Windows picotls dependency libraries. Provide upstream cifra.lib and microecc.lib (preferred) or picotls-minicrypto-deps.lib in PICOQUIC_LIB_DIR."
+                .into(),
+        );
+    }
     for dir in picoquic_libs.search_dirs {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
@@ -314,6 +320,8 @@ fn needs_whole_archive_windows(lib: &str) -> bool {
         "picoquic_core"
             | "picoquic-core"
             | "picoquic"
+            | "cifra"
+            | "microecc"
             | "picotls_core"
             | "picotls-core"
             | "picotls_openssl"
@@ -323,4 +331,19 @@ fn needs_whole_archive_windows(lib: &str) -> bool {
             | "picotls_fusion"
             | "picotls-fusion"
     )
+}
+
+fn has_windows_minicrypto_support_libs(libs: &[&str]) -> bool {
+    if !has_any_lib(libs, &["picotls_minicrypto", "picotls-minicrypto"]) {
+        return true;
+    }
+
+    has_any_lib(
+        libs,
+        &["picotls_minicrypto_deps", "picotls-minicrypto-deps"],
+    ) || (has_any_lib(libs, &["cifra"]) && has_any_lib(libs, &["microecc"]))
+}
+
+fn has_any_lib(libs: &[&str], names: &[&str]) -> bool {
+    libs.iter().any(|lib| names.contains(lib))
 }

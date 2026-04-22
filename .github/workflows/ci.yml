@@ -246,7 +246,20 @@ jobs:
             git fetch --depth 1 origin $picotlsCommit
             git checkout -q $picotlsCommit
             git submodule update --init --recursive
-            & $msbuild "/p:Configuration=Release" "/p:Platform=x64" "/p:PlatformToolset=$platformToolset" "/p:WindowsTargetPlatformVersion=$windowsSdk" /m picotlsvs\picotlsvs.sln
+            $picotlsProjects = @(
+              "picotlsvs\picotls-core\picotls-core.vcxproj",
+              "picotlsvs\picotls-openssl\picotls-openssl.vcxproj",
+              "picotlsvs\picotls-minicrypto\picotls-minicrypto.vcxproj",
+              "picotlsvs\picotls-fusion\picotls-fusion.vcxproj",
+              "picotlsvs\cifra\cifra.vcxproj",
+              "picotlsvs\microecc\microecc.vcxproj"
+            )
+            foreach ($project in $picotlsProjects) {
+              & $msbuild "/p:Configuration=Release" "/p:Platform=x64" "/p:PlatformToolset=$platformToolset" "/p:WindowsTargetPlatformVersion=$windowsSdk" /m $project
+              if ($LASTEXITCODE -ne 0) {
+                throw "MSBuild failed for $project"
+              }
+            }
           } finally {
             Pop-Location
           }
@@ -254,6 +267,9 @@ jobs:
           Push-Location (Join-Path $repo "vendor\picoquic")
           try {
             & $msbuild "/p:Configuration=Release" "/p:Platform=x64" "/p:PlatformToolset=$platformToolset" "/p:WindowsTargetPlatformVersion=$windowsSdk" /m picoquic.sln /t:picoquic
+            if ($LASTEXITCODE -ne 0) {
+              throw "MSBuild failed for picoquic.sln"
+            }
           } finally {
             Pop-Location
           }
@@ -264,8 +280,9 @@ jobs:
             (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-core.lib"),
             (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-openssl.lib"),
             (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-minicrypto.lib"),
-            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-minicrypto-deps.lib"),
-            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-fusion.lib")
+            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-fusion.lib"),
+            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\cifra.lib"),
+            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\microecc.lib")
           )
           foreach ($libPath in $libCandidates) {
             if (Test-Path $libPath) {
