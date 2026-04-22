@@ -23,6 +23,7 @@ contributors; "dev-only" scripts are internal or experimental.
 ## Public scripts
 
 - `scripts/build_picoquic.sh`: build picoquic for the Rust FFI layer.
+- `scripts/build_picoquic_windows.ps1`: build and stage picoquic/picotls for the supported Windows-hosted flow.
 - `scripts/gen_vectors.sh`: regenerate DNS vectors (requires the C repo).
 - `scripts/interop/run_rust_rust.sh`: Rust client/server interop harness (set `DOMAINS` and `CLIENT_DOMAIN` to exercise multi-domain).
 - `scripts/bench/run_rust_rust_10mb.sh`: Rust<->Rust throughput benchmark (set `RESOLVER_MODE=mixed` for mixed resolver runs).

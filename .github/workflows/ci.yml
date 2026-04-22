@@ -152,7 +152,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install cmake pkgconfiglite strawberryperl -y
+          choco install pkgconfiglite strawberryperl -y
 
           # Find and configure OpenSSL
           $opensslPaths = @(
@@ -170,6 +170,7 @@ jobs:
               if ($libDir) {
                 echo "OPENSSL_DIR=$path" >> $env:GITHUB_ENV
                 echo "OPENSSL_ROOT_DIR=$path" >> $env:GITHUB_ENV
+                echo "OPENSSL64DIR=$path" >> $env:GITHUB_ENV
                 echo "OPENSSL_LIB_DIR=$libDir" >> $env:GITHUB_ENV
                 echo "OPENSSL_INCLUDE_DIR=$path\include" >> $env:GITHUB_ENV
                 Write-Host "OpenSSL configured at $path (libs in $libDir)"
@@ -204,6 +205,12 @@ jobs:
               break
             }
           }
+
+      - name: Build picoquic with upstream Windows flow
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\scripts\build_picoquic_windows.ps1
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

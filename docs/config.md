@@ -69,10 +69,10 @@ These affect the build script in crates/slipstream-ffi:
   picoquic headers directory (default: vendor/picoquic/picoquic).
 
 - PICOTLS_INCLUDE_DIR
-  picotls headers directory (default: .picoquic-build/_deps/picotls-src/include).
+  picotls headers directory (default: .picoquic-build/_deps/picotls-src/include on non-Windows, vendor/picotls/include for the Windows helper).
 
 - PICOQUIC_BUILD_DIR
-  picoquic build output (default: .picoquic-build).
+  picoquic build output (default: .picoquic-build; the Windows helper stages libs under .picoquic-build/windows/x64/Release by default).
 
 - PICOQUIC_LIB_DIR
   Directory containing picoquic and picotls libraries.

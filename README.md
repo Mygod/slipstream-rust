@@ -26,9 +26,11 @@ Initialize the picoquic submodule:
 git submodule update --init --recursive
 ```
 
-`cargo build` will auto-build picoquic via `./scripts/build_picoquic.sh` when
-libs are missing (outputs to `.picoquic-build/`). Set `PICOQUIC_AUTO_BUILD=0`
-to disable or see `docs/build.md` for manual control.
+On non-Windows hosts, `cargo build` will auto-build picoquic via
+`./scripts/build_picoquic.sh` when libs are missing (outputs to
+`.picoquic-build/`). Windows targets are only supported from a Windows host:
+run `pwsh -File ./scripts/build_picoquic_windows.ps1` once, then build with
+Cargo. See `docs/build.md` for details.
 
 Build the Rust binaries:
 

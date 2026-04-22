@@ -84,8 +84,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let openssl_paths = resolve_openssl_paths();
+    let host = env::var("HOST").unwrap_or_default();
     let target = env::var("TARGET").unwrap_or_default();
     let is_windows = target.contains("windows") || target.contains("pc-windows");
+    let host_is_windows = host.contains("windows") || host.contains("pc-windows");
     let auto_build = env_flag("PICOQUIC_AUTO_BUILD", true);
     let explicit_picoquic_include = env::var_os("PICOQUIC_INCLUDE_DIR").is_some();
     let explicit_picoquic_lib = env::var_os("PICOQUIC_LIB_DIR").is_some();
@@ -93,6 +95,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut picoquic_include_dir = locate_picoquic_include_dir();
     let mut picoquic_lib_dir = locate_picoquic_lib_dir();
     let mut picotls_include_dir = locate_picotls_include_dir();
+
+    if is_windows && !host_is_windows {
+        return Err(
+            "Windows targets are only supported from a Windows host. Cross-building picoquic/picotls from Linux is unsupported in this repo."
+                .into(),
+        );
+    }
+
+    if is_windows
+        && auto_build
+        && !explicit_picoquic_include_lib
+        && (picoquic_include_dir.is_none() || picoquic_lib_dir.is_none())
+    {
+        return Err(
+            "Automatic picoquic builds are unsupported for Windows targets. Run `pwsh -File ./scripts/build_picoquic_windows.ps1` on Windows, or set PICOQUIC_INCLUDE_DIR, PICOQUIC_LIB_DIR, and PICOTLS_INCLUDE_DIR yourself."
+                .into(),
+        );
+    }
 
     if auto_build
         && !explicit_picoquic_include_lib
@@ -119,15 +139,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let picoquic_include_dir = picoquic_include_dir.ok_or(
-        "Missing picoquic headers; set PICOQUIC_DIR or PICOQUIC_INCLUDE_DIR (default: vendor/picoquic).",
-    )?;
-    let picoquic_lib_dir = picoquic_lib_dir.ok_or(
-        "Missing picoquic build artifacts; run ./scripts/build_picoquic.sh or set PICOQUIC_BUILD_DIR/PICOQUIC_LIB_DIR.",
-    )?;
-    let picotls_include_dir = picotls_include_dir.ok_or(
-        "Missing picotls headers; set PICOTLS_INCLUDE_DIR or build picoquic with PICOQUIC_FETCH_PTLS=ON.",
-    )?;
+    let picoquic_include_dir = picoquic_include_dir
+        .ok_or_else(|| missing_picoquic_headers_message(is_windows).to_string())?;
+    let picoquic_lib_dir =
+        picoquic_lib_dir.ok_or_else(|| missing_picoquic_libs_message(is_windows).to_string())?;
+    let picotls_include_dir = picotls_include_dir
+        .ok_or_else(|| missing_picotls_headers_message(is_windows).to_string())?;
 
     let cc = resolve_cc(&target);
     let ar = resolve_ar(&target, &cc);
@@ -196,14 +213,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=slipstream_client_objs");
 
-    let picoquic_libs = resolve_picoquic_libs(&picoquic_lib_dir).ok_or(
-        "Missing picoquic build artifacts; run ./scripts/build_picoquic.sh or set PICOQUIC_BUILD_DIR/PICOQUIC_LIB_DIR.",
-    )?;
+    let picoquic_libs = resolve_picoquic_libs(&picoquic_lib_dir)
+        .ok_or_else(|| missing_picoquic_libs_message(is_windows).to_string())?;
+    if is_windows && !has_windows_minicrypto_support_libs(&picoquic_libs.libs) {
+        return Err(
+            "Missing Windows picotls dependency libraries. Provide upstream cifra.lib and microecc.lib (preferred) or picotls-minicrypto-deps.lib in PICOQUIC_LIB_DIR."
+                .into(),
+        );
+    }
     for dir in picoquic_libs.search_dirs {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
     for lib in picoquic_libs.libs {
-        println!("cargo:rustc-link-lib=static={}", lib);
+        if is_windows && needs_whole_archive_windows(lib) {
+            println!("cargo:rustc-link-lib=static:+whole-archive={}", lib);
+        } else {
+            println!("cargo:rustc-link-lib=static={}", lib);
+        }
     }
 
     if !cfg!(feature = "openssl-vendored") {
@@ -258,8 +284,66 @@ fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
     }
 }
 
+fn missing_picoquic_headers_message(is_windows: bool) -> &'static str {
+    if is_windows {
+        "Missing picoquic headers for Windows. Set PICOQUIC_INCLUDE_DIR to the upstream picoquic headers you built on Windows."
+    } else {
+        "Missing picoquic headers; set PICOQUIC_DIR or PICOQUIC_INCLUDE_DIR (default: vendor/picoquic)."
+    }
+}
+
+fn missing_picoquic_libs_message(is_windows: bool) -> &'static str {
+    if is_windows {
+        "Missing picoquic build artifacts for Windows. Run `pwsh -File ./scripts/build_picoquic_windows.ps1`, or set PICOQUIC_INCLUDE_DIR, PICOQUIC_LIB_DIR, and PICOTLS_INCLUDE_DIR."
+    } else {
+        "Missing picoquic build artifacts; run ./scripts/build_picoquic.sh or set PICOQUIC_BUILD_DIR/PICOQUIC_LIB_DIR."
+    }
+}
+
+fn missing_picotls_headers_message(is_windows: bool) -> &'static str {
+    if is_windows {
+        "Missing picotls headers for Windows. Run `pwsh -File ./scripts/build_picoquic_windows.ps1`, or set PICOTLS_INCLUDE_DIR to your picotls include directory."
+    } else {
+        "Missing picotls headers; set PICOTLS_INCLUDE_DIR or build picoquic with PICOQUIC_FETCH_PTLS=ON."
+    }
+}
+
 fn add_parent_dir(dirs: &mut Vec<PathBuf>, path: &Path) {
     if let Some(parent) = path.parent() {
         push_unique_dir(dirs, parent.to_path_buf());
     }
+}
+
+fn needs_whole_archive_windows(lib: &str) -> bool {
+    matches!(
+        lib,
+        "picoquic_core"
+            | "picoquic-core"
+            | "picoquic"
+            | "cifra"
+            | "microecc"
+            | "picotls_core"
+            | "picotls-core"
+            | "picotls_openssl"
+            | "picotls-openssl"
+            | "picotls_minicrypto"
+            | "picotls-minicrypto"
+            | "picotls_fusion"
+            | "picotls-fusion"
+    )
+}
+
+fn has_windows_minicrypto_support_libs(libs: &[&str]) -> bool {
+    if !has_any_lib(libs, &["picotls_minicrypto", "picotls-minicrypto"]) {
+        return true;
+    }
+
+    has_any_lib(
+        libs,
+        &["picotls_minicrypto_deps", "picotls-minicrypto-deps"],
+    ) || (has_any_lib(libs, &["cifra"]) && has_any_lib(libs, &["microecc"]))
+}
+
+fn has_any_lib(libs: &[&str], names: &[&str]) -> bool {
+    libs.iter().any(|lib| names.contains(lib))
 }
