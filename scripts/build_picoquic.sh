@@ -36,14 +36,23 @@ if [[ "$IS_WINDOWS" == "1" ]]; then
   CMAKE_ARGS+=("-DBUILD_TESTING=OFF")
   CMAKE_ARGS+=("-Dpicoquic_BUILD_TESTS=OFF")
 
+  WINDOWS_COMPAT_INCLUDE="${PICOQUIC_DIR}/picoquic"
+  if command -v cygpath >/dev/null 2>&1; then
+    WINDOWS_COMPAT_INCLUDE="$(cygpath -m "${WINDOWS_COMPAT_INCLUDE}")"
+  fi
+  WINDOWS_C_FLAGS="-I${WINDOWS_COMPAT_INCLUDE} -include wincompat.h"
+
   if [[ -d "/c/Program Files/Microsoft Visual Studio/2022" ]] || [[ -d "C:/Program Files/Microsoft Visual Studio/2022" ]]; then
     CMAKE_ARGS+=("-G" "Visual Studio 17 2022" "-A" "x64")
+    WINDOWS_C_FLAGS="/I${WINDOWS_COMPAT_INCLUDE} /FIwincompat.h"
     echo "Using Visual Studio 2022 generator" >&2
   elif [[ -d "/c/Program Files (x86)/Microsoft Visual Studio/2019" ]] || [[ -d "C:/Program Files (x86)/Microsoft Visual Studio/2019" ]]; then
     CMAKE_ARGS+=("-G" "Visual Studio 16 2019" "-A" "x64")
+    WINDOWS_C_FLAGS="/I${WINDOWS_COMPAT_INCLUDE} /FIwincompat.h"
     echo "Using Visual Studio 2019 generator" >&2
   fi
 
+  CMAKE_ARGS+=("-DCMAKE_C_FLAGS=${WINDOWS_C_FLAGS}")
   BUILD_TARGET=(--target picoquic-core picotls-core picotls-fusion picotls-minicrypto picotls-openssl)
 fi
 

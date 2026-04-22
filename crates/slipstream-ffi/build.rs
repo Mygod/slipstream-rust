@@ -142,12 +142,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stateless_packet_src = cc_dir.join("slipstream_stateless_packet.c");
     let test_helpers_src = cc_dir.join("slipstream_test_helpers.c");
     let picotls_layout_src = cc_dir.join("picotls_layout.c");
+    let wintimeofday_src = cc_dir.join("slipstream_wintimeofday.c");
     println!("cargo:rerun-if-changed={}", cc_src.display());
     println!("cargo:rerun-if-changed={}", mixed_cc_src.display());
     println!("cargo:rerun-if-changed={}", poll_src.display());
     println!("cargo:rerun-if-changed={}", stateless_packet_src.display());
     println!("cargo:rerun-if-changed={}", test_helpers_src.display());
     println!("cargo:rerun-if-changed={}", picotls_layout_src.display());
+    println!("cargo:rerun-if-changed={}", wintimeofday_src.display());
     let picoquic_internal = picoquic_include_dir.join("picoquic_internal.h");
     if picoquic_internal.exists() {
         println!("cargo:rerun-if-changed={}", picoquic_internal.display());
@@ -204,6 +206,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     for lib in picoquic_libs.libs {
         println!("cargo:rustc-link-lib=static={}", lib);
+    }
+
+    if is_windows {
+        let wintimeofday_obj = out_dir.join("slipstream_wintimeofday.c.o");
+        compile_cc(
+            &cc,
+            &wintimeofday_src,
+            &wintimeofday_obj,
+            &picoquic_include_dir,
+        )?;
+        let compat_archive = out_dir.join("libslipstream_windows_compat.a");
+        create_archive(&ar, &compat_archive, &[wintimeofday_obj])?;
+        println!("cargo:rustc-link-lib=static=slipstream_windows_compat");
     }
 
     if !cfg!(feature = "openssl-vendored") {
