@@ -281,8 +281,8 @@ jobs:
             (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-openssl.lib"),
             (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-minicrypto.lib"),
             (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\picotls-fusion.lib"),
-            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\cifra.lib"),
-            (Join-Path $repo "vendor\picotls\picotlsvs\x64\Release\microecc.lib")
+            (Join-Path $repo "vendor\picotls\picotlsvs\cifra\x64\Release\cifra.lib"),
+            (Join-Path $repo "vendor\picotls\picotlsvs\microecc\x64\Release\microecc.lib")
           )
           foreach ($libPath in $libCandidates) {
             if (Test-Path $libPath) {
