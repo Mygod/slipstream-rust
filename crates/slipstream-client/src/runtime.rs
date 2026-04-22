@@ -35,7 +35,6 @@ use slipstream_ffi::{
     socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
 };
 use std::ffi::CString;
-use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
@@ -50,12 +49,6 @@ const DNS_POLL_SLICE_US: u64 = 50_000;
 const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
-
-fn is_ipv6_unspecified(host: &str) -> bool {
-    host.parse::<Ipv6Addr>()
-        .map(|addr| addr.is_unspecified())
-        .unwrap_or(false)
-}
 
 fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
     let mut dropped = 0usize;
@@ -79,32 +72,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let debug_streams = config.debug_streams;
     let tcp_host = config.tcp_listen_host;
     let tcp_port = config.tcp_listen_port;
-    let mut bound_host = tcp_host.to_string();
-    let listener = match bind_tcp_listener(tcp_host, tcp_port).await {
-        Ok(listener) => listener,
-        Err(err) => {
-            if is_ipv6_unspecified(tcp_host) {
-                warn!(
-                    "Failed to bind TCP listener on {}:{} ({}); falling back to 0.0.0.0",
-                    tcp_host, tcp_port, err
-                );
-                match bind_tcp_listener("0.0.0.0", tcp_port).await {
-                    Ok(listener) => {
-                        bound_host = "0.0.0.0".to_string();
-                        listener
-                    }
-                    Err(fallback_err) => {
-                        return Err(ClientError::new(format!(
-                            "Failed to bind TCP listener on {}:{} ({}) or 0.0.0.0:{} ({})",
-                            tcp_host, tcp_port, err, tcp_port, fallback_err
-                        )));
-                    }
-                }
-            } else {
-                return Err(err);
-            }
-        }
-    };
+    let (listener, bound_host) = bind_tcp_listener(tcp_host, tcp_port)
+        .await
+        .map_err(map_io)?;
     acceptor.spawn(listener, command_tx.clone());
     info!("Listening on TCP port {} (host {})", tcp_port, bound_host);
 

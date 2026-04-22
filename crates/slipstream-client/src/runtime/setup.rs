@@ -1,5 +1,7 @@
 use crate::error::ClientError;
-use slipstream_core::net::{bind_first_resolved, bind_tcp_listener_addr, bind_udp_socket_addr};
+use slipstream_core::net::{
+    bind_first_resolved_with_ipv4_fallback, bind_tcp_listener_addr, bind_udp_socket_addr,
+};
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use tokio::net::{TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
 
@@ -26,10 +28,8 @@ pub(crate) async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {
 pub(crate) async fn bind_tcp_listener(
     host: &str,
     port: u16,
-) -> Result<TokioTcpListener, ClientError> {
-    bind_first_resolved(host, port, bind_tcp_listener_addr, "TCP listener")
-        .await
-        .map_err(map_io)
+) -> Result<(TokioTcpListener, String), std::io::Error> {
+    bind_first_resolved_with_ipv4_fallback(host, port, bind_tcp_listener_addr, "TCP listener").await
 }
 
 pub(crate) fn map_io(err: std::io::Error) -> ClientError {

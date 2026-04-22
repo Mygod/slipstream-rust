@@ -1,7 +1,7 @@
 use crate::config::{ensure_cert_key, load_or_create_reset_seed, ResetSeed};
 use crate::udp_fallback::{handle_packet, FallbackManager, PacketContext, MAX_UDP_PACKET_SIZE};
 use slipstream_core::{
-    net::{bind_first_resolved, bind_udp_socket_addr, is_transient_udp_error},
+    net::{bind_first_resolved_with_ipv4_fallback, bind_udp_socket_addr, is_transient_udp_error},
     normalize_dual_stack_addr, resolve_host_port, HostPort,
 };
 use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
@@ -480,13 +480,14 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
 }
 
 async fn bind_udp_socket(host: &str, port: u16) -> Result<TokioUdpSocket, ServerError> {
-    bind_first_resolved(
+    bind_first_resolved_with_ipv4_fallback(
         host,
         port,
         |addr| bind_udp_socket_addr(addr, "UDP listener"),
         "UDP socket",
     )
     .await
+    .map(|(socket, _)| socket)
     .map_err(map_io)
 }
 
@@ -630,6 +631,7 @@ fn is_label_suffix(domain: &str, suffix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Error;
 
     #[test]
     fn prune_and_collect_idle_prunes_and_collects() {
@@ -651,5 +653,37 @@ mod tests {
         assert!(last_seen.contains_key(&1));
         assert!(last_seen.contains_key(&2));
         assert!(!last_seen.contains_key(&3));
+    }
+
+    #[tokio::test]
+    async fn bind_first_resolved_with_ipv4_fallback_uses_ipv4_for_ipv6_unsupported() {
+        let (bound_addr, bound_host) = bind_first_resolved_with_ipv4_fallback(
+            "::",
+            5300,
+            |addr| match addr {
+                SocketAddr::V6(_) => Err(Error::from_raw_os_error(libc::EAFNOSUPPORT)),
+                SocketAddr::V4(_) => Ok(addr),
+            },
+            "UDP socket",
+        )
+        .await
+        .expect("fallback bind succeeds");
+
+        assert_eq!(bound_host, "0.0.0.0");
+        assert!(matches!(bound_addr, SocketAddr::V4(_)));
+    }
+
+    #[tokio::test]
+    async fn bind_first_resolved_with_ipv4_fallback_skips_fallback_for_other_errors() {
+        let err = bind_first_resolved_with_ipv4_fallback(
+            "::",
+            5300,
+            |_addr| Err::<SocketAddr, Error>(Error::from_raw_os_error(libc::EADDRINUSE)),
+            "UDP socket",
+        )
+        .await
+        .expect_err("non-IPv6 error should not fall back");
+
+        assert_eq!(err.raw_os_error(), Some(libc::EADDRINUSE));
     }
 }

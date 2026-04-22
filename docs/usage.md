@@ -35,6 +35,7 @@ Notes:
 
 - Resolver addresses may be IPv4 or bracketed IPv6; mixed families are supported.
 - IPv6 resolvers must be bracketed, for example: [2001:db8::1]:53.
+- When binding the default `--tcp-listen-host ::`, slipstream falls back to `0.0.0.0` if IPv6 is unavailable on the host.
 - IPv4 resolvers require an IPv6 dual-stack UDP socket; slipstream attempts to set IPV6_V6ONLY=0, but some OSes may still require sysctl changes.
 - Provide --cert to enable strict leaf pinning; omit it for legacy/no-verification behavior.
 - The pinned certificate must match the server leaf exactly; CA bundles are not supported.
@@ -66,7 +67,8 @@ Common flags:
 - --fallback <HOST:PORT> (optional; forward non-DNS packets to this UDP endpoint)
 - --idle-timeout-seconds <SECONDS> (default: 60; set to 0 to disable)
 - --reset-seed <PATH> (optional; 32 hex chars / 16 bytes; auto-created if missing)
-- When binding to ::, slipstream attempts to enable dual-stack (IPV6_V6ONLY=0); if your OS disallows it, IPv4 DNS clients require sysctl changes or binding to an IPv4 address.
+- When binding the default `--dns-listen-host ::`, slipstream falls back to `0.0.0.0` if IPv6 is unavailable on the host.
+- When binding to `::`, slipstream still attempts to enable dual-stack (IPV6_V6ONLY=0); if your OS disallows it, IPv4 DNS clients require sysctl changes or binding to an IPv4 address.
 - With --fallback enabled, peers that have recently sent DNS stay DNS-only; while active they switch to fallback only after 16 consecutive non-DNS packets to avoid diverting DNS on stray traffic. DNS-only classification expires after an idle timeout without DNS traffic.
 - Fallback sessions are created per source address without a hard cap; untrusted or spoofed UDP traffic can consume file descriptors/CPU. Use network filtering or rate limiting when exposing fallback to the public Internet, or disable --fallback if this is a concern.
 
