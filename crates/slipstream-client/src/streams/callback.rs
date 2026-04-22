@@ -113,10 +113,8 @@ pub(crate) unsafe extern "C" fn client_callback(
                 state.ready
             );
         }
-        picoquic_call_back_event_t::picoquic_callback_prepare_to_send => {
-            if !bytes.is_null() {
-                let _ = picoquic_provide_stream_data_buffer(bytes as *mut _, 0, 0, 0);
-            }
+        picoquic_call_back_event_t::picoquic_callback_prepare_to_send if !bytes.is_null() => {
+            let _ = picoquic_provide_stream_data_buffer(bytes as *mut _, 0, 0, 0);
         }
         picoquic_call_back_event_t::picoquic_callback_path_available => {
             state.path_events.push(PathEvent::Available(stream_id));
