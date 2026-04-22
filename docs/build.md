@@ -40,21 +40,26 @@ Windows targets are not supported from Linux hosts in this repo.
 ## Windows target build
 
 Windows builds are only supported from a Windows host. The supported path is
-to build picotls and picoquic with their upstream Visual Studio solutions, then
-point Cargo at the resulting headers and libraries:
+the repo helper below, which builds picotls and picoquic with the upstream
+Visual Studio projects and stages the resulting libraries into a layout that
+Cargo auto-detects:
 
 ```
-PICOQUIC_AUTO_BUILD=0 cargo build -p slipstream-client -p slipstream-server
+pwsh -File ./scripts/build_picoquic_windows.ps1
+cargo build -p slipstream-client -p slipstream-server
 ```
 
-Set these environment variables before running Cargo:
+By default the helper:
+
+- checks out picotls into `vendor/picotls/` as an untracked working tree
+- stages Windows libraries into `.picoquic-build/windows/x64/Release/`
+- lets `cargo build` auto-detect `vendor/picoquic/picoquic` and `vendor/picotls/include`
+
+If you need a custom layout, these environment variables are still supported:
 
 - `PICOQUIC_INCLUDE_DIR`: picoquic headers
 - `PICOQUIC_LIB_DIR`: directory containing `picoquic.lib` and picotls `.lib` files
 - `PICOTLS_INCLUDE_DIR`: picotls headers
-
-The GitHub Actions Windows job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
-shows the supported layout.
 
 ## Manual picoquic build (non-Windows hosts)
 

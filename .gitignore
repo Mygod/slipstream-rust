@@ -2,6 +2,7 @@
 /.interop/
 /tools/vector_gen/build/
 /.picoquic-build/
+/vendor/picotls/
 /vendor/picoquic/build/
 /.worktrees/
 .idea/

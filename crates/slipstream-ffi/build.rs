@@ -109,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && (picoquic_include_dir.is_none() || picoquic_lib_dir.is_none())
     {
         return Err(
-            "Automatic picoquic builds are unsupported for Windows targets. Build picotls and picoquic with the upstream Visual Studio flow on Windows, then set PICOQUIC_AUTO_BUILD=0 plus PICOQUIC_INCLUDE_DIR, PICOQUIC_LIB_DIR, and PICOTLS_INCLUDE_DIR."
+            "Automatic picoquic builds are unsupported for Windows targets. Run `pwsh -File ./scripts/build_picoquic_windows.ps1` on Windows, or set PICOQUIC_INCLUDE_DIR, PICOQUIC_LIB_DIR, and PICOTLS_INCLUDE_DIR yourself."
                 .into(),
         );
     }
@@ -294,7 +294,7 @@ fn missing_picoquic_headers_message(is_windows: bool) -> &'static str {
 
 fn missing_picoquic_libs_message(is_windows: bool) -> &'static str {
     if is_windows {
-        "Missing picoquic build artifacts for Windows. Build picotls and picoquic with the upstream Visual Studio flow on Windows, then set PICOQUIC_AUTO_BUILD=0 plus PICOQUIC_INCLUDE_DIR, PICOQUIC_LIB_DIR, and PICOTLS_INCLUDE_DIR."
+        "Missing picoquic build artifacts for Windows. Run `pwsh -File ./scripts/build_picoquic_windows.ps1`, or set PICOQUIC_INCLUDE_DIR, PICOQUIC_LIB_DIR, and PICOTLS_INCLUDE_DIR."
     } else {
         "Missing picoquic build artifacts; run ./scripts/build_picoquic.sh or set PICOQUIC_BUILD_DIR/PICOQUIC_LIB_DIR."
     }
@@ -302,7 +302,7 @@ fn missing_picoquic_libs_message(is_windows: bool) -> &'static str {
 
 fn missing_picotls_headers_message(is_windows: bool) -> &'static str {
     if is_windows {
-        "Missing picotls headers for Windows. Build picotls with the upstream Visual Studio flow on Windows, then set PICOTLS_INCLUDE_DIR to its include directory."
+        "Missing picotls headers for Windows. Run `pwsh -File ./scripts/build_picoquic_windows.ps1`, or set PICOTLS_INCLUDE_DIR to your picotls include directory."
     } else {
         "Missing picotls headers; set PICOTLS_INCLUDE_DIR or build picoquic with PICOQUIC_FETCH_PTLS=ON."
     }

@@ -120,9 +120,14 @@ pub(crate) fn locate_picoquic_lib_dir() -> Option<PathBuf> {
     }
 
     if let Ok(dir) = env::var("PICOQUIC_BUILD_DIR") {
-        let candidate = PathBuf::from(&dir);
-        if has_picoquic_libs(&candidate) {
-            return Some(candidate);
+        let build_dir = PathBuf::from(&dir);
+        for candidate in windows_stage_candidates(&build_dir) {
+            if has_picoquic_libs(&candidate) {
+                return Some(candidate);
+            }
+        }
+        if has_picoquic_libs(&build_dir) {
+            return Some(build_dir);
         }
         let candidate = Path::new(&dir).join("picoquic");
         if has_picoquic_libs(&candidate) {
@@ -131,9 +136,14 @@ pub(crate) fn locate_picoquic_lib_dir() -> Option<PathBuf> {
     }
 
     if let Some(root) = locate_repo_root() {
-        let candidate = root.join(".picoquic-build");
-        if has_picoquic_libs(&candidate) {
-            return Some(candidate);
+        let build_dir = root.join(".picoquic-build");
+        for candidate in windows_stage_candidates(&build_dir) {
+            if has_picoquic_libs(&candidate) {
+                return Some(candidate);
+            }
+        }
+        if has_picoquic_libs(&build_dir) {
+            return Some(build_dir);
         }
         let candidate = root.join(".picoquic-build").join("picoquic");
         if has_picoquic_libs(&candidate) {
@@ -184,6 +194,10 @@ pub(crate) fn locate_picotls_include_dir() -> Option<PathBuf> {
             .join("_deps")
             .join("picotls-src")
             .join("include");
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
+        }
+        let candidate = root.join("vendor").join("picotls").join("include");
         if has_picotls_header(&candidate) {
             return Some(candidate);
         }
@@ -248,6 +262,13 @@ fn has_picoquic_internal_header(dir: &Path) -> bool {
 
 fn has_picotls_header(dir: &Path) -> bool {
     dir.join("picotls.h").exists()
+}
+
+fn windows_stage_candidates(dir: &Path) -> [PathBuf; 2] {
+    [
+        dir.join("windows").join("x64").join("Release"),
+        dir.join("x64").join("Release"),
+    ]
 }
 
 fn has_picoquic_libs(dir: &Path) -> bool {
