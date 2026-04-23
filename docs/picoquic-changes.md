@@ -113,6 +113,14 @@ The following use `picoquic_internal.h` and therefore depend on picoquic interna
   - Why: The authoritative client derives its DNS poll QPS budget from picoquic's pacing rate and
     uses cwnd as a fallback when pacing is unavailable.
 
+- `picoquic_create(..., cnx_id_callback, cnx_id_callback_data, ...)` and `picoquic_connection_id_cb_fn`
+  - Declared in `picoquic.h`: connection ID callback and context pointer passed into `picoquic_create`.
+  - Used in: `crates/slipstream-server/src/server.rs` (QUIC-LB plaintext CID generation when
+    `--quic-lb-server-id` is set). The callback is invoked from `picoquic_create_local_cnx_id` in
+    `quicctx.c` so the server can supply custom CIDs (e.g. QUIC-LB format for stateless load balancing).
+  - Why: Optional QUIC-LB support so a load balancer can decode server_id from the CID and route
+    statelessly without a sticky table.
+
 ## Notes
 
 - Internal usage means the submodule version is coupled to slipstream. Any picoquic update

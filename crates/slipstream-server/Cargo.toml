@@ -9,6 +9,7 @@ readme = "../../README.md"
 
 [dependencies]
 clap = { workspace = true }
+getrandom = "0.2"
 slipstream-core = { path = "../slipstream-core" }
 slipstream-dns = { path = "../slipstream-dns" }
 slipstream-ffi = { path = "../slipstream-ffi" }

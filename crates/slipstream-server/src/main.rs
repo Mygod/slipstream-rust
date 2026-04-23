@@ -47,6 +47,9 @@ struct Args {
     debug_streams: bool,
     #[arg(long = "debug-commands")]
     debug_commands: bool,
+    /// QUIC-LB server ID (0–255) for stateless LB routing.
+    #[arg(long = "quic-lb-server-id", value_name = "ID", value_parser = parse_quic_lb_server_id)]
+    quic_lb_server_id: Option<u8>,
 }
 
 fn main() {
@@ -147,6 +150,13 @@ fn main() {
         args.max_connections
     };
 
+    let quic_lb_server_id = if cli_provided(&matches, "quic_lb_server_id") {
+        args.quic_lb_server_id
+    } else {
+        sip003::last_option_value(&sip003_env.plugin_options, "quic_lb_server_id")
+            .map(|v| unwrap_or_exit(parse_quic_lb_server_id(&v), "SIP003 env error", 2))
+    };
+
     let config = ServerConfig {
         dns_listen_host,
         dns_listen_port,
@@ -160,6 +170,7 @@ fn main() {
         idle_timeout_seconds: args.idle_timeout_seconds,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
+        quic_lb_server_id,
     };
 
     let runtime = Builder::new_current_thread()
@@ -198,6 +209,13 @@ fn parse_max_connections(input: &str) -> Result<u32, String> {
         return Err("max-connections must be at least 1".to_string());
     }
     Ok(value)
+}
+
+fn parse_quic_lb_server_id(input: &str) -> Result<u8, String> {
+    let trimmed = input.trim();
+    trimmed
+        .parse::<u8>()
+        .map_err(|_| format!("quic-lb-server-id must be 0–255, got: {}", trimmed))
 }
 
 fn cli_provided(matches: &clap::ArgMatches, id: &str) -> bool {
