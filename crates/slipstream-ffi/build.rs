@@ -229,7 +229,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
     for lib in picoquic_libs.libs {
-        println!("cargo:rustc-link-lib=static={}", lib);
+        if is_windows {
+            // MSVC needs the upstream archives on the final link line; bundling can
+            // leave the rlib without the picoquic objects referenced by Rust tests.
+            println!("cargo:rustc-link-lib=static:-bundle={}", lib);
+        } else {
+            println!("cargo:rustc-link-lib=static={}", lib);
+        }
     }
 
     if !cfg!(feature = "openssl-vendored") {
