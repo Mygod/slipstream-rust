@@ -116,7 +116,9 @@ pub fn is_ipv6_unavailable_error(err: &Error) -> bool {
 
 #[cfg(windows)]
 fn is_ipv6_unavailable_error_code(code: i32) -> bool {
-    code == libc::WSAEAFNOSUPPORT || code == libc::WSAEPROTONOSUPPORT
+    const WSAEAFNOSUPPORT: i32 = 10047;
+    const WSAEPROTONOSUPPORT: i32 = 10043;
+    code == WSAEAFNOSUPPORT || code == WSAEPROTONOSUPPORT
 }
 
 #[cfg(not(windows))]
@@ -183,7 +185,7 @@ mod tests {
     #[test]
     fn recognizes_platform_ipv6_unavailable_error() {
         #[cfg(windows)]
-        let err = Error::from_raw_os_error(libc::WSAEAFNOSUPPORT);
+        let err = Error::from_raw_os_error(10047);
         #[cfg(not(windows))]
         let err = Error::from_raw_os_error(libc::EAFNOSUPPORT);
 
