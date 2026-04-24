@@ -203,6 +203,8 @@ function Initialize-OpenSslStage {
 
     Copy-Item -Force $libcrypto.FullName $stageLibDir
     Copy-Item -Force $libssl.FullName $stageLibDir
+    Copy-Item -Force $libcrypto.FullName (Join-Path $stageLibDir "libcrypto.lib")
+    Copy-Item -Force $libssl.FullName (Join-Path $stageLibDir "libssl.lib")
     Copy-Item -Force $libcrypto.FullName (Join-Path $StageDir "libcrypto.lib")
 
     Export-EnvValue -Name "OPENSSL_DIR" -Value $StageDir
