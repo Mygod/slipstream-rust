@@ -1,10 +1,9 @@
 use crate::dns::{
     refresh_resolver_path, reset_resolver_path, resolver_mode_to_c,
-    sockaddr_storage_to_socket_addr, ResolverState,
+    sockaddr_storage_to_socket_addr, PeerAddrMode, ResolverState,
 };
 use crate::error::ClientError;
 use crate::streams::{ClientState, PathEvent};
-use slipstream_core::normalize_dual_stack_addr;
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_get_default_path_quality, picoquic_get_path_addr,
     picoquic_get_path_quality, slipstream_get_path_id_from_unique, slipstream_set_path_ack_delay,
@@ -51,6 +50,7 @@ pub(crate) fn drain_path_events(
     cnx: *mut picoquic_cnx_t,
     resolvers: &mut [ResolverState],
     state_ptr: *mut ClientState,
+    peer_addr_mode: PeerAddrMode,
 ) {
     if state_ptr.is_null() {
         return;
@@ -63,7 +63,9 @@ pub(crate) fn drain_path_events(
         match event {
             PathEvent::Available(unique_path_id) => {
                 if let Some(addr) = path_peer_addr(cnx, unique_path_id) {
-                    if let Some(resolver) = find_resolver_by_addr_mut(resolvers, addr) {
+                    if let Some(resolver) =
+                        find_resolver_by_addr_mut(resolvers, addr, peer_addr_mode)
+                    {
                         let path_id =
                             unsafe { slipstream_get_path_id_from_unique(cnx, unique_path_id) };
                         if path_id >= 0 {
@@ -114,8 +116,9 @@ fn path_loop_multiplier(mode: ResolverMode) -> usize {
 pub(crate) fn find_resolver_by_addr_mut(
     resolvers: &mut [ResolverState],
     addr: SocketAddr,
+    peer_addr_mode: PeerAddrMode,
 ) -> Option<&mut ResolverState> {
-    let addr = normalize_dual_stack_addr(addr);
+    let addr = peer_addr_mode.canonicalize(addr);
     resolvers.iter_mut().find(|resolver| resolver.addr == addr)
 }
 

@@ -1,6 +1,6 @@
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use std::io::{Error, ErrorKind};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::{lookup_host, TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
 
 pub fn is_transient_udp_error(err: &Error) -> bool {
@@ -64,6 +64,66 @@ where
     }))
 }
 
+pub async fn bind_first_resolved_with_ipv4_fallback<T, F>(
+    host: &str,
+    port: u16,
+    mut bind_addr: F,
+    kind: &str,
+) -> Result<(T, String), Error>
+where
+    F: FnMut(SocketAddr) -> Result<T, Error>,
+{
+    match bind_first_resolved(host, port, &mut bind_addr, kind).await {
+        Ok(bound) => Ok((bound, host.to_string())),
+        Err(err) if is_ipv6_unspecified_host(host) && is_ipv6_unavailable_error(&err) => {
+            let fallback_host = Ipv4Addr::UNSPECIFIED.to_string();
+            tracing::warn!(
+                "Failed to bind {} on {}:{} ({}); falling back to {}",
+                kind,
+                host,
+                port,
+                err,
+                fallback_host
+            );
+            match bind_first_resolved(&fallback_host, port, &mut bind_addr, kind).await {
+                Ok(bound) => Ok((bound, fallback_host)),
+                Err(fallback_err) => Err(Error::new(
+                    fallback_err.kind(),
+                    format!(
+                        "Failed to bind {} on {}:{} ({}) or {}:{} ({})",
+                        kind, host, port, err, fallback_host, port, fallback_err
+                    ),
+                )),
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
+pub fn is_ipv6_unspecified_host(host: &str) -> bool {
+    host.parse::<Ipv6Addr>()
+        .map(|addr| addr.is_unspecified())
+        .unwrap_or(false)
+}
+
+pub fn is_ipv6_unavailable_error(err: &Error) -> bool {
+    if err.kind() == ErrorKind::AddrNotAvailable {
+        return true;
+    }
+
+    matches!(err.raw_os_error(), Some(code) if is_ipv6_unavailable_error_code(code))
+}
+
+#[cfg(windows)]
+fn is_ipv6_unavailable_error_code(code: i32) -> bool {
+    code == libc::WSAEAFNOSUPPORT || code == libc::WSAEPROTONOSUPPORT
+}
+
+#[cfg(not(windows))]
+fn is_ipv6_unavailable_error_code(code: i32) -> bool {
+    code == libc::EAFNOSUPPORT || code == libc::EPROTONOSUPPORT
+}
+
 pub fn bind_tcp_listener_addr(addr: SocketAddr) -> Result<TokioTcpListener, Error> {
     let socket = Socket::new(socket_domain(&addr), Type::STREAM, Some(Protocol::TCP))?;
     #[cfg(not(windows))]
@@ -113,5 +173,20 @@ fn socket_domain(addr: &SocketAddr) -> Domain {
     match addr {
         SocketAddr::V4(_) => Domain::IPV4,
         SocketAddr::V6(_) => Domain::IPV6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_platform_ipv6_unavailable_error() {
+        #[cfg(windows)]
+        let err = Error::from_raw_os_error(libc::WSAEAFNOSUPPORT);
+        #[cfg(not(windows))]
+        let err = Error::from_raw_os_error(libc::EAFNOSUPPORT);
+
+        assert!(is_ipv6_unavailable_error(&err));
     }
 }

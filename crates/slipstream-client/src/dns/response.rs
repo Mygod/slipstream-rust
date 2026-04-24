@@ -7,14 +7,14 @@ use slipstream_ffi::picoquic::{
 use slipstream_ffi::{socket_addr_to_storage, ResolverMode};
 use std::net::SocketAddr;
 
-use super::resolver::ResolverState;
-use slipstream_core::normalize_dual_stack_addr;
+use super::resolver::{PeerAddrMode, ResolverState};
 
 const MAX_POLL_BURST: usize = PICOQUIC_PACKET_LOOP_RECV_MAX;
 
 pub(crate) struct DnsResponseContext<'a> {
     pub(crate) quic: *mut picoquic_quic_t,
     pub(crate) local_addr_storage: &'a slipstream_ffi::SockaddrStorage,
+    pub(crate) peer_addr_mode: PeerAddrMode,
     pub(crate) resolvers: &'a mut [ResolverState],
 }
 
@@ -23,7 +23,7 @@ pub(crate) fn handle_dns_response(
     peer: SocketAddr,
     ctx: &mut DnsResponseContext<'_>,
 ) -> Result<(), ClientError> {
-    let peer = normalize_dual_stack_addr(peer);
+    let peer = ctx.peer_addr_mode.canonicalize(peer);
     let response_id = dns_response_id(buf);
     if let Some(payload) = decode_response(buf) {
         let resolver_index = ctx
@@ -108,7 +108,6 @@ fn find_resolver_by_addr(
     resolvers: &mut [ResolverState],
     peer: SocketAddr,
 ) -> Option<&mut ResolverState> {
-    let peer = normalize_dual_stack_addr(peer);
     resolvers.iter_mut().find(|resolver| resolver.addr == peer)
 }
 
