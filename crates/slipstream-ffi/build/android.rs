@@ -1,7 +1,8 @@
-use std::path::PathBuf;
-use std::process::Command;
+use crate::cc::CcTool;
 
-pub(crate) fn maybe_link_android_builtins(target: &str, cc: &str) {
+use std::path::PathBuf;
+
+pub(crate) fn maybe_link_android_builtins(target: &str, cc: &CcTool) {
     let builtins = match android_builtins_name(target) {
         Some(name) => name,
         None => return,
@@ -32,11 +33,8 @@ fn android_builtins_name(target: &str) -> Option<&'static str> {
     }
 }
 
-fn clang_builtins_path(cc: &str, builtins: &str) -> Option<PathBuf> {
-    let output = Command::new(cc)
-        .arg("-print-libgcc-file-name")
-        .output()
-        .ok()?;
+fn clang_builtins_path(cc: &CcTool, builtins: &str) -> Option<PathBuf> {
+    let output = cc.command().arg("-print-libgcc-file-name").output().ok()?;
     if !output.status.success() {
         return None;
     }

@@ -154,31 +154,6 @@ jobs:
         run: |
           choco install pkgconfiglite strawberryperl -y
 
-          # Find and configure OpenSSL
-          $opensslPaths = @(
-            "C:\Program Files\OpenSSL",
-            "C:\Program Files\OpenSSL-Win64",
-            "C:\OpenSSL-Win64",
-            "C:\OpenSSL"
-          )
-
-          foreach ($path in $opensslPaths) {
-            if (Test-Path $path) {
-              $libDir = Get-ChildItem -Path "$path\lib" -Filter "libcrypto*.lib" -Recurse -ErrorAction SilentlyContinue |
-                        Select-Object -First 1 | ForEach-Object { $_.DirectoryName }
-
-              if ($libDir) {
-                echo "OPENSSL_DIR=$path" >> $env:GITHUB_ENV
-                echo "OPENSSL_ROOT_DIR=$path" >> $env:GITHUB_ENV
-                echo "OPENSSL64DIR=$path" >> $env:GITHUB_ENV
-                echo "OPENSSL_LIB_DIR=$libDir" >> $env:GITHUB_ENV
-                echo "OPENSSL_INCLUDE_DIR=$path\include" >> $env:GITHUB_ENV
-                Write-Host "OpenSSL configured at $path (libs in $libDir)"
-                break
-              }
-            }
-          }
-
           # Setup Perl for OpenSSL vendored build
           $perlPaths = @(
             "C:\Strawberry\perl\bin",
@@ -216,6 +191,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Test slipstream-ffi (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo test -p slipstream-ffi --target ${{ matrix.target }}
 
       - name: Build slipstream-client
         shell: bash

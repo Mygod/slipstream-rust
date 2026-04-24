@@ -28,9 +28,9 @@ git submodule update --init --recursive
 
 On non-Windows hosts, `cargo build` will auto-build picoquic via
 `./scripts/build_picoquic.sh` when libs are missing (outputs to
-`.picoquic-build/`). Windows targets are only supported from a Windows host:
-run `pwsh -File ./scripts/build_picoquic_windows.ps1` once, then build with
-Cargo. See `docs/build.md` for details.
+`.picoquic-build/`). The Windows `x86_64-pc-windows-msvc` target is only
+supported from a Windows host: run `pwsh -File ./scripts/build_picoquic_windows.ps1`
+once, then build with Cargo. See `docs/build.md` for details.
 
 Build the Rust binaries:
 

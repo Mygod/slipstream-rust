@@ -267,13 +267,18 @@ fn write_pem_file(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn open_new_with_mode(path: &Path, mode: u32) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    options.mode(mode);
+    options.open(path)
+}
+
+#[cfg(not(unix))]
 fn open_new_with_mode(path: &Path, _mode: u32) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        options.mode(_mode);
-    }
     options.open(path)
 }
 
