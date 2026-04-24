@@ -96,6 +96,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut picoquic_lib_dir = locate_picoquic_lib_dir();
     let mut picotls_include_dir = locate_picotls_include_dir();
 
+    if is_windows && target != "x86_64-pc-windows-msvc" {
+        return Err("Windows builds are only supported for x86_64-pc-windows-msvc.".into());
+    }
+
     if is_windows && !host_is_windows {
         return Err(
             "Windows targets are only supported from a Windows host. Cross-building picoquic/picotls from Linux is unsupported in this repo."
@@ -146,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let picotls_include_dir = picotls_include_dir
         .ok_or_else(|| missing_picotls_headers_message(is_windows).to_string())?;
 
-    let cc = resolve_cc(&target);
+    let cc = resolve_cc(&target)?;
     let ar = resolve_ar(&target, &cc);
     let mut object_paths = Vec::with_capacity(1);
 
@@ -209,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     object_paths.push(picotls_layout_obj);
 
     let archive = out_dir.join("libslipstream_client_objs.a");
-    create_archive(&ar, &archive, &object_paths)?;
+    create_archive(&ar, &cc, &archive, &object_paths)?;
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=slipstream_client_objs");
 
@@ -225,11 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-search=native={}", dir.display());
     }
     for lib in picoquic_libs.libs {
-        if is_windows && needs_whole_archive_windows(lib) {
-            println!("cargo:rustc-link-lib=static:+whole-archive={}", lib);
-        } else {
-            println!("cargo:rustc-link-lib=static={}", lib);
-        }
+        println!("cargo:rustc-link-lib=static={}", lib);
     }
 
     if !cfg!(feature = "openssl-vendored") {
@@ -312,25 +312,6 @@ fn add_parent_dir(dirs: &mut Vec<PathBuf>, path: &Path) {
     if let Some(parent) = path.parent() {
         push_unique_dir(dirs, parent.to_path_buf());
     }
-}
-
-fn needs_whole_archive_windows(lib: &str) -> bool {
-    matches!(
-        lib,
-        "picoquic_core"
-            | "picoquic-core"
-            | "picoquic"
-            | "cifra"
-            | "microecc"
-            | "picotls_core"
-            | "picotls-core"
-            | "picotls_openssl"
-            | "picotls-openssl"
-            | "picotls_minicrypto"
-            | "picotls-minicrypto"
-            | "picotls_fusion"
-            | "picotls-fusion"
-    )
 }
 
 fn has_windows_minicrypto_support_libs(libs: &[&str]) -> bool {

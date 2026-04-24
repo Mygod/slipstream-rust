@@ -72,7 +72,7 @@ These affect the build script in crates/slipstream-ffi:
   picotls headers directory (default: .picoquic-build/_deps/picotls-src/include on non-Windows, vendor/picotls/include for the Windows helper).
 
 - PICOQUIC_BUILD_DIR
-  picoquic build output (default: .picoquic-build; the Windows helper stages libs under .picoquic-build/windows/x64/Release by default).
+  picoquic build output (default: .picoquic-build; the Windows helper stages libs under .picoquic-build/windows/x64/Release and OpenSSL under .picoquic-build/windows/openssl by default).
 
 - PICOQUIC_LIB_DIR
   Directory containing picoquic and picotls libraries.

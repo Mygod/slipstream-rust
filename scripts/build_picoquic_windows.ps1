@@ -4,6 +4,7 @@ param(
     [string]$PicoquicDir = "",
     [string]$PicotlsDir = "",
     [string]$StageDir = "",
+    [string]$OpenSslStageDir = "",
     [string]$PicotlsCommit = "5a4461d8a3948d9d26bf861e7d90cb80d8093515",
     [string]$Configuration = "Release",
     [string]$Platform = "x64",
@@ -105,6 +106,114 @@ function Get-WindowsSdkVersion {
     return $windowsSdk
 }
 
+function Export-EnvValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    Set-Item -Path "Env:$Name" -Value $Value
+    if ($env:GITHUB_ENV) {
+        "$Name=$Value" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    }
+}
+
+function Get-OpenSslLayout {
+    if (![string]::IsNullOrWhiteSpace($env:OPENSSL_LIB_DIR) -and
+        ![string]::IsNullOrWhiteSpace($env:OPENSSL_INCLUDE_DIR)) {
+        if (!(Test-Path $env:OPENSSL_LIB_DIR)) {
+            throw "OPENSSL_LIB_DIR does not exist: $env:OPENSSL_LIB_DIR"
+        }
+        if (!(Test-Path $env:OPENSSL_INCLUDE_DIR)) {
+            throw "OPENSSL_INCLUDE_DIR does not exist: $env:OPENSSL_INCLUDE_DIR"
+        }
+        return @{
+            Root = if ($env:OPENSSL_ROOT_DIR) { $env:OPENSSL_ROOT_DIR } else { Split-Path -Parent $env:OPENSSL_INCLUDE_DIR }
+            IncludeDir = $env:OPENSSL_INCLUDE_DIR
+            LibDir = $env:OPENSSL_LIB_DIR
+        }
+    }
+
+    $opensslPaths = @()
+    foreach ($path in @($env:OPENSSL_ROOT_DIR, $env:OPENSSL_DIR, $env:OPENSSL64DIR)) {
+        if (![string]::IsNullOrWhiteSpace($path)) {
+            $opensslPaths += $path
+        }
+    }
+    $opensslPaths += @(
+        "C:\Program Files\OpenSSL",
+        "C:\Program Files\OpenSSL-Win64",
+        "C:\OpenSSL-Win64",
+        "C:\OpenSSL"
+    )
+
+    foreach ($path in $opensslPaths) {
+        if (!(Test-Path $path)) {
+            continue
+        }
+        $includeDir = Join-Path $path "include"
+        if (!(Test-Path $includeDir)) {
+            continue
+        }
+        $libDir = Get-ChildItem -Path (Join-Path $path "lib") -Filter "libcrypto*.lib" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1 |
+            ForEach-Object { $_.DirectoryName }
+        if ($libDir) {
+            return @{
+                Root = $path
+                IncludeDir = $includeDir
+                LibDir = $libDir
+            }
+        }
+    }
+
+    throw "Could not locate an OpenSSL install with include files and libcrypto*.lib."
+}
+
+function Initialize-OpenSslStage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Layout,
+        [Parameter(Mandatory = $true)]
+        [string]$StageDir
+    )
+
+    $sourceIncludeDir = $Layout["IncludeDir"]
+    $sourceLibDir = $Layout["LibDir"]
+    $stageIncludeDir = Join-Path $StageDir "include"
+    $stageLibDir = Join-Path $StageDir "lib"
+
+    New-Item -ItemType Directory -Force -Path $stageIncludeDir, $stageLibDir | Out-Null
+    Copy-Item -Recurse -Force (Join-Path $sourceIncludeDir "*") $stageIncludeDir
+
+    $libcrypto = Get-ChildItem -Path $sourceLibDir -Filter "libcrypto*.lib" |
+        Sort-Object Name |
+        Select-Object -First 1
+    if (!$libcrypto) {
+        throw "Could not find libcrypto import library under $sourceLibDir"
+    }
+    $libssl = Get-ChildItem -Path $sourceLibDir -Filter "libssl*.lib" |
+        Sort-Object Name |
+        Select-Object -First 1
+    if (!$libssl) {
+        throw "Could not find libssl import library under $sourceLibDir"
+    }
+
+    Copy-Item -Force $libcrypto.FullName $stageLibDir
+    Copy-Item -Force $libssl.FullName $stageLibDir
+    Copy-Item -Force $libcrypto.FullName (Join-Path $StageDir "libcrypto.lib")
+
+    Export-EnvValue -Name "OPENSSL_DIR" -Value $StageDir
+    Export-EnvValue -Name "OPENSSL_ROOT_DIR" -Value $StageDir
+    Export-EnvValue -Name "OPENSSL64DIR" -Value $StageDir
+    Export-EnvValue -Name "OPENSSL_INCLUDE_DIR" -Value $stageIncludeDir
+    Export-EnvValue -Name "OPENSSL_LIB_DIR" -Value $stageLibDir
+    $sourceRoot = $Layout["Root"]
+    Write-Host "OpenSSL staged in $StageDir from $sourceRoot"
+}
+
 if (!$IsWindows) {
     throw "scripts/build_picoquic_windows.ps1 must be run on a Windows host."
 }
@@ -130,24 +239,23 @@ if ([string]::IsNullOrWhiteSpace($StageDir)) {
     $StageDir = Join-Path $stageRoot "$Platform\$Configuration"
 }
 
-if (!(Test-Path $PicoquicDir)) {
-    throw "picoquic not found at $PicoquicDir. Run: git submodule update --init --recursive vendor/picoquic"
+if ([string]::IsNullOrWhiteSpace($OpenSslStageDir)) {
+    $stagePlatformDir = Split-Path -Parent $StageDir
+    $stageRootDir = Split-Path -Parent $stagePlatformDir
+    $OpenSslStageDir = Join-Path $stageRootDir "openssl"
 }
 
-if ([string]::IsNullOrWhiteSpace($env:OPENSSL_LIB_DIR)) {
-    throw "OPENSSL_LIB_DIR must be set for the Windows picoquic build."
-}
-if ([string]::IsNullOrWhiteSpace($env:OPENSSL64DIR)) {
-    throw "OPENSSL64DIR must be set for the Windows picoquic build."
-}
-if (!(Test-Path $env:OPENSSL64DIR)) {
-    throw "OPENSSL64DIR does not exist: $env:OPENSSL64DIR"
+if (!(Test-Path $PicoquicDir)) {
+    throw "picoquic not found at $PicoquicDir. Run: git submodule update --init --recursive vendor/picoquic"
 }
 
 $msbuild = Get-MSBuildPath
 if ([string]::IsNullOrWhiteSpace($WindowsSdk)) {
     $WindowsSdk = Get-WindowsSdkVersion
 }
+
+$opensslLayout = Get-OpenSslLayout
+Initialize-OpenSslStage -Layout $opensslLayout -StageDir $OpenSslStageDir
 
 if (!(Test-Path $PicotlsDir)) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PicotlsDir) | Out-Null
@@ -156,14 +264,6 @@ if (!(Test-Path $PicotlsDir)) {
         throw "Failed to clone picotls into $PicotlsDir"
     }
 }
-
-$libcrypto = Get-ChildItem -Path $env:OPENSSL_LIB_DIR -Filter "libcrypto*.lib" |
-    Sort-Object Name |
-    Select-Object -First 1
-if (!$libcrypto) {
-    throw "Could not find libcrypto import library under $env:OPENSSL_LIB_DIR"
-}
-Copy-Item -Force $libcrypto.FullName (Join-Path $env:OPENSSL64DIR "libcrypto.lib")
 
 Invoke-Git -WorkingDir $PicotlsDir -Arguments @("fetch", "--depth", "1", "origin", $PicotlsCommit)
 Invoke-Git -WorkingDir $PicotlsDir -Arguments @("checkout", "-q", $PicotlsCommit)

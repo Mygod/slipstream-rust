@@ -39,10 +39,10 @@ Windows targets are not supported from Linux hosts in this repo.
 
 ## Windows target build
 
-Windows builds are only supported from a Windows host. The supported path is
-the repo helper below, which builds picotls and picoquic with the upstream
-Visual Studio projects and stages the resulting libraries into a layout that
-Cargo auto-detects:
+Windows builds are only supported from a Windows host targeting
+`x86_64-pc-windows-msvc`. The supported path is the repo helper below, which
+builds picotls and picoquic with the upstream Visual Studio projects and stages
+the resulting libraries into a layout that Cargo auto-detects:
 
 ```
 pwsh -File ./scripts/build_picoquic_windows.ps1
@@ -53,6 +53,7 @@ By default the helper:
 
 - checks out picotls into `vendor/picotls/` as an untracked working tree
 - stages Windows libraries into `.picoquic-build/windows/x64/Release/`
+- stages OpenSSL headers and import libraries into `.picoquic-build/windows/openssl/`
 - lets `cargo build` auto-detect `vendor/picoquic/picoquic` and `vendor/picotls/include`
 
 If you need a custom layout, these environment variables are still supported:

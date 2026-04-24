@@ -5,10 +5,7 @@ use tokio::net::{lookup_host, TcpListener as TokioTcpListener, UdpSocket as Toki
 
 pub fn is_transient_udp_error(err: &Error) -> bool {
     match err.kind() {
-        ErrorKind::WouldBlock
-        | ErrorKind::TimedOut
-        | ErrorKind::Interrupted
-        | ErrorKind::ConnectionReset => {
+        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted => {
             return true;
         }
         _ => {}
@@ -190,5 +187,12 @@ mod tests {
         let err = Error::from_raw_os_error(libc::EAFNOSUPPORT);
 
         assert!(is_ipv6_unavailable_error(&err));
+    }
+
+    #[test]
+    fn connection_reset_is_not_transient_udp_error() {
+        let err = Error::new(ErrorKind::ConnectionReset, "connection reset");
+
+        assert!(!is_transient_udp_error(&err));
     }
 }
