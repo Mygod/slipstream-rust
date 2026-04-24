@@ -104,7 +104,9 @@ pub(crate) fn create_archive(
         for (name, value) in cc.env() {
             lib_cmd.env(name, value);
         }
-        lib_cmd.arg("/OUT:").arg(archive).arg("/NOLOGO");
+        let mut out_arg = OsString::from("/OUT:");
+        out_arg.push(archive.as_os_str());
+        lib_cmd.arg(out_arg).arg("/NOLOGO");
         for obj in objects {
             lib_cmd.arg(obj);
         }
