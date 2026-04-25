@@ -9,7 +9,7 @@ readme = "../../README.md"
 
 [dependencies]
 libc = "0.2"
-openssl-sys = { version = "0.9", optional = true, features = ["vendored"] }
+openssl-sys = { version = "0.9.114", optional = true, features = ["vendored"] }
 slipstream-core = { path = "../slipstream-core" }
 
 [features]
