@@ -78,6 +78,46 @@ function Get-FirstExistingPath {
     return $null
 }
 
+function Get-OpenSslStaticLibraryPair {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$LibDirs
+    )
+
+    $pairs = @(
+        @{
+            Ssl = "libssl64MD.lib"
+            Crypto = "libcrypto64MD.lib"
+        },
+        @{
+            Ssl = "libssl_static.lib"
+            Crypto = "libcrypto_static.lib"
+        }
+    )
+
+    foreach ($libDir in $LibDirs) {
+        if (!(Test-Path $libDir)) {
+            continue
+        }
+
+        foreach ($pair in $pairs) {
+            $ssl = Join-Path $libDir $pair["Ssl"]
+            $crypto = Join-Path $libDir $pair["Crypto"]
+            if ((Test-Path $ssl) -and (Test-Path $crypto)) {
+                return @{
+                    LibDir = $libDir
+                    Ssl = $ssl
+                    Crypto = $crypto
+                    SslName = [System.IO.Path]::GetFileNameWithoutExtension($ssl)
+                    CryptoName = [System.IO.Path]::GetFileNameWithoutExtension($crypto)
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
 function Get-MSBuildPath {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (!(Test-Path $vswhere)) {
@@ -129,10 +169,22 @@ function Get-OpenSslLayout {
         if (!(Test-Path $env:OPENSSL_INCLUDE_DIR)) {
             throw "OPENSSL_INCLUDE_DIR does not exist: $env:OPENSSL_INCLUDE_DIR"
         }
+        $staticPair = Get-OpenSslStaticLibraryPair -LibDirs @(
+            $env:OPENSSL_LIB_DIR,
+            (Join-Path $env:OPENSSL_LIB_DIR "VC"),
+            (Join-Path $env:OPENSSL_LIB_DIR "VC\x64\MD")
+        )
+        if (!$staticPair) {
+            throw "Could not find static OpenSSL libraries under OPENSSL_LIB_DIR: $env:OPENSSL_LIB_DIR"
+        }
         return @{
             Root = if ($env:OPENSSL_ROOT_DIR) { $env:OPENSSL_ROOT_DIR } else { Split-Path -Parent $env:OPENSSL_INCLUDE_DIR }
             IncludeDir = $env:OPENSSL_INCLUDE_DIR
-            LibDir = $env:OPENSSL_LIB_DIR
+            LibDir = $staticPair["LibDir"]
+            Ssl = $staticPair["Ssl"]
+            Crypto = $staticPair["Crypto"]
+            SslName = $staticPair["SslName"]
+            CryptoName = $staticPair["CryptoName"]
         }
     }
 
@@ -157,19 +209,26 @@ function Get-OpenSslLayout {
         if (!(Test-Path $includeDir)) {
             continue
         }
-        $libDir = Get-ChildItem -Path (Join-Path $path "lib") -Filter "libcrypto*.lib" -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1 |
-            ForEach-Object { $_.DirectoryName }
-        if ($libDir) {
+        $libRoot = Join-Path $path "lib"
+        $staticPair = Get-OpenSslStaticLibraryPair -LibDirs @(
+            (Join-Path $libRoot "VC"),
+            (Join-Path $libRoot "VC\x64\MD"),
+            $libRoot
+        )
+        if ($staticPair) {
             return @{
                 Root = $path
                 IncludeDir = $includeDir
-                LibDir = $libDir
+                LibDir = $staticPair["LibDir"]
+                Ssl = $staticPair["Ssl"]
+                Crypto = $staticPair["Crypto"]
+                SslName = $staticPair["SslName"]
+                CryptoName = $staticPair["CryptoName"]
             }
         }
     }
 
-    throw "Could not locate an OpenSSL install with include files and libcrypto*.lib."
+    throw "Could not locate an OpenSSL install with include files and static MSVC libraries."
 }
 
 function Initialize-OpenSslStage {
@@ -181,39 +240,32 @@ function Initialize-OpenSslStage {
     )
 
     $sourceIncludeDir = $Layout["IncludeDir"]
-    $sourceLibDir = $Layout["LibDir"]
+    $sourceSsl = $Layout["Ssl"]
+    $sourceCrypto = $Layout["Crypto"]
+    $sslName = $Layout["SslName"]
+    $cryptoName = $Layout["CryptoName"]
     $stageIncludeDir = Join-Path $StageDir "include"
     $stageLibDir = Join-Path $StageDir "lib"
 
     New-Item -ItemType Directory -Force -Path $stageIncludeDir, $stageLibDir | Out-Null
     Copy-Item -Recurse -Force (Join-Path $sourceIncludeDir "*") $stageIncludeDir
 
-    $libcrypto = Get-ChildItem -Path $sourceLibDir -Filter "libcrypto*.lib" |
-        Sort-Object Name |
-        Select-Object -First 1
-    if (!$libcrypto) {
-        throw "Could not find libcrypto import library under $sourceLibDir"
-    }
-    $libssl = Get-ChildItem -Path $sourceLibDir -Filter "libssl*.lib" |
-        Sort-Object Name |
-        Select-Object -First 1
-    if (!$libssl) {
-        throw "Could not find libssl import library under $sourceLibDir"
-    }
-
-    Copy-Item -Force $libcrypto.FullName $stageLibDir
-    Copy-Item -Force $libssl.FullName $stageLibDir
-    Copy-Item -Force $libcrypto.FullName (Join-Path $stageLibDir "libcrypto.lib")
-    Copy-Item -Force $libssl.FullName (Join-Path $stageLibDir "libssl.lib")
-    Copy-Item -Force $libcrypto.FullName (Join-Path $StageDir "libcrypto.lib")
+    Copy-Item -Force $sourceCrypto $stageLibDir
+    Copy-Item -Force $sourceSsl $stageLibDir
 
     Export-EnvValue -Name "OPENSSL_DIR" -Value $StageDir
     Export-EnvValue -Name "OPENSSL_ROOT_DIR" -Value $StageDir
     Export-EnvValue -Name "OPENSSL64DIR" -Value $StageDir
     Export-EnvValue -Name "OPENSSL_INCLUDE_DIR" -Value $stageIncludeDir
     Export-EnvValue -Name "OPENSSL_LIB_DIR" -Value $stageLibDir
+    Export-EnvValue -Name "OPENSSL_SSL_LIBRARY" -Value (Join-Path $stageLibDir (Split-Path -Leaf $sourceSsl))
+    Export-EnvValue -Name "OPENSSL_CRYPTO_LIBRARY" -Value (Join-Path $stageLibDir (Split-Path -Leaf $sourceCrypto))
+    Export-EnvValue -Name "OPENSSL_LIBS" -Value "${sslName}:${cryptoName}"
+    Export-EnvValue -Name "OPENSSL_STATIC" -Value "1"
+    Export-EnvValue -Name "OPENSSL_USE_STATIC_LIBS" -Value "TRUE"
     $sourceRoot = $Layout["Root"]
-    Write-Host "OpenSSL staged in $StageDir from $sourceRoot"
+    Write-Host "Static OpenSSL staged in $StageDir from $sourceRoot"
+    Write-Host "OpenSSL libraries: ${sslName}, ${cryptoName}"
 }
 
 if (!$IsWindows) {

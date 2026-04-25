@@ -228,6 +228,11 @@ jobs:
             (cd "${dist_dir}" && shasum -a 256 "slipstream-client${bin_suffix}" "slipstream-server${bin_suffix}" > "${base_name}.sha256")
           fi
 
+      - name: Verify Windows artifact dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/verify_windows_artifact_deps.ps1 -DistDir dist
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
