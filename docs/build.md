@@ -46,7 +46,9 @@ upstream Visual Studio projects, stages static OpenSSL libraries from the runner
 image, and exports the Cargo environment through `GITHUB_ENV`.
 
 The uploaded Windows artifact is expected to contain only the two Slipstream
-executables plus checksums. CI rejects artifacts that depend on OpenSSL DLLs.
+executables plus checksums. CI rejects artifacts with non-platform DLL
+dependencies; Windows system DLLs, API-set DLLs, and the VC/UCRT runtime are
+allowed.
 
 ## Manual picoquic build (non-Windows hosts)
 

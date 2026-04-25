@@ -44,16 +44,42 @@ if (!$executables) {
 }
 
 $dumpbin = Get-DumpbinPath
+$allowedDependencyPatterns = @(
+    '^(?i:advapi32|bcrypt|bcryptprimitives|crypt32|kernel32|ntdll|user32|vcruntime140|vcruntime140_1|ws2_32)\.dll$',
+    '^(?i:ucrtbase)\.dll$',
+    '^(?i:api-ms-win-(core|crt)-[a-z0-9-]+)\.dll$'
+)
 $failed = $false
 foreach ($exe in $executables) {
     Write-Host "Checking dependencies for $($exe.FullName)"
     $deps = & $dumpbin /dependents $exe.FullName
     $deps | Out-String | Write-Host
-    if ($deps -match '(?i)\blib(ssl|crypto)(-[^\s]+)?\.dll\b') {
+    $dlls = $deps |
+        ForEach-Object {
+            if ($_ -match '^\s*([A-Za-z0-9_.-]+\.dll)\s*$') {
+                $Matches[1]
+            }
+        } |
+        Sort-Object -Unique
+    $unexpectedDlls = @()
+    foreach ($dll in $dlls) {
+        $isAllowed = $false
+        foreach ($pattern in $allowedDependencyPatterns) {
+            if ($dll -match $pattern) {
+                $isAllowed = $true
+                break
+            }
+        }
+        if (!$isAllowed) {
+            $unexpectedDlls += $dll
+        }
+    }
+    if ($unexpectedDlls) {
         $failed = $true
+        Write-Host "Unexpected non-platform DLL dependencies: $($unexpectedDlls -join ', ')"
     }
 }
 
 if ($failed) {
-    throw "Windows artifacts depend on OpenSSL DLLs; expected static OpenSSL linkage."
+    throw "Windows artifacts depend on non-platform DLLs; expected standalone artifacts with only Windows and VC runtime dependencies."
 }
