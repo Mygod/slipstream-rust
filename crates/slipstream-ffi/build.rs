@@ -31,6 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=OPENSSL_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_CRYPTO_LIBRARY");
     println!("cargo:rerun-if-env-changed=OPENSSL_SSL_LIBRARY");
+    println!("cargo:rerun-if-env-changed=OPENSSL_LIBS");
+    println!("cargo:rerun-if-env-changed=OPENSSL_STATIC");
     println!("cargo:rerun-if-env-changed=OPENSSL_USE_STATIC_LIBS");
     println!("cargo:rerun-if-env-changed=OPENSSL_NO_VENDOR");
     println!("cargo:rerun-if-env-changed=DEP_OPENSSL_ROOT");
@@ -89,6 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_windows = target.contains("windows") || target.contains("pc-windows");
     let host_is_windows = host.contains("windows") || host.contains("pc-windows");
     let auto_build = env_flag("PICOQUIC_AUTO_BUILD", true);
+    let openssl_static = cfg!(feature = "openssl-static") || env_flag("OPENSSL_STATIC", false);
     let explicit_picoquic_include = env::var_os("PICOQUIC_INCLUDE_DIR").is_some();
     let explicit_picoquic_lib = env::var_os("PICOQUIC_LIB_DIR").is_some();
     let explicit_picoquic_include_lib = explicit_picoquic_include || explicit_picoquic_lib;
@@ -255,9 +258,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for dir in openssl_search_dirs {
             println!("cargo:rustc-link-search=native={}", dir.display());
         }
-        if cfg!(feature = "openssl-static") {
-            println!("cargo:rustc-link-lib=static=ssl");
-            println!("cargo:rustc-link-lib=static=crypto");
+        if openssl_static {
+            for lib in openssl_link_libs(is_windows) {
+                println!("cargo:rustc-link-lib=static={}", lib);
+            }
+            if is_windows {
+                println!("cargo:rustc-link-lib=dylib=gdi32");
+                println!("cargo:rustc-link-lib=dylib=user32");
+                println!("cargo:rustc-link-lib=dylib=crypt32");
+                println!("cargo:rustc-link-lib=dylib=advapi32");
+            }
         } else if is_windows {
             if let Ok(openssl_lib_dir) = env::var("OPENSSL_LIB_DIR") {
                 println!("cargo:rustc-link-search=native={}", openssl_lib_dir);
@@ -282,6 +292,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn openssl_link_libs(is_windows: bool) -> Vec<String> {
+    if let Ok(libs) = env::var("OPENSSL_LIBS") {
+        let libs = libs
+            .split(':')
+            .filter(|lib| !lib.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !libs.is_empty() {
+            return libs;
+        }
+    }
+
+    if is_windows {
+        vec!["libssl".to_owned(), "libcrypto".to_owned()]
+    } else {
+        vec!["ssl".to_owned(), "crypto".to_owned()]
+    }
 }
 
 fn push_unique_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
