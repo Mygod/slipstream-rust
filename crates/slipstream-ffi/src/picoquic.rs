@@ -1,6 +1,11 @@
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
-use libc::{c_char, c_int, c_uint, c_void, size_t, sockaddr, sockaddr_storage};
+use libc::{c_char, c_int, c_uint, c_void, size_t, sockaddr};
+
+#[cfg(not(windows))]
+pub type SockaddrStorage = libc::sockaddr_storage;
+#[cfg(windows)]
+pub type SockaddrStorage = winapi::shared::ws2def::SOCKADDR_STORAGE;
 
 pub const PICOQUIC_CONNECTION_ID_MAX_SIZE: usize = 20;
 pub const PICOQUIC_MAX_PACKET_SIZE: usize = 1536;
@@ -345,8 +350,8 @@ extern "C" {
         send_buffer: *mut u8,
         send_buffer_max: size_t,
         send_length: *mut size_t,
-        p_addr_to: *mut sockaddr_storage,
-        p_addr_from: *mut sockaddr_storage,
+        p_addr_to: *mut SockaddrStorage,
+        p_addr_from: *mut SockaddrStorage,
         if_index: *mut c_int,
         log_cid: *mut picoquic_connection_id_t,
         p_last_cnx: *mut *mut picoquic_cnx_t,
@@ -360,8 +365,8 @@ extern "C" {
         send_buffer: *mut u8,
         send_buffer_max: size_t,
         send_length: *mut size_t,
-        p_addr_to: *mut sockaddr_storage,
-        p_addr_from: *mut sockaddr_storage,
+        p_addr_to: *mut SockaddrStorage,
+        p_addr_from: *mut SockaddrStorage,
         if_index: *mut c_int,
         send_msg_size: *mut size_t,
     ) -> c_int;
@@ -437,7 +442,7 @@ extern "C" {
         cnx: *mut picoquic_cnx_t,
         unique_path_id: u64,
         local: c_int,
-        addr: *mut sockaddr_storage,
+        addr: *mut SockaddrStorage,
     ) -> c_int;
 }
 

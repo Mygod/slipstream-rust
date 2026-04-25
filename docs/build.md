@@ -18,7 +18,7 @@ Initialize it before building:
 git submodule update --init --recursive
 ```
 
-## Default build (auto-build picoquic)
+## Default build (non-Windows hosts)
 
 The build script in crates/slipstream-ffi will auto-build picoquic if the
 headers and libs are missing. It uses vendor/picoquic and writes outputs to
@@ -35,7 +35,22 @@ You can disable auto-build with:
 PICOQUIC_AUTO_BUILD=0 cargo build -p slipstream-client -p slipstream-server
 ```
 
-## Manual picoquic build
+Windows targets are not supported from Linux hosts in this repo.
+
+## Windows target build
+
+Windows binary builds are supported in GitHub Actions on the hosted
+`windows-latest` runner targeting `x86_64-pc-windows-msvc`. The workflow runs
+`scripts/build_picoquic_windows.ps1`, which builds picotls and picoquic with the
+upstream Visual Studio projects, stages static OpenSSL libraries from the runner
+image, and exports the Cargo environment through `GITHUB_ENV`.
+
+The uploaded Windows artifact is expected to contain only the two Slipstream
+executables plus checksums. CI rejects artifacts with non-platform DLL
+dependencies; Windows system DLLs, API-set DLLs, and the VC/UCRT runtime are
+allowed.
+
+## Manual picoquic build (non-Windows hosts)
 
 If you prefer to build picoquic yourself, run:
 

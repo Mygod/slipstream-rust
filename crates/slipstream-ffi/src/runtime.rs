@@ -6,13 +6,21 @@ use crate::picoquic::{
     picoquic_set_default_priority, picoquic_set_initial_send_mtu,
     picoquic_set_key_log_file_from_env, picoquic_set_max_data_control, picoquic_set_mtu_max,
     picoquic_set_preemptive_repeat_policy, picoquic_set_stream_data_consumption_mode,
-    picoquic_stop_sending, slipstream_take_stateless_packet_for_cid, PICOQUIC_MAX_PACKET_SIZE,
+    picoquic_stop_sending, slipstream_take_stateless_packet_for_cid, SockaddrStorage,
+    PICOQUIC_MAX_PACKET_SIZE,
 };
-use libc::{c_char, c_int, c_ulong, size_t, sockaddr_storage};
+#[cfg(windows)]
+use libc::{c_char, c_int, c_ulong, size_t};
+#[cfg(not(windows))]
+use libc::{c_char, c_int, c_ulong, size_t};
 use slipstream_core::tcp::stream_write_buffer_bytes;
 use std::ffi::CStr;
 use std::io::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpStream};
+#[cfg(windows)]
+use winapi::shared::ws2def::{AF_INET, AF_INET6, SOCKADDR_IN};
+#[cfg(windows)]
+use winapi::shared::ws2ipdef::SOCKADDR_IN6_LH;
 
 pub const SLIPSTREAM_INTERNAL_ERROR: u64 = 0x101;
 pub const SLIPSTREAM_FILE_CANCEL_ERROR: u64 = 0x105;
@@ -124,11 +132,12 @@ pub fn take_crypto_errors() -> Vec<String> {
     errors
 }
 
-pub fn socket_addr_to_storage(addr: SocketAddr) -> sockaddr_storage {
+#[cfg(not(windows))]
+pub fn socket_addr_to_storage(addr: SocketAddr) -> SockaddrStorage {
     match addr {
         SocketAddr::V4(addr) => {
             // SAFETY: sockaddr_storage is plain-old-data; zeroing is valid.
-            let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut storage: SockaddrStorage = unsafe { std::mem::zeroed() };
             let sockaddr = libc::sockaddr_in {
                 #[cfg(any(
                     target_vendor = "apple",
@@ -141,7 +150,7 @@ pub fn socket_addr_to_storage(addr: SocketAddr) -> sockaddr_storage {
                 sin_family: libc::AF_INET as libc::sa_family_t,
                 sin_port: addr.port().to_be(),
                 sin_addr: libc::in_addr {
-                    s_addr: u32::from_be_bytes(addr.ip().octets()),
+                    s_addr: u32::from_ne_bytes(addr.ip().octets()),
                 },
                 sin_zero: [0; 8],
             };
@@ -153,7 +162,7 @@ pub fn socket_addr_to_storage(addr: SocketAddr) -> sockaddr_storage {
         }
         SocketAddr::V6(addr) => {
             // SAFETY: sockaddr_storage is plain-old-data; zeroing is valid.
-            let mut storage: sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut storage: SockaddrStorage = unsafe { std::mem::zeroed() };
             let sockaddr = libc::sockaddr_in6 {
                 #[cfg(any(
                     target_vendor = "apple",
@@ -180,13 +189,14 @@ pub fn socket_addr_to_storage(addr: SocketAddr) -> sockaddr_storage {
     }
 }
 
-pub fn sockaddr_storage_to_socket_addr(storage: &sockaddr_storage) -> Result<SocketAddr, String> {
+#[cfg(not(windows))]
+pub fn sockaddr_storage_to_socket_addr(storage: &SockaddrStorage) -> Result<SocketAddr, String> {
     match storage.ss_family as libc::c_int {
         libc::AF_INET => {
             // SAFETY: ss_family identifies an IPv4 sockaddr layout.
             let addr_in: &libc::sockaddr_in =
                 unsafe { &*(storage as *const _ as *const libc::sockaddr_in) };
-            let ip = Ipv4Addr::from(addr_in.sin_addr.s_addr);
+            let ip = Ipv4Addr::from(addr_in.sin_addr.s_addr.to_ne_bytes());
             let port = u16::from_be(addr_in.sin_port);
             Ok(SocketAddr::V4(SocketAddrV4::new(ip, port)))
         }
@@ -261,4 +271,131 @@ pub unsafe fn write_stream_or_reset(
 pub unsafe fn abort_stream_bidi(cnx: *mut picoquic_cnx_t, stream_id: u64, app_error: u64) {
     let _ = picoquic_stop_sending(cnx, stream_id, app_error);
     let _ = picoquic_reset_stream(cnx, stream_id, app_error);
+}
+
+#[cfg(windows)]
+pub fn socket_addr_to_storage(addr: SocketAddr) -> SockaddrStorage {
+    match addr {
+        SocketAddr::V4(addr) => {
+            // SAFETY: sockaddr_storage is plain-old-data; zeroing is valid.
+            let mut storage: SockaddrStorage = unsafe { std::mem::zeroed() };
+            unsafe {
+                // SAFETY: storage is properly aligned and large enough for SOCKADDR_IN.
+                let sockaddr_ptr = &mut storage as *mut _ as *mut SOCKADDR_IN;
+                (*sockaddr_ptr).sin_family = AF_INET as u16;
+                (*sockaddr_ptr).sin_port = addr.port().to_be();
+                *(*sockaddr_ptr).sin_addr.S_un.S_addr_mut() =
+                    u32::from_ne_bytes(addr.ip().octets());
+            }
+            storage
+        }
+        SocketAddr::V6(addr) => {
+            // SAFETY: sockaddr_storage is plain-old-data; zeroing is valid.
+            let mut storage: SockaddrStorage = unsafe { std::mem::zeroed() };
+            unsafe {
+                // SAFETY: storage is properly aligned and large enough for SOCKADDR_IN6_LH.
+                let sockaddr_ptr = &mut storage as *mut _ as *mut SOCKADDR_IN6_LH;
+                (*sockaddr_ptr).sin6_family = AF_INET6 as u16;
+                (*sockaddr_ptr).sin6_port = addr.port().to_be();
+                (*sockaddr_ptr).sin6_flowinfo = addr.flowinfo();
+                // SAFETY: sin6_addr is a 16-byte array; addr_bytes is 16 bytes.
+                // Copy IPv6 address bytes directly using raw pointer
+                let addr_bytes = addr.ip().octets();
+                let dest_ptr = &mut (*sockaddr_ptr).sin6_addr as *mut _ as *mut u8;
+                std::ptr::copy_nonoverlapping(addr_bytes.as_ptr(), dest_ptr, 16);
+                // SAFETY: u union field contains u32 for scope_id on Windows.
+                // Set scope_id via the union
+                let scope_ptr = &mut (*sockaddr_ptr).u as *mut _ as *mut u32;
+                *scope_ptr = addr.scope_id();
+            }
+            storage
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn sockaddr_storage_to_socket_addr(storage: &SockaddrStorage) -> Result<SocketAddr, String> {
+    let family = storage.ss_family as i32;
+    match family {
+        AF_INET => {
+            // SAFETY: ss_family identifies an IPv4 sockaddr layout.
+            let addr_in: &SOCKADDR_IN = unsafe { &*(storage as *const _ as *const SOCKADDR_IN) };
+            // SAFETY: S_un union contains S_addr (u32) for IPv4 addresses on Windows.
+            let ip = Ipv4Addr::from(unsafe { *addr_in.sin_addr.S_un.S_addr() }.to_ne_bytes());
+            let port = u16::from_be(addr_in.sin_port);
+            Ok(SocketAddr::V4(SocketAddrV4::new(ip, port)))
+        }
+        AF_INET6 => {
+            // SAFETY: ss_family identifies an IPv6 sockaddr layout.
+            let addr_in6: &SOCKADDR_IN6_LH =
+                unsafe { &*(storage as *const _ as *const SOCKADDR_IN6_LH) };
+            // SAFETY: sin6_addr is a 16-byte array; ip_bytes is 16 bytes.
+            // Read IPv6 address bytes directly using raw pointer
+            let src_ptr = &addr_in6.sin6_addr as *const _ as *const u8;
+            let mut ip_bytes: [u8; 16] = [0; 16];
+            unsafe { std::ptr::copy_nonoverlapping(src_ptr, ip_bytes.as_mut_ptr(), 16) };
+            let ip = Ipv6Addr::from(ip_bytes);
+            let port = u16::from_be(addr_in6.sin6_port);
+            // SAFETY: u union field contains u32 for scope_id on Windows.
+            // Read scope_id via the union
+            let scope_id = unsafe { *(&addr_in6.u as *const _ as *const u32) };
+            Ok(SocketAddr::V6(SocketAddrV6::new(
+                ip,
+                port,
+                addr_in6.sin6_flowinfo,
+                scope_id,
+            )))
+        }
+        _ => Err("Unsupported sockaddr family".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socket_addr_storage_round_trips_ipv4() {
+        let addr: SocketAddr = "203.0.113.9:4433".parse().unwrap();
+        let storage = socket_addr_to_storage(addr);
+
+        assert_eq!(sockaddr_storage_to_socket_addr(&storage).unwrap(), addr);
+    }
+
+    #[test]
+    fn socket_addr_storage_preserves_ipv4_network_octets() {
+        let addr: SocketAddr = "203.0.113.9:4433".parse().unwrap();
+        let storage = socket_addr_to_storage(addr);
+
+        #[cfg(not(windows))]
+        {
+            // SAFETY: socket_addr_to_storage wrote an IPv4 sockaddr.
+            let addr_in: &libc::sockaddr_in =
+                unsafe { &*(&storage as *const _ as *const libc::sockaddr_in) };
+            assert_eq!(addr_in.sin_addr.s_addr.to_ne_bytes(), [203, 0, 113, 9]);
+        }
+
+        #[cfg(windows)]
+        {
+            // SAFETY: socket_addr_to_storage wrote an IPv4 sockaddr.
+            let addr_in: &SOCKADDR_IN = unsafe { &*(&storage as *const _ as *const SOCKADDR_IN) };
+            assert_eq!(
+                unsafe { *addr_in.sin_addr.S_un.S_addr() }.to_ne_bytes(),
+                [203, 0, 113, 9]
+            );
+        }
+    }
+
+    #[test]
+    fn socket_addr_storage_round_trips_ipv6() {
+        let addr = SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 3, 4, 5, 6),
+            4434,
+            7,
+            8,
+        ));
+        let storage = socket_addr_to_storage(addr);
+
+        assert_eq!(sockaddr_storage_to_socket_addr(&storage).unwrap(), addr);
+    }
 }

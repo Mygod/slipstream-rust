@@ -6,8 +6,7 @@ use slipstream_core::HostPort;
 pub mod picoquic;
 pub mod runtime;
 
-pub use picoquic::get_pacing_rate;
-pub use picoquic::get_rtt;
+pub use picoquic::{get_pacing_rate, get_rtt, SockaddrStorage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]

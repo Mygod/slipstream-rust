@@ -33,8 +33,8 @@ impl PeerAddrMode {
 
 pub(crate) struct ResolverState {
     pub(crate) addr: SocketAddr,
-    pub(crate) storage: libc::sockaddr_storage,
-    pub(crate) local_addr_storage: Option<libc::sockaddr_storage>,
+    pub(crate) storage: slipstream_ffi::SockaddrStorage,
+    pub(crate) local_addr_storage: Option<slipstream_ffi::SockaddrStorage>,
     pub(crate) mode: ResolverMode,
     pub(crate) added: bool,
     pub(crate) path_id: libc::c_int,
@@ -117,7 +117,7 @@ pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
 }
 
 pub(crate) fn sockaddr_storage_to_socket_addr(
-    storage: &libc::sockaddr_storage,
+    storage: &slipstream_ffi::SockaddrStorage,
 ) -> Result<SocketAddr, ClientError> {
     slipstream_ffi::sockaddr_storage_to_socket_addr(storage).map_err(ClientError::new)
 }

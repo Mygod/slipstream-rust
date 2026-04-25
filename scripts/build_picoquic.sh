@@ -12,6 +12,22 @@ if [[ ! -d "${PICOQUIC_DIR}" ]]; then
   exit 1
 fi
 
+IS_WINDOWS=0
+case "${OSTYPE:-}" in
+  msys*|cygwin*) IS_WINDOWS=1 ;;
+esac
+if [[ "$IS_WINDOWS" == "0" ]]; then
+  UNAME_S=$(uname -s 2>/dev/null || echo "")
+  case "$UNAME_S" in
+    MSYS*|MINGW*|CYGWIN*) IS_WINDOWS=1 ;;
+  esac
+fi
+
+if [[ "$IS_WINDOWS" == "1" ]]; then
+  echo "Windows builds are supported via scripts/build_picoquic_windows.ps1. This CMake helper is non-Windows only." >&2
+  exit 1
+fi
+
 CMAKE_ARGS=(
   "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
   "-DPICOQUIC_FETCH_PTLS=${FETCH_PTLS}"
@@ -20,6 +36,7 @@ CMAKE_ARGS=(
 )
 
 BUILD_TARGET=()
+
 if [[ -n "${CARGO_FEATURE_PICOQUIC_MINIMAL_BUILD:-}" ]]; then
   case "${CARGO_FEATURE_PICOQUIC_MINIMAL_BUILD,,}" in
     1|true|yes|on)
@@ -82,6 +99,7 @@ if [[ -n "${OPENSSL_USE_STATIC_LIBS:-}" ]]; then
 fi
 
 cmake -S "${PICOQUIC_DIR}" -B "${BUILD_DIR}" "${CMAKE_ARGS[@]}"
+
 if [[ ${#BUILD_TARGET[@]} -gt 0 ]]; then
   cmake --build "${BUILD_DIR}" "${BUILD_TARGET[@]}"
 else
