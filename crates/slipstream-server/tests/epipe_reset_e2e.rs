@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use socket2::SockRef;
 use support::{
     ensure_client_bin, log_snapshot, pick_tcp_port, pick_udp_port, server_bin_path,
     spawn_server_client_ready, spawn_single_target, test_cert_and_key, wait_for_any_log,
@@ -180,6 +181,7 @@ fn epipe_triggers_quic_reset() {
         );
     }
 
+    let _ = SockRef::from(&app).set_linger(Some(Duration::from_secs(0)));
     drop(app);
     let _ = app_closed_tx.send(());
 
