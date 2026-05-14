@@ -2,8 +2,8 @@ mod path;
 mod setup;
 
 use self::path::{
-    apply_path_mode, drain_path_events, fetch_path_quality, find_resolver_by_addr_mut,
-    loop_burst_total, path_poll_burst_max,
+    apply_path_mode, drain_path_events, ensure_default_path_available, fetch_path_quality,
+    find_resolver_by_addr_mut, loop_burst_total, path_poll_burst_max,
 };
 use self::setup::{bind_tcp_listener, bind_udp_socket, compute_mtu, map_io};
 use crate::dns::{
@@ -297,6 +297,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
                 }
                 add_paths(cnx, &mut resolvers)?;
+                ensure_default_path_available(cnx, &mut resolvers, current_time)?;
                 for resolver in resolvers.iter_mut() {
                     if resolver.added {
                         apply_path_mode(cnx, resolver)?;

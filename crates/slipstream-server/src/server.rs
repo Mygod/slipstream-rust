@@ -9,8 +9,8 @@ use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_delete_cnx,
     picoquic_enable_keep_alive, picoquic_get_first_cnx, picoquic_get_next_cnx,
     picoquic_prepare_packet_ex, picoquic_quic_t, picoquic_set_default_idle_timeout,
-    slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_server_cc_algorithm,
-    PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
+    slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_prepare_path_id,
+    slipstream_server_cc_algorithm, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
 use slipstream_ffi::{
     configure_quic_with_custom, socket_addr_to_storage, take_crypto_errors, QuicGuard,
@@ -400,38 +400,45 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             let mut if_index: libc::c_int = 0;
 
             if slot.payload_override.is_none() && slot.rcode.is_none() && !slot.cnx.is_null() {
-                let ret = unsafe {
-                    picoquic_prepare_packet_ex(
-                        slot.cnx,
-                        slot.path_id,
-                        loop_time,
-                        send_buf.as_mut_ptr(),
-                        send_buf.len(),
-                        &mut send_length,
-                        &mut addr_to,
-                        &mut addr_from,
-                        &mut if_index,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if ret < 0 {
-                    return Err(ServerError::new("Failed to prepare QUIC packet"));
-                }
+                let path_id = unsafe { slipstream_prepare_path_id(slot.cnx, slot.path_id) };
+                if path_id < 0 {
+                    tracing::debug!(
+                        "No usable QUIC path for response: requested_path_id={}",
+                        slot.path_id
+                    );
+                } else {
+                    let ret = unsafe {
+                        picoquic_prepare_packet_ex(
+                            slot.cnx,
+                            path_id,
+                            loop_time,
+                            send_buf.as_mut_ptr(),
+                            send_buf.len(),
+                            &mut send_length,
+                            &mut addr_to,
+                            &mut addr_from,
+                            &mut if_index,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    if ret < 0 {
+                        return Err(ServerError::new("Failed to prepare QUIC packet"));
+                    }
 
-                if send_length == 0 {
-                    let cnx_id = slot.cnx as usize;
-                    let metrics = unsafe { (&*state_ptr).stream_debug_metrics(cnx_id) };
-                    if metrics.streams_total > 0
-                        && metrics.has_send_backlog()
-                        && loop_time.saturating_sub(last_flow_block_log_at)
-                            >= FLOW_BLOCKED_LOG_INTERVAL_US
-                    {
-                        let flow_blocked = unsafe { slipstream_is_flow_blocked(slot.cnx) != 0 };
-                        let has_ready_stream =
-                            unsafe { slipstream_has_ready_stream(slot.cnx) != 0 };
-                        let send_backlog =
-                            unsafe { (&*state_ptr).stream_send_backlog_summaries(cnx_id, 8) };
-                        tracing::warn!(
+                    if send_length == 0 {
+                        let cnx_id = slot.cnx as usize;
+                        let metrics = unsafe { (&*state_ptr).stream_debug_metrics(cnx_id) };
+                        if metrics.streams_total > 0
+                            && metrics.has_send_backlog()
+                            && loop_time.saturating_sub(last_flow_block_log_at)
+                                >= FLOW_BLOCKED_LOG_INTERVAL_US
+                        {
+                            let flow_blocked = unsafe { slipstream_is_flow_blocked(slot.cnx) != 0 };
+                            let has_ready_stream =
+                                unsafe { slipstream_has_ready_stream(slot.cnx) != 0 };
+                            let send_backlog =
+                                unsafe { (&*state_ptr).stream_send_backlog_summaries(cnx_id, 8) };
+                            tracing::warn!(
                             "server connection stalled: cnx={} streams={} streams_with_write_tx={} streams_with_data_rx={} queued_bytes_total={} streams_with_pending_data={} pending_chunks_total={} pending_bytes_total={} streams_with_pending_fin={} streams_with_fin_enqueued={} streams_with_target_fin_pending={} streams_with_send_pending={} streams_with_send_stash={} send_stash_bytes_total={} streams_discarding={} streams_close_after_flush={} multi_stream={} flow_blocked={} has_ready_stream={} send_backlog={:?}",
                             cnx_id,
                             metrics.streams_total,
@@ -454,7 +461,8 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                             has_ready_stream,
                             send_backlog
                         );
-                        last_flow_block_log_at = loop_time;
+                            last_flow_block_log_at = loop_time;
+                        }
                     }
                 }
             }
