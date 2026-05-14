@@ -133,8 +133,7 @@ fn maybe_kick_recursive_polling(
 }
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
-    let domain_len = config.domain.len();
-    let mtu = compute_mtu(domain_len)?;
+    let mtu = compute_mtu(config.domain)?;
     let udp = bind_udp_socket().await?;
     let udp_local_addr = udp.local_addr().map_err(map_io)?;
     let peer_addr_mode = PeerAddrMode::from_local_addr(udp_local_addr);
@@ -464,8 +463,18 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     }
                 }
 
-                let qname = build_qname(&send_buf[..send_length], config.domain)
-                    .map_err(|err| ClientError::new(err.to_string()))?;
+                let qname = match build_qname(&send_buf[..send_length], config.domain) {
+                    Ok(qname) => qname,
+                    Err(err) if err.to_string().contains("payload too large") => {
+                        warn!(
+                            "Dropping oversized QUIC packet for DNS query transport: packet_len={} domain={}",
+                            send_length,
+                            config.domain
+                        );
+                        continue;
+                    }
+                    Err(err) => return Err(ClientError::new(err.to_string())),
+                };
                 let params = QueryParams {
                     id: dns_id,
                     qname: &qname,
@@ -541,10 +550,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                             .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
                         let inflight_packets =
                             inflight_packet_estimate(quality.bytes_in_transit, mtu);
-                        let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
-                        if has_ready_stream && !flow_blocked {
-                            poll_deficit = 0;
-                        }
+                        let poll_deficit = pacing_target.saturating_sub(inflight_packets);
                         if poll_deficit > 0 && resolver.debug.enabled {
                             debug!(
                                 "cc_state: {} cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
