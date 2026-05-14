@@ -53,6 +53,8 @@ const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
 const PATH_NO_PROGRESS_CHECK_US: u64 = 10_000_000;
 const PATH_NO_PROGRESS_DISABLE_US: u64 = 30_000_000;
 const PATH_NO_PROGRESS_MIN_SENDS: u64 = 8;
+const PATH_POOR_RESPONSE_MIN_SENDS: u64 = 32;
+const PATH_POOR_RESPONSE_RATIO_DIVISOR: u64 = 8;
 const RECURSIVE_ACTIVE_POLL_KICK_US: u64 = 200_000;
 
 fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
@@ -70,21 +72,21 @@ fn maybe_disable_no_progress_path(
     resolver: &mut crate::dns::ResolverState,
     now: u64,
     active_streams: bool,
-) {
+) -> bool {
     if !active_streams || !resolver.added {
         resolver.last_health_check_at = now;
         resolver.last_health_send_packets = resolver.debug.send_packets;
         resolver.last_health_dns_responses = resolver.debug.dns_responses;
-        return;
+        return false;
     }
     if resolver.last_health_check_at == 0 {
         resolver.last_health_check_at = now;
         resolver.last_health_send_packets = resolver.debug.send_packets;
         resolver.last_health_dns_responses = resolver.debug.dns_responses;
-        return;
+        return false;
     }
     if now.saturating_sub(resolver.last_health_check_at) < PATH_NO_PROGRESS_CHECK_US {
-        return;
+        return false;
     }
 
     let send_delta = resolver
@@ -100,16 +102,22 @@ fn maybe_disable_no_progress_path(
     resolver.last_health_send_packets = resolver.debug.send_packets;
     resolver.last_health_dns_responses = resolver.debug.dns_responses;
 
-    if send_delta >= PATH_NO_PROGRESS_MIN_SENDS && response_delta == 0 {
+    let no_responses = send_delta >= PATH_NO_PROGRESS_MIN_SENDS && response_delta == 0;
+    let poor_response_ratio = send_delta >= PATH_POOR_RESPONSE_MIN_SENDS
+        && response_delta.saturating_mul(PATH_POOR_RESPONSE_RATIO_DIVISOR) < send_delta;
+    if no_responses || poor_response_ratio {
         warn!(
-            "Disabling resolver path {} for {}ms after {} outbound DNS packets with no responses",
+            "Disabling resolver path {} for {}ms after {} outbound DNS packets and {} DNS responses",
             resolver.addr,
             PATH_NO_PROGRESS_DISABLE_US / 1000,
-            send_delta
+            send_delta,
+            response_delta
         );
         reset_resolver_path(resolver);
         resolver.disabled_until = now.saturating_add(PATH_NO_PROGRESS_DISABLE_US);
+        return true;
     }
+    false
 }
 
 fn maybe_kick_recursive_polling(
@@ -130,6 +138,51 @@ fn maybe_kick_recursive_polling(
         resolver.pending_polls = 1;
         resolver.last_active_poll_kick_at = now;
     }
+}
+
+fn primary_recursive_path_unavailable(resolvers: &[crate::dns::ResolverState]) -> bool {
+    resolvers
+        .first()
+        .is_some_and(|resolver| resolver.mode == ResolverMode::Recursive && !resolver.added)
+}
+
+fn rotate_resolvers_for_start(resolvers: &mut [crate::dns::ResolverState], start_index: usize) {
+    if resolvers.is_empty() {
+        return;
+    }
+    resolvers.rotate_left(start_index % resolvers.len());
+    for (idx, resolver) in resolvers.iter_mut().enumerate() {
+        resolver.is_primary = idx == 0;
+        resolver.added = idx == 0;
+        resolver.path_id = if idx == 0 { 0 } else { -1 };
+        resolver.unique_path_id = if idx == 0 { Some(0) } else { None };
+        resolver.local_addr_storage = None;
+        resolver.pending_polls = 0;
+        resolver.inflight_poll_ids.clear();
+        resolver.last_pacing_snapshot = None;
+    }
+}
+
+fn next_recursive_start_index(resolvers: &[crate::dns::ResolverState]) -> usize {
+    resolvers
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, resolver)| {
+            resolver.mode == ResolverMode::Recursive
+                && resolver.added
+                && resolver.debug.dns_responses > 0
+        })
+        .map(|(idx, _)| idx)
+        .or_else(|| {
+            resolvers
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, resolver)| resolver.mode == ResolverMode::Recursive)
+                .map(|(idx, _)| idx)
+        })
+        .unwrap_or(0)
 }
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
@@ -171,12 +224,17 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let _state = state;
 
     let mut reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
+    let mut resolver_start_index = 0usize;
 
     loop {
         let mut resolvers =
             resolve_resolvers(config.resolvers, mtu, config.debug_poll, peer_addr_mode)?;
         if resolvers.is_empty() {
             return Err(ClientError::new("At least one resolver is required"));
+        }
+        resolver_start_index %= resolvers.len();
+        if resolver_start_index > 0 {
+            rotate_resolvers_for_start(&mut resolvers, resolver_start_index);
         }
 
         let mut local_addr_storage = socket_addr_to_storage(udp_local_addr);
@@ -277,6 +335,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
+        let mut reconnect_when_idle = false;
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -304,6 +363,29 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
             }
             drain_path_events(cnx, &mut resolvers, state_ptr, peer_addr_mode);
+            if ready && primary_recursive_path_unavailable(&resolvers) {
+                let streams_len = unsafe { (*state_ptr).streams_len() };
+                let next_start_index = next_recursive_start_index(&resolvers);
+                if next_start_index > 0 {
+                    resolver_start_index =
+                        (resolver_start_index + next_start_index) % resolvers.len();
+                }
+                if streams_len == 0 {
+                    warn!(
+                        "Primary recursive resolver path unavailable while idle; reconnecting with {} as primary",
+                        resolvers[next_start_index].addr
+                    );
+                    break;
+                }
+                if !reconnect_when_idle {
+                    warn!(
+                        "Primary recursive resolver path unavailable with {} active stream(s); reconnecting with {} as primary after they drain",
+                        streams_len,
+                        resolvers[next_start_index].addr
+                    );
+                }
+                reconnect_when_idle = true;
+            }
 
             for resolver in resolvers.iter_mut() {
                 if resolver.mode == ResolverMode::Authoritative {
@@ -400,6 +482,15 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             drain_commands(cnx, state_ptr, &mut command_rx);
             drain_stream_data(cnx, state_ptr);
             drain_path_events(cnx, &mut resolvers, state_ptr, peer_addr_mode);
+            if reconnect_when_idle {
+                let streams_len = unsafe { (*state_ptr).streams_len() };
+                if streams_len == 0 {
+                    warn!(
+                        "Active streams drained after recursive resolver path loss; reconnecting"
+                    );
+                    break;
+                }
+            }
 
             for _ in 0..packet_loop_send_max {
                 let current_time = unsafe { picoquic_current_time() };
@@ -626,7 +717,8 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
             let streams_len = unsafe { (*state_ptr).streams_len() };
             let active_streams = streams_len > 0;
-            for (idx, resolver) in resolvers.iter_mut().enumerate() {
+            let mut reconnect_after_primary_health_loss = None;
+            for resolver in resolvers.iter_mut() {
                 resolver.debug.enqueued_bytes = enqueued_bytes;
                 resolver.debug.last_enqueue_at = last_enqueue_at;
                 resolver.debug.zero_send_loops = zero_send_loops;
@@ -657,14 +749,37 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     inflight_polls,
                     resolver.last_pacing_snapshot,
                 );
-                if idx > 0 {
-                    maybe_disable_no_progress_path(resolver, report_time, active_streams);
+                if maybe_disable_no_progress_path(resolver, report_time, active_streams)
+                    && resolver.is_primary
+                {
+                    reconnect_after_primary_health_loss = Some(resolver.addr);
                 }
+            }
+            if let Some(primary_addr) = reconnect_after_primary_health_loss {
+                let next_start_index = next_recursive_start_index(&resolvers);
+                if next_start_index > 0 {
+                    resolver_start_index =
+                        (resolver_start_index + next_start_index) % resolvers.len();
+                }
+                warn!(
+                    "Primary recursive resolver {} degraded; reconnecting with {} as primary",
+                    primary_addr, resolvers[next_start_index].addr
+                );
+                break;
             }
         }
 
         unsafe {
             picoquic_close(cnx, 0);
+        }
+
+        let was_ready = unsafe { (*state_ptr).is_ready() };
+        if !was_ready && config.resolvers.len() > 1 {
+            resolver_start_index = (resolver_start_index + 1) % config.resolvers.len();
+            warn!(
+                "Connection failed before ready; next reconnect will try resolver slot {} as primary",
+                resolver_start_index
+            );
         }
 
         unsafe {
