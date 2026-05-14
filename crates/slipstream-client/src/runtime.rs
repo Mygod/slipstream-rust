@@ -49,13 +49,17 @@ const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
 const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
-const RECONNECT_FAILED_BEFORE_READY_EXIT_AFTER: u32 = 2;
+const RECONNECT_FAILED_BEFORE_READY_EXIT_AFTER_MIN: u32 = 2;
 const RECONNECT_BEFORE_READY_TIMEOUT_US: u64 = 10_000_000;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
 const PATH_NO_PROGRESS_CHECK_US: u64 = 10_000_000;
 const PATH_NO_PROGRESS_DISABLE_US: u64 = 300_000_000;
 const PATH_NO_PROGRESS_MIN_SENDS: u64 = 8;
 const RECURSIVE_ACTIVE_POLL_KICK_US: u64 = 200_000;
+
+fn reconnect_failed_before_ready_exit_after(resolver_count: usize) -> u32 {
+    resolver_count.max(RECONNECT_FAILED_BEFORE_READY_EXIT_AFTER_MIN as usize) as u32
+}
 
 fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
     let mut dropped = 0usize;
@@ -804,9 +808,10 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             } else {
                 warn!("Connection failed before ready; no alternate resolver slot available");
             }
-            if failed_before_ready_reconnects >= RECONNECT_FAILED_BEFORE_READY_EXIT_AFTER {
+            let exit_after = reconnect_failed_before_ready_exit_after(resolvers.len());
+            if failed_before_ready_reconnects >= exit_after {
                 return Err(ClientError::new(format!(
-                    "Connection failed before ready {} times; exiting for supervisor restart",
+                    "Connection failed before ready {} times after trying configured resolver slots; exiting for supervisor restart",
                     failed_before_ready_reconnects
                 )));
             }
@@ -832,5 +837,18 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let _ = drain_disconnected_commands(&mut command_rx);
         }
         reconnect_delay = (reconnect_delay * 2).min(Duration::from_millis(RECONNECT_SLEEP_MAX_MS));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_ready_exit_after_covers_all_configured_resolvers() {
+        assert_eq!(reconnect_failed_before_ready_exit_after(0), 2);
+        assert_eq!(reconnect_failed_before_ready_exit_after(1), 2);
+        assert_eq!(reconnect_failed_before_ready_exit_after(2), 2);
+        assert_eq!(reconnect_failed_before_ready_exit_after(5), 5);
     }
 }
