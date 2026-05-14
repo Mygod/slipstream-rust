@@ -118,7 +118,7 @@ pub(crate) fn resolve_resolvers(
 
 const PATH_LOSS_WINDOW_US: u64 = 10_000_000;
 const PATH_LOSS_DISABLE_AFTER: u32 = 3;
-const PATH_LOSS_DISABLE_US: u64 = 30_000_000;
+const PATH_LOSS_DISABLE_US: u64 = 300_000_000;
 
 pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
     warn!(

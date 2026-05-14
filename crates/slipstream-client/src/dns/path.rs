@@ -12,7 +12,7 @@ use super::resolver::{reset_resolver_path, ResolverState};
 const PATH_PROBE_INITIAL_DELAY_US: u64 = 250_000;
 const PATH_PROBE_MAX_DELAY_US: u64 = 10_000_000;
 const PATH_PROBE_DISABLE_AFTER_ATTEMPTS: u32 = 5;
-const PATH_PROBE_DISABLE_US: u64 = 30_000_000;
+const PATH_PROBE_DISABLE_US: u64 = 300_000_000;
 
 pub(crate) fn refresh_resolver_path(
     cnx: *mut picoquic_cnx_t,
