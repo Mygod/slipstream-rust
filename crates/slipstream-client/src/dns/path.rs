@@ -18,6 +18,17 @@ pub(crate) fn refresh_resolver_path(
     cnx: *mut picoquic_cnx_t,
     resolver: &mut ResolverState,
 ) -> bool {
+    let now = unsafe { picoquic_current_time() };
+    if resolver.disabled_until > now {
+        resolver.added = false;
+        resolver.path_id = -1;
+        resolver.unique_path_id = None;
+        resolver.local_addr_storage = None;
+        resolver.pending_polls = 0;
+        resolver.inflight_poll_ids.clear();
+        resolver.last_pacing_snapshot = None;
+        return false;
+    }
     if let Some(unique_path_id) = resolver.unique_path_id {
         let path_id = unsafe { slipstream_get_path_id_from_unique(cnx, unique_path_id) };
         if path_id >= 0 {
