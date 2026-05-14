@@ -143,6 +143,14 @@ fn has_available_recursive_path(resolvers: &[crate::dns::ResolverState]) -> bool
         .any(|resolver| resolver.mode == ResolverMode::Recursive && resolver.added)
 }
 
+fn has_responsive_recursive_path(resolvers: &[crate::dns::ResolverState]) -> bool {
+    resolvers.iter().any(|resolver| {
+        resolver.mode == ResolverMode::Recursive
+            && resolver.added
+            && resolver.debug.dns_responses > 0
+    })
+}
+
 fn rotate_resolvers_for_start(resolvers: &mut [crate::dns::ResolverState], start_index: usize) {
     if resolvers.is_empty() {
         return;
@@ -759,7 +767,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
             }
             if let Some(primary_addr) = reconnect_after_primary_health_loss {
-                if has_available_recursive_path(&resolvers) {
+                if has_responsive_recursive_path(&resolvers) {
                     ensure_default_path_available(cnx, &mut resolvers, report_time)?;
                     warn!(
                         "Primary recursive resolver {} degraded; continuing on an alternate recursive path",
