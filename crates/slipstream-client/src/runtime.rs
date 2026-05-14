@@ -50,6 +50,7 @@ const DNS_POLL_SLICE_US: u64 = 50_000;
 const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
 const RECONNECT_FAILED_BEFORE_READY_EXIT_AFTER: u32 = 2;
+const RECONNECT_BEFORE_READY_TIMEOUT_US: u64 = 10_000_000;
 const RECURSIVE_REFRESH_AFTER_COMPLETED_RX_BYTES: u64 = 4 * 1024 * 1024;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
 const PATH_NO_PROGRESS_CHECK_US: u64 = 10_000_000;
@@ -341,6 +342,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut last_flow_block_log_at = 0u64;
         let mut reconnect_when_idle = false;
         let mut connection_was_ready = false;
+        let connection_started_at = unsafe { picoquic_current_time() };
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -348,6 +350,16 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             drain_stream_data(cnx, state_ptr);
             let closing = unsafe { (*state_ptr).is_closing() };
             if closing {
+                break;
+            }
+            if !connection_was_ready
+                && current_time.saturating_sub(connection_started_at)
+                    >= RECONNECT_BEFORE_READY_TIMEOUT_US
+            {
+                warn!(
+                    "Connection did not become ready within {}ms; reconnecting",
+                    RECONNECT_BEFORE_READY_TIMEOUT_US / 1000
+                );
                 break;
             }
 
