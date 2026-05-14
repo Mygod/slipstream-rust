@@ -137,10 +137,10 @@ fn maybe_kick_recursive_polling(
     }
 }
 
-fn primary_recursive_path_unavailable(resolvers: &[crate::dns::ResolverState]) -> bool {
+fn has_available_recursive_path(resolvers: &[crate::dns::ResolverState]) -> bool {
     resolvers
-        .first()
-        .is_some_and(|resolver| resolver.mode == ResolverMode::Recursive && !resolver.added)
+        .iter()
+        .any(|resolver| resolver.mode == ResolverMode::Recursive && resolver.added)
 }
 
 fn rotate_resolvers_for_start(resolvers: &mut [crate::dns::ResolverState], start_index: usize) {
@@ -333,7 +333,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
-        let mut reconnect_when_idle = false;
         let mut connection_was_ready = false;
         let connection_started_at = unsafe { picoquic_current_time() };
 
@@ -375,7 +374,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
             }
             drain_path_events(cnx, &mut resolvers, state_ptr, peer_addr_mode);
-            if ready && primary_recursive_path_unavailable(&resolvers) {
+            if ready && !has_available_recursive_path(&resolvers) {
                 let streams_len = unsafe { (*state_ptr).streams_len() };
                 let next_start_index = next_recursive_start_index(&resolvers);
                 if next_start_index > 0 {
@@ -384,19 +383,17 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
                 if streams_len == 0 {
                     warn!(
-                        "Primary recursive resolver path unavailable while idle; reconnecting with {} as primary",
+                        "No recursive resolver path available while idle; reconnecting with {} as primary",
                         resolvers[next_start_index].addr
                     );
                     break;
                 }
-                if !reconnect_when_idle {
-                    warn!(
-                        "Primary recursive resolver path unavailable with {} active stream(s); reconnecting with {} as primary after they drain",
-                        streams_len,
-                        resolvers[next_start_index].addr
-                    );
-                }
-                reconnect_when_idle = true;
+                warn!(
+                    "No recursive resolver path available with {} active stream(s); reconnecting with {} as primary",
+                    streams_len,
+                    resolvers[next_start_index].addr
+                );
+                break;
             }
 
             for resolver in resolvers.iter_mut() {
@@ -494,16 +491,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             drain_commands(cnx, state_ptr, &mut command_rx);
             drain_stream_data(cnx, state_ptr);
             drain_path_events(cnx, &mut resolvers, state_ptr, peer_addr_mode);
-            if reconnect_when_idle {
-                let streams_len = unsafe { (*state_ptr).streams_len() };
-                if streams_len == 0 {
-                    warn!(
-                        "Active streams drained after recursive resolver path loss; reconnecting"
-                    );
-                    break;
-                }
-            }
-
             for _ in 0..packet_loop_send_max {
                 let current_time = unsafe { picoquic_current_time() };
                 let mut send_length: libc::size_t = 0;
@@ -772,16 +759,24 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
             }
             if let Some(primary_addr) = reconnect_after_primary_health_loss {
-                let next_start_index = next_recursive_start_index(&resolvers);
-                if next_start_index > 0 {
-                    resolver_start_index =
-                        (resolver_start_index + next_start_index) % resolvers.len();
+                if has_available_recursive_path(&resolvers) {
+                    ensure_default_path_available(cnx, &mut resolvers, report_time)?;
+                    warn!(
+                        "Primary recursive resolver {} degraded; continuing on an alternate recursive path",
+                        primary_addr
+                    );
+                } else {
+                    let next_start_index = next_recursive_start_index(&resolvers);
+                    if next_start_index > 0 {
+                        resolver_start_index =
+                            (resolver_start_index + next_start_index) % resolvers.len();
+                    }
+                    warn!(
+                        "Primary recursive resolver {} degraded and no alternate recursive path is available; reconnecting with {} as primary",
+                        primary_addr, resolvers[next_start_index].addr
+                    );
+                    break;
                 }
-                warn!(
-                    "Primary recursive resolver {} degraded; reconnecting with {} as primary",
-                    primary_addr, resolvers[next_start_index].addr
-                );
-                break;
             }
         }
 
