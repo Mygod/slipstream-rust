@@ -51,7 +51,6 @@ const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
 const RECONNECT_FAILED_BEFORE_READY_EXIT_AFTER: u32 = 2;
 const RECONNECT_BEFORE_READY_TIMEOUT_US: u64 = 10_000_000;
-const RECURSIVE_REFRESH_AFTER_COMPLETED_RX_BYTES: u64 = 4 * 1024 * 1024;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
 const PATH_NO_PROGRESS_CHECK_US: u64 = 10_000_000;
 const PATH_NO_PROGRESS_DISABLE_US: u64 = 30_000_000;
@@ -142,12 +141,6 @@ fn primary_recursive_path_unavailable(resolvers: &[crate::dns::ResolverState]) -
     resolvers
         .first()
         .is_some_and(|resolver| resolver.mode == ResolverMode::Recursive && !resolver.added)
-}
-
-fn uses_recursive_transport(resolvers: &[crate::dns::ResolverState]) -> bool {
-    resolvers
-        .iter()
-        .any(|resolver| resolver.mode == ResolverMode::Recursive)
 }
 
 fn rotate_resolvers_for_start(resolvers: &mut [crate::dns::ResolverState], start_index: usize) {
@@ -740,20 +733,6 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
             let streams_len = unsafe { (*state_ptr).streams_len() };
             let active_streams = streams_len > 0;
-            let completed_stream_rx_bytes = unsafe { (*state_ptr).completed_stream_rx_bytes() };
-            if !active_streams
-                && completed_stream_rx_bytes >= RECURSIVE_REFRESH_AFTER_COMPLETED_RX_BYTES
-                && uses_recursive_transport(&resolvers)
-            {
-                let primary_addr = resolvers[0].addr;
-                unsafe {
-                    (*state_ptr).clear_completed_stream_rx_bytes();
-                }
-                return Err(ClientError::new(format!(
-                    "Completed {} bytes over recursive DNS transport via {}; exiting for clean supervisor refresh",
-                    completed_stream_rx_bytes, primary_addr
-                )));
-            }
             let mut reconnect_after_primary_health_loss = None;
             for resolver in resolvers.iter_mut() {
                 resolver.debug.enqueued_bytes = enqueued_bytes;

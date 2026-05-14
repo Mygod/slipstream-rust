@@ -261,9 +261,6 @@ pub(super) fn handle_stream_data(
         state.streams.remove(&stream_id);
     } else if remove_stream {
         if let Some(stream) = state.streams.remove(&stream_id) {
-            state.completed_stream_rx_bytes = state
-                .completed_stream_rx_bytes
-                .saturating_add(stream.flow.rx_bytes);
             if debug_streams {
                 debug!(
                     "stream {}: finished rx_bytes={} tx_bytes={}",
