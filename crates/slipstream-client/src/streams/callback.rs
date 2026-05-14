@@ -260,10 +260,17 @@ pub(super) fn handle_stream_data(
         unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR) };
         state.streams.remove(&stream_id);
     } else if remove_stream {
-        if debug_streams {
-            debug!("stream {}: finished", stream_id);
+        if let Some(stream) = state.streams.remove(&stream_id) {
+            state.completed_stream_rx_bytes = state
+                .completed_stream_rx_bytes
+                .saturating_add(stream.flow.rx_bytes);
+            if debug_streams {
+                debug!(
+                    "stream {}: finished rx_bytes={} tx_bytes={}",
+                    stream_id, stream.flow.rx_bytes, stream.tx_bytes
+                );
+            }
         }
-        state.streams.remove(&stream_id);
     }
 
     check_stream_invariants(state, stream_id, "handle_stream_data");

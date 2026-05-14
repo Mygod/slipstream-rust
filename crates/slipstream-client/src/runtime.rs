@@ -49,6 +49,8 @@ const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
 const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
+const RECONNECT_FAILED_BEFORE_READY_EXIT_AFTER: u32 = 2;
+const RECURSIVE_REFRESH_AFTER_COMPLETED_RX_BYTES: u64 = 4 * 1024 * 1024;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
 const PATH_NO_PROGRESS_CHECK_US: u64 = 10_000_000;
 const PATH_NO_PROGRESS_DISABLE_US: u64 = 30_000_000;
@@ -146,6 +148,12 @@ fn primary_recursive_path_unavailable(resolvers: &[crate::dns::ResolverState]) -
         .is_some_and(|resolver| resolver.mode == ResolverMode::Recursive && !resolver.added)
 }
 
+fn uses_recursive_transport(resolvers: &[crate::dns::ResolverState]) -> bool {
+    resolvers
+        .iter()
+        .any(|resolver| resolver.mode == ResolverMode::Recursive)
+}
+
 fn rotate_resolvers_for_start(resolvers: &mut [crate::dns::ResolverState], start_index: usize) {
     if resolvers.is_empty() {
         return;
@@ -187,9 +195,6 @@ fn next_recursive_start_index(resolvers: &[crate::dns::ResolverState]) -> usize 
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let mtu = compute_mtu(config.domain)?;
-    let udp = bind_udp_socket().await?;
-    let udp_local_addr = udp.local_addr().map_err(map_io)?;
-    let peer_addr_mode = PeerAddrMode::from_local_addr(udp_local_addr);
 
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let data_notify = Arc::new(Notify::new());
@@ -225,8 +230,12 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
     let mut reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
     let mut resolver_start_index = 0usize;
+    let mut failed_before_ready_reconnects = 0u32;
 
     loop {
+        let udp = bind_udp_socket().await?;
+        let udp_local_addr = udp.local_addr().map_err(map_io)?;
+        let peer_addr_mode = PeerAddrMode::from_local_addr(udp_local_addr);
         let mut resolvers =
             resolve_resolvers(config.resolvers, mtu, config.debug_poll, peer_addr_mode)?;
         if resolvers.is_empty() {
@@ -336,6 +345,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
         let mut reconnect_when_idle = false;
+        let mut connection_was_ready = false;
 
         loop {
             let current_time = unsafe { picoquic_current_time() };
@@ -348,9 +358,11 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
             let ready = unsafe { (*state_ptr).is_ready() };
             if ready {
+                connection_was_ready = true;
                 unsafe {
                     (*state_ptr).update_acceptor_limit(cnx);
                 }
+                failed_before_ready_reconnects = 0;
                 if reconnect_delay != Duration::from_millis(RECONNECT_SLEEP_MIN_MS) {
                     reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
                 }
@@ -717,6 +729,19 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
             let streams_len = unsafe { (*state_ptr).streams_len() };
             let active_streams = streams_len > 0;
+            let completed_stream_rx_bytes = unsafe { (*state_ptr).completed_stream_rx_bytes() };
+            if !active_streams
+                && completed_stream_rx_bytes >= RECURSIVE_REFRESH_AFTER_COMPLETED_RX_BYTES
+                && uses_recursive_transport(&resolvers)
+            {
+                unsafe {
+                    (*state_ptr).clear_completed_stream_rx_bytes();
+                }
+                return Err(ClientError::new(format!(
+                    "Completed {} bytes over recursive DNS transport; exiting for clean session refresh",
+                    completed_stream_rx_bytes
+                )));
+            }
             let mut reconnect_after_primary_health_loss = None;
             for resolver in resolvers.iter_mut() {
                 resolver.debug.enqueued_bytes = enqueued_bytes;
@@ -773,13 +798,23 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             picoquic_close(cnx, 0);
         }
 
-        let was_ready = unsafe { (*state_ptr).is_ready() };
-        if !was_ready && config.resolvers.len() > 1 {
-            resolver_start_index = (resolver_start_index + 1) % config.resolvers.len();
-            warn!(
-                "Connection failed before ready; next reconnect will try resolver slot {} as primary",
-                resolver_start_index
-            );
+        if !connection_was_ready {
+            failed_before_ready_reconnects = failed_before_ready_reconnects.saturating_add(1);
+            if config.resolvers.len() > 1 {
+                resolver_start_index = (resolver_start_index + 1) % config.resolvers.len();
+                warn!(
+                    "Connection failed before ready; next reconnect will try resolver slot {} as primary",
+                    resolver_start_index
+                );
+            } else {
+                warn!("Connection failed before ready; no alternate resolver slot available");
+            }
+            if failed_before_ready_reconnects >= RECONNECT_FAILED_BEFORE_READY_EXIT_AFTER {
+                return Err(ClientError::new(format!(
+                    "Connection failed before ready {} times; exiting for supervisor restart",
+                    failed_before_ready_reconnects
+                )));
+            }
         }
 
         unsafe {

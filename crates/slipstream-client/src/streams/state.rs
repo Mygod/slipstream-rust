@@ -24,6 +24,7 @@ pub(crate) struct ClientState {
     pub(super) acceptor: acceptor::ClientAcceptor,
     pub(super) debug_enqueued_bytes: u64,
     pub(super) debug_last_enqueue_at: u64,
+    pub(super) completed_stream_rx_bytes: u64,
     pub(super) acceptor_limit_logged: bool,
 }
 
@@ -102,6 +103,7 @@ impl ClientState {
             acceptor,
             debug_enqueued_bytes: 0,
             debug_last_enqueue_at: 0,
+            completed_stream_rx_bytes: 0,
             acceptor_limit_logged: false,
         }
     }
@@ -128,6 +130,14 @@ impl ClientState {
 
     pub(crate) fn debug_snapshot(&self) -> (u64, u64) {
         (self.debug_enqueued_bytes, self.debug_last_enqueue_at)
+    }
+
+    pub(crate) fn completed_stream_rx_bytes(&self) -> u64 {
+        self.completed_stream_rx_bytes
+    }
+
+    pub(crate) fn clear_completed_stream_rx_bytes(&mut self) {
+        self.completed_stream_rx_bytes = 0;
     }
 
     pub(crate) fn stream_debug_metrics(&self) -> ClientStreamMetrics {
@@ -218,6 +228,7 @@ impl ClientState {
         self.acceptor.reset();
         self.debug_enqueued_bytes = 0;
         self.debug_last_enqueue_at = 0;
+        self.completed_stream_rx_bytes = 0;
         self.acceptor_limit_logged = false;
     }
 }
