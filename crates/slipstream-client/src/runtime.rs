@@ -19,7 +19,7 @@ use crate::streams::{
     ClientState, Command,
 };
 use slipstream_core::net::is_transient_udp_error;
-use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
+use slipstream_dns::{build_qname_with_nonce, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
     configure_quic_with_custom,
     picoquic::{
@@ -566,7 +566,11 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     }
                 }
 
-                let qname = match build_qname(&send_buf[..send_length], config.domain) {
+                let qname = match build_qname_with_nonce(
+                    &send_buf[..send_length],
+                    config.domain,
+                    dns_id,
+                ) {
                     Ok(qname) => qname,
                     Err(err) if err.to_string().contains("payload too large") => {
                         warn!(

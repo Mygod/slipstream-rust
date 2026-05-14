@@ -1,6 +1,6 @@
 use crate::error::ClientError;
 use slipstream_core::net::is_transient_udp_error;
-use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
+use slipstream_dns::{build_qname_with_nonce, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_prepare_packet_ex, slipstream_request_poll,
 };
@@ -88,7 +88,7 @@ pub(crate) async fn send_poll_queries(
         resolver.debug.polls_sent = resolver.debug.polls_sent.saturating_add(1);
 
         let poll_id = *dns_id;
-        let qname = match build_qname(&send_buf[..send_length], config.domain) {
+        let qname = match build_qname_with_nonce(&send_buf[..send_length], config.domain, poll_id) {
             Ok(qname) => qname,
             Err(err) if err.to_string().contains("payload too large") => {
                 warn!(
