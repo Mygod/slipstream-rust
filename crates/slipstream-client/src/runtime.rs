@@ -36,6 +36,7 @@ use slipstream_ffi::{
     socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
 };
 use std::ffi::CString;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
@@ -56,6 +57,7 @@ const PATH_NO_PROGRESS_CHECK_US: u64 = 10_000_000;
 const PATH_NO_PROGRESS_DISABLE_US: u64 = 30_000_000;
 const PATH_NO_PROGRESS_MIN_SENDS: u64 = 8;
 const RECURSIVE_ACTIVE_POLL_KICK_US: u64 = 200_000;
+const RECURSIVE_REPLICA_LIMIT: usize = 2;
 
 fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
     let mut dropped = 0usize;
@@ -141,6 +143,28 @@ fn has_available_recursive_path(resolvers: &[crate::dns::ResolverState]) -> bool
     resolvers
         .iter()
         .any(|resolver| resolver.mode == ResolverMode::Recursive && resolver.added)
+}
+
+fn recursive_replica_dests(
+    resolvers: &[crate::dns::ResolverState],
+    primary_dest: SocketAddr,
+    now: u64,
+) -> Vec<SocketAddr> {
+    let mut replicas = Vec::new();
+    for resolver in resolvers {
+        if resolver.mode != ResolverMode::Recursive
+            || !resolver.added
+            || resolver.disabled_until > now
+            || resolver.addr == primary_dest
+        {
+            continue;
+        }
+        replicas.push(resolver.addr);
+        if replicas.len() >= RECURSIVE_REPLICA_LIMIT {
+            break;
+        }
+    }
+    replicas
 }
 
 fn rotate_resolvers_for_start(resolvers: &mut [crate::dns::ResolverState], start_index: usize) {
@@ -586,9 +610,17 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
                 let dest = peer_addr_mode.canonicalize(dest);
                 local_addr_storage = addr_from;
+                let replica_dests = recursive_replica_dests(&resolvers, dest, current_time);
                 if let Err(err) = udp.send_to(&packet, dest).await {
                     if !is_transient_udp_error(&err) {
                         return Err(map_io(err));
+                    }
+                }
+                for replica in replica_dests {
+                    if let Err(err) = udp.send_to(&packet, replica).await {
+                        if !is_transient_udp_error(&err) {
+                            return Err(map_io(err));
+                        }
                     }
                 }
             }
@@ -629,11 +661,17 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     last_flow_block_log_at = now;
                 }
             }
-            for resolver in resolvers.iter_mut() {
-                if !refresh_resolver_path(cnx, resolver) {
+            for idx in 0..resolvers.len() {
+                if !refresh_resolver_path(cnx, &mut resolvers[idx]) {
                     continue;
                 }
                 let now = unsafe { picoquic_current_time() };
+                let replica_dests = if resolvers[idx].mode == ResolverMode::Recursive {
+                    recursive_replica_dests(&resolvers, resolvers[idx].addr, now)
+                } else {
+                    Vec::new()
+                };
+                let resolver = &mut resolvers[idx];
                 maybe_kick_recursive_polling(resolver, now, active_streams);
                 match resolver.mode {
                     ResolverMode::Authoritative => {
@@ -669,6 +707,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                                 peer_addr_mode,
                                 &mut to_send,
                                 &mut send_buf,
+                                &[],
                             )
                             .await?;
                         }
@@ -689,6 +728,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                                     peer_addr_mode,
                                     &mut to_send,
                                     &mut send_buf,
+                                    &replica_dests,
                                 )
                                 .await?;
                                 resolver.pending_polls = resolver
@@ -707,6 +747,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                                     peer_addr_mode,
                                     &mut pending,
                                     &mut send_buf,
+                                    &replica_dests,
                                 )
                                 .await?;
                                 resolver.pending_polls = pending;
