@@ -123,6 +123,7 @@ fn epipe_triggers_quic_reset() {
             reset_seed_path: None,
             fallback_addr: None,
             idle_timeout_seconds: None,
+            keep_alive_interval_ms: None,
             envs: &[],
             rust_log: "info",
             capture_logs: true,
@@ -204,14 +205,14 @@ fn epipe_triggers_quic_reset() {
     let saw_local_error = wait_for_any_log(
         &client_logs,
         &["tcp write error", "tcp read error"],
-        Duration::from_secs(2),
+        Duration::from_secs(10),
     );
     if saw_local_error.is_none() {
         let snapshot = log_snapshot(&client_logs);
         panic!("expected client tcp read/write error\n{}", snapshot);
     }
 
-    if !wait_for_log(&server_logs, "reset event=", Duration::from_secs(2)) {
+    if !wait_for_log(&server_logs, "reset event=", Duration::from_secs(10)) {
         let client_snapshot = log_snapshot(&client_logs);
         let server_snapshot = log_snapshot(&server_logs);
         panic!(

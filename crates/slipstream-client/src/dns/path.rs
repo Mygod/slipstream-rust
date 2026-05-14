@@ -11,6 +11,8 @@ use super::resolver::{reset_resolver_path, ResolverState};
 
 const PATH_PROBE_INITIAL_DELAY_US: u64 = 250_000;
 const PATH_PROBE_MAX_DELAY_US: u64 = 10_000_000;
+const PATH_PROBE_DISABLE_AFTER_ATTEMPTS: u32 = 5;
+const PATH_PROBE_DISABLE_US: u64 = 30_000_000;
 
 pub(crate) fn refresh_resolver_path(
     cnx: *mut picoquic_cnx_t,
@@ -64,6 +66,9 @@ pub(crate) fn add_paths(
         if resolver.added {
             continue;
         }
+        if resolver.disabled_until > now {
+            continue;
+        }
         if resolver.next_probe_at > now {
             continue;
         }
@@ -90,12 +95,18 @@ pub(crate) fn add_paths(
             continue;
         }
         resolver.probe_attempts = resolver.probe_attempts.saturating_add(1);
-        let delay = path_probe_backoff(resolver.probe_attempts);
+        let attempt = resolver.probe_attempts;
+        let mut delay = path_probe_backoff(resolver.probe_attempts);
+        if resolver.probe_attempts >= PATH_PROBE_DISABLE_AFTER_ATTEMPTS {
+            resolver.disabled_until = now.saturating_add(PATH_PROBE_DISABLE_US);
+            resolver.probe_attempts = 0;
+            delay = PATH_PROBE_DISABLE_US;
+        }
         resolver.next_probe_at = now.saturating_add(delay);
         warn!(
             "Failed adding path {} (attempt {}), retrying in {}ms",
             resolver.addr,
-            resolver.probe_attempts,
+            attempt,
             delay / 1000
         );
     }

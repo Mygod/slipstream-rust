@@ -7,7 +7,8 @@ use slipstream_core::{
 use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_delete_cnx,
-    picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_prepare_packet_ex, picoquic_quic_t,
+    picoquic_enable_keep_alive, picoquic_get_first_cnx, picoquic_get_next_cnx,
+    picoquic_prepare_packet_ex, picoquic_quic_t, picoquic_set_default_idle_timeout,
     slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_server_cc_algorithm,
     PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
@@ -81,6 +82,7 @@ pub struct ServerConfig {
     pub domains: Vec<String>,
     pub max_connections: u32,
     pub idle_timeout_seconds: u64,
+    pub keep_alive_interval_ms: u64,
     pub debug_streams: bool,
     pub debug_commands: bool,
 }
@@ -193,6 +195,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let debug_streams = config.debug_streams;
     let debug_commands = config.debug_commands;
     let idle_timeout = Duration::from_secs(config.idle_timeout_seconds);
+    let keep_alive_interval_us = config.keep_alive_interval_ms.saturating_mul(1000);
     let mut state = Box::new(ServerState::new(
         target_addr,
         command_tx,
@@ -244,6 +247,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             ));
         }
         configure_quic_with_custom(quic, slipstream_server_cc_algorithm, QUIC_MTU);
+        picoquic_set_default_idle_timeout(quic, config.idle_timeout_seconds.saturating_mul(1000));
     }
 
     let udp = Arc::new(bind_udp_socket(&config.dns_listen_host, config.dns_listen_port).await?);
@@ -280,6 +284,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let mut recv_buf = vec![0u8; recv_buf_len];
     let mut send_buf = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
     let mut last_seen = HashMap::new();
+    let mut keep_alive_enabled = HashMap::new();
     let mut last_idle_gc = Instant::now();
     let mut last_flow_block_log_at: u64 = 0;
 
@@ -362,6 +367,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 quic,
                 state_ptr,
                 &mut last_seen,
+                &mut keep_alive_enabled,
                 idle_timeout,
                 &mut last_idle_gc,
                 now,
@@ -378,6 +384,16 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         let loop_time = unsafe { picoquic_current_time() };
 
         for slot in slots.iter_mut() {
+            if keep_alive_interval_us > 0
+                && !slot.cnx.is_null()
+                && !keep_alive_enabled.contains_key(&(slot.cnx as usize))
+            {
+                unsafe {
+                    picoquic_enable_keep_alive(slot.cnx, keep_alive_interval_us);
+                }
+                keep_alive_enabled.insert(slot.cnx as usize, ());
+            }
+
             let mut send_length = 0usize;
             let mut addr_to: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
             let mut addr_from: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -533,6 +549,7 @@ fn maybe_gc_idle_connections(
     quic: *mut picoquic_quic_t,
     state_ptr: *mut ServerState,
     last_seen: &mut HashMap<usize, Instant>,
+    keep_alive_enabled: &mut HashMap<usize, ()>,
     idle_timeout: Duration,
     last_gc: &mut Instant,
     now: Instant,
@@ -545,8 +562,10 @@ fn maybe_gc_idle_connections(
     }
 
     let active = collect_active_connections(quic);
+    keep_alive_enabled.retain(|cnx_id, _| active.contains_key(cnx_id));
     if active.is_empty() {
         last_seen.clear();
+        keep_alive_enabled.clear();
         *last_gc = now;
         return;
     }
@@ -578,6 +597,7 @@ fn maybe_gc_idle_connections(
                 picoquic_delete_cnx(cnx);
             }
             last_seen.remove(&cnx_id);
+            keep_alive_enabled.remove(&cnx_id);
         }
     }
     *last_gc = now;

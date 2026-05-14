@@ -41,6 +41,11 @@ pub(crate) struct ResolverState {
     pub(crate) unique_path_id: Option<u64>,
     pub(crate) probe_attempts: u32,
     pub(crate) next_probe_at: u64,
+    pub(crate) disabled_until: u64,
+    pub(crate) last_health_check_at: u64,
+    pub(crate) last_health_send_packets: u64,
+    pub(crate) last_health_dns_responses: u64,
+    pub(crate) last_active_poll_kick_at: u64,
     pub(crate) pending_polls: usize,
     pub(crate) inflight_poll_ids: HashMap<u16, u64>,
     pub(crate) pacing_budget: Option<PacingPollBudget>,
@@ -87,6 +92,11 @@ pub(crate) fn resolve_resolvers(
             unique_path_id: if is_primary { Some(0) } else { None },
             probe_attempts: 0,
             next_probe_at: 0,
+            disabled_until: 0,
+            last_health_check_at: 0,
+            last_health_send_packets: 0,
+            last_health_dns_responses: 0,
+            last_active_poll_kick_at: 0,
             pending_polls: 0,
             inflight_poll_ids: HashMap::new(),
             pacing_budget: match resolver.mode {
@@ -114,6 +124,10 @@ pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
     resolver.last_pacing_snapshot = None;
     resolver.probe_attempts = 0;
     resolver.next_probe_at = 0;
+    resolver.last_health_check_at = 0;
+    resolver.last_health_send_packets = 0;
+    resolver.last_health_dns_responses = 0;
+    resolver.last_active_poll_kick_at = 0;
 }
 
 pub(crate) fn sockaddr_storage_to_socket_addr(

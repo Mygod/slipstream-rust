@@ -203,6 +203,7 @@ extern "C" {
 
     pub fn picoquic_set_cookie_mode(quic: *mut picoquic_quic_t, cookie_mode: c_int);
     pub fn picoquic_set_default_priority(quic: *mut picoquic_quic_t, default_stream_priority: u8);
+    pub fn picoquic_set_default_idle_timeout(quic: *mut picoquic_quic_t, idle_timeout_ms: u64);
     pub fn picoquic_set_default_direct_receive_callback(
         quic: *mut picoquic_quic_t,
         direct_receive_fn: picoquic_stream_direct_receive_fn,

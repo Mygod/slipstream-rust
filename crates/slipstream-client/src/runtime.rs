@@ -8,8 +8,8 @@ use self::path::{
 use self::setup::{bind_tcp_listener, bind_udp_socket, compute_mtu, map_io};
 use crate::dns::{
     add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
-    refresh_resolver_path, resolve_resolvers, resolver_mode_to_c, send_poll_queries,
-    sockaddr_storage_to_socket_addr, DnsResponseContext, PeerAddrMode,
+    refresh_resolver_path, reset_resolver_path, resolve_resolvers, resolver_mode_to_c,
+    send_poll_queries, sockaddr_storage_to_socket_addr, DnsResponseContext, PeerAddrMode,
 };
 use crate::error::ClientError;
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
@@ -27,10 +27,11 @@ use slipstream_ffi::{
         picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
         picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
         picoquic_enable_path_callbacks_default, picoquic_get_next_wake_delay,
-        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_has_ready_stream,
-        slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm, slipstream_set_cc_override,
-        slipstream_set_default_path_mode, PICOQUIC_CONNECTION_ID_MAX_SIZE,
-        PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
+        picoquic_prepare_next_packet_ex, picoquic_set_callback, picoquic_set_default_idle_timeout,
+        slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm,
+        slipstream_set_cc_override, slipstream_set_default_path_mode,
+        PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
+        PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
 };
@@ -49,6 +50,10 @@ const DNS_POLL_SLICE_US: u64 = 50_000;
 const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
+const PATH_NO_PROGRESS_CHECK_US: u64 = 10_000_000;
+const PATH_NO_PROGRESS_DISABLE_US: u64 = 30_000_000;
+const PATH_NO_PROGRESS_MIN_SENDS: u64 = 8;
+const RECURSIVE_ACTIVE_POLL_KICK_US: u64 = 200_000;
 
 fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
     let mut dropped = 0usize;
@@ -59,6 +64,72 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
         }
     }
     dropped
+}
+
+fn maybe_disable_no_progress_path(
+    resolver: &mut crate::dns::ResolverState,
+    now: u64,
+    active_streams: bool,
+) {
+    if !active_streams || !resolver.added {
+        resolver.last_health_check_at = now;
+        resolver.last_health_send_packets = resolver.debug.send_packets;
+        resolver.last_health_dns_responses = resolver.debug.dns_responses;
+        return;
+    }
+    if resolver.last_health_check_at == 0 {
+        resolver.last_health_check_at = now;
+        resolver.last_health_send_packets = resolver.debug.send_packets;
+        resolver.last_health_dns_responses = resolver.debug.dns_responses;
+        return;
+    }
+    if now.saturating_sub(resolver.last_health_check_at) < PATH_NO_PROGRESS_CHECK_US {
+        return;
+    }
+
+    let send_delta = resolver
+        .debug
+        .send_packets
+        .saturating_sub(resolver.last_health_send_packets);
+    let response_delta = resolver
+        .debug
+        .dns_responses
+        .saturating_sub(resolver.last_health_dns_responses);
+
+    resolver.last_health_check_at = now;
+    resolver.last_health_send_packets = resolver.debug.send_packets;
+    resolver.last_health_dns_responses = resolver.debug.dns_responses;
+
+    if send_delta >= PATH_NO_PROGRESS_MIN_SENDS && response_delta == 0 {
+        warn!(
+            "Disabling resolver path {} for {}ms after {} outbound DNS packets with no responses",
+            resolver.addr,
+            PATH_NO_PROGRESS_DISABLE_US / 1000,
+            send_delta
+        );
+        reset_resolver_path(resolver);
+        resolver.disabled_until = now.saturating_add(PATH_NO_PROGRESS_DISABLE_US);
+    }
+}
+
+fn maybe_kick_recursive_polling(
+    resolver: &mut crate::dns::ResolverState,
+    now: u64,
+    active_streams: bool,
+) {
+    if !active_streams
+        || !resolver.added
+        || resolver.mode != ResolverMode::Recursive
+        || resolver.pending_polls > 0
+    {
+        return;
+    }
+    if resolver.last_active_poll_kick_at == 0
+        || now.saturating_sub(resolver.last_active_poll_kick_at) >= RECURSIVE_ACTIVE_POLL_KICK_US
+    {
+        resolver.pending_polls = 1;
+        resolver.last_active_poll_kick_at = now;
+    }
 }
 
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
@@ -148,6 +219,10 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         }
         unsafe {
             configure_quic_with_custom(quic, mixed_cc, mtu);
+            picoquic_set_default_idle_timeout(
+                quic,
+                config.quic_idle_timeout_seconds.saturating_mul(1000),
+            );
             picoquic_enable_path_callbacks_default(quic, 1);
             let override_ptr = cc_override
                 .as_ref()
@@ -417,6 +492,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
             let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
             let streams_len = unsafe { (*state_ptr).streams_len() };
+            let active_streams = streams_len > 0;
             if streams_len > 0 && has_ready_stream && flow_blocked {
                 let now = unsafe { picoquic_current_time() };
                 if now.saturating_sub(last_flow_block_log_at) >= FLOW_BLOCKED_LOG_INTERVAL_US {
@@ -453,6 +529,8 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 if !refresh_resolver_path(cnx, resolver) {
                     continue;
                 }
+                let now = unsafe { picoquic_current_time() };
+                maybe_kick_recursive_polling(resolver, now, active_streams);
                 match resolver.mode {
                     ResolverMode::Authoritative => {
                         let quality = fetch_path_quality(cnx, resolver);
@@ -540,7 +618,8 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             let report_time = unsafe { picoquic_current_time() };
             let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
             let streams_len = unsafe { (*state_ptr).streams_len() };
-            for resolver in resolvers.iter_mut() {
+            let active_streams = streams_len > 0;
+            for (idx, resolver) in resolvers.iter_mut().enumerate() {
                 resolver.debug.enqueued_bytes = enqueued_bytes;
                 resolver.debug.last_enqueue_at = last_enqueue_at;
                 resolver.debug.zero_send_loops = zero_send_loops;
@@ -571,6 +650,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     inflight_polls,
                     resolver.last_pacing_snapshot,
                 );
+                if idx > 0 {
+                    maybe_disable_no_progress_path(resolver, report_time, active_streams);
+                }
             }
         }
 
