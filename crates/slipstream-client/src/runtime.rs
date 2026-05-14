@@ -734,13 +734,16 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 && completed_stream_rx_bytes >= RECURSIVE_REFRESH_AFTER_COMPLETED_RX_BYTES
                 && uses_recursive_transport(&resolvers)
             {
+                let primary_addr = resolvers[0].addr;
                 unsafe {
                     (*state_ptr).clear_completed_stream_rx_bytes();
                 }
-                return Err(ClientError::new(format!(
-                    "Completed {} bytes over recursive DNS transport; exiting for clean session refresh",
-                    completed_stream_rx_bytes
-                )));
+                warn!(
+                    "Completed {} bytes over recursive DNS transport; reconnecting with {} as primary for clean session refresh",
+                    completed_stream_rx_bytes,
+                    primary_addr
+                );
+                break;
             }
             let mut reconnect_after_primary_health_loss = None;
             for resolver in resolvers.iter_mut() {
