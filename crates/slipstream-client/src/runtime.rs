@@ -55,8 +55,6 @@ const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
 const PATH_NO_PROGRESS_CHECK_US: u64 = 10_000_000;
 const PATH_NO_PROGRESS_DISABLE_US: u64 = 30_000_000;
 const PATH_NO_PROGRESS_MIN_SENDS: u64 = 8;
-const PATH_POOR_RESPONSE_MIN_SENDS: u64 = 32;
-const PATH_POOR_RESPONSE_RATIO_DIVISOR: u64 = 8;
 const RECURSIVE_ACTIVE_POLL_KICK_US: u64 = 200_000;
 
 fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
@@ -104,10 +102,7 @@ fn maybe_disable_no_progress_path(
     resolver.last_health_send_packets = resolver.debug.send_packets;
     resolver.last_health_dns_responses = resolver.debug.dns_responses;
 
-    let no_responses = send_delta >= PATH_NO_PROGRESS_MIN_SENDS && response_delta == 0;
-    let poor_response_ratio = send_delta >= PATH_POOR_RESPONSE_MIN_SENDS
-        && response_delta.saturating_mul(PATH_POOR_RESPONSE_RATIO_DIVISOR) < send_delta;
-    if no_responses || poor_response_ratio {
+    if send_delta >= PATH_NO_PROGRESS_MIN_SENDS && response_delta == 0 {
         warn!(
             "Disabling resolver path {} for {}ms after {} outbound DNS packets and {} DNS responses",
             resolver.addr,
@@ -742,12 +737,10 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 unsafe {
                     (*state_ptr).clear_completed_stream_rx_bytes();
                 }
-                warn!(
-                    "Completed {} bytes over recursive DNS transport; reconnecting with {} as primary for clean session refresh",
-                    completed_stream_rx_bytes,
-                    primary_addr
-                );
-                break;
+                return Err(ClientError::new(format!(
+                    "Completed {} bytes over recursive DNS transport via {}; exiting for clean supervisor refresh",
+                    completed_stream_rx_bytes, primary_addr
+                )));
             }
             let mut reconnect_after_primary_health_loss = None;
             for resolver in resolvers.iter_mut() {
