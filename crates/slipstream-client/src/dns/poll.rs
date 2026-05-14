@@ -6,7 +6,6 @@ use slipstream_ffi::picoquic::{
 };
 use slipstream_ffi::{ClientConfig, ResolverMode};
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use tokio::net::UdpSocket as TokioUdpSocket;
 
 use super::path::refresh_resolver_path;
@@ -42,7 +41,6 @@ pub(crate) async fn send_poll_queries(
     peer_addr_mode: PeerAddrMode,
     remaining: &mut usize,
     send_buf: &mut [u8],
-    replica_dests: &[SocketAddr],
 ) -> Result<(), ClientError> {
     if !refresh_resolver_path(cnx, resolver) {
         return Ok(());
@@ -124,17 +122,6 @@ pub(crate) async fn send_poll_queries(
                 break;
             }
             return Err(ClientError::new(err.to_string()));
-        }
-        for replica in replica_dests {
-            if *replica == dest {
-                continue;
-            }
-            if let Err(err) = udp.send_to(&packet, *replica).await {
-                if is_transient_udp_error(&err) {
-                    continue;
-                }
-                return Err(ClientError::new(err.to_string()));
-            }
         }
         if resolver.mode == ResolverMode::Authoritative {
             resolver.inflight_poll_ids.insert(poll_id, current_time);
