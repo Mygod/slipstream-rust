@@ -143,6 +143,12 @@ fn has_available_recursive_path(resolvers: &[crate::dns::ResolverState]) -> bool
         .any(|resolver| resolver.mode == ResolverMode::Recursive && resolver.added)
 }
 
+fn has_recursive_resolver(resolvers: &[crate::dns::ResolverState]) -> bool {
+    resolvers
+        .iter()
+        .any(|resolver| resolver.mode == ResolverMode::Recursive)
+}
+
 fn rotate_resolvers_for_start(resolvers: &mut [crate::dns::ResolverState], start_index: usize) {
     if resolvers.is_empty() {
         return;
@@ -374,7 +380,10 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 }
             }
             drain_path_events(cnx, &mut resolvers, state_ptr, peer_addr_mode);
-            if ready && !has_available_recursive_path(&resolvers) {
+            if ready
+                && has_recursive_resolver(&resolvers)
+                && !has_available_recursive_path(&resolvers)
+            {
                 let streams_len = unsafe { (*state_ptr).streams_len() };
                 let next_start_index = next_recursive_start_index(&resolvers);
                 if next_start_index > 0 {
