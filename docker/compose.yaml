@@ -1,0 +1,27 @@
+services:
+  microsocks:
+    container_name: microsocks
+    build:
+      context: .
+      dockerfile: Dockerfile.microsocks
+    # Make sure to set these variables in .env to a valid username and password
+    command: -i 0.0.0.0 -p 1080 -u ${MICROSOCKS_USER} -P ${MICROSOCKS_PASSWORD}
+    restart: unless-stopped
+    networks:
+      - slipstream
+  slipstream:
+    container_name: slipstream-server
+    build:
+      context: .
+      dockerfile: Dockerfile.slipstream
+    restart: unless-stopped
+    # Make sure to set the DOMAIN variable in .env to your domain
+    command: --dns-listen-host 0.0.0.0 --dns-listen-port=53 --target-address=microsocks:1080 --domain=${DOMAIN} --cert /etc/slipstream/cert.pem --key /etc/slipstream/key.pem --reset-seed /etc/slipstream/reset-seed
+    volumes:
+      - $PWD/certs:/etc/slipstream
+    networks:
+      - slipstream
+    ports:
+      - 53:53/udp
+networks:
+  slipstream: {}

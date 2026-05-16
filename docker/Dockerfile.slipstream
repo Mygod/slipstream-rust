@@ -1,0 +1,32 @@
+FROM rust:latest AS builder
+
+WORKDIR /usr/src/app
+
+RUN apt-get update && \
+    apt-get install -y \
+    build-essential \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/Mygod/slipstream-rust.git .
+
+RUN git submodule update --init --recursive
+
+RUN cargo build --release -p slipstream-server
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y ca-certificates openssl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/local/bin
+
+COPY --from=builder /usr/src/app/target/release/slipstream-server .
+
+RUN chmod +x slipstream-server
+
+ENTRYPOINT ["slipstream-server"]
