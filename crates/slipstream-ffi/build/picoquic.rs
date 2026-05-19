@@ -94,7 +94,7 @@ pub(crate) fn locate_picoquic_include_dir() -> Option<PathBuf> {
     None
 }
 
-pub(crate) fn locate_picoquic_lib_dir() -> Option<PathBuf> {
+pub(crate) fn locate_picoquic_lib_dir(is_windows: bool) -> Option<PathBuf> {
     if let Ok(dir) = env::var("PICOQUIC_LIB_DIR") {
         let candidate = PathBuf::from(dir);
         if has_picoquic_libs(&candidate) {
@@ -104,9 +104,11 @@ pub(crate) fn locate_picoquic_lib_dir() -> Option<PathBuf> {
 
     if let Ok(dir) = env::var("PICOQUIC_BUILD_DIR") {
         let build_dir = PathBuf::from(&dir);
-        for candidate in windows_stage_candidates(&build_dir) {
-            if has_picoquic_libs(&candidate) {
-                return Some(candidate);
+        if is_windows {
+            for candidate in windows_stage_candidates(&build_dir) {
+                if has_picoquic_libs(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
         if has_picoquic_libs(&build_dir) {
@@ -120,9 +122,11 @@ pub(crate) fn locate_picoquic_lib_dir() -> Option<PathBuf> {
 
     if let Some(root) = locate_repo_root() {
         let build_dir = root.join(".picoquic-build");
-        for candidate in windows_stage_candidates(&build_dir) {
-            if has_picoquic_libs(&candidate) {
-                return Some(candidate);
+        if is_windows {
+            for candidate in windows_stage_candidates(&build_dir) {
+                if has_picoquic_libs(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
         if has_picoquic_libs(&build_dir) {

@@ -94,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let explicit_picoquic_lib = env::var_os("PICOQUIC_LIB_DIR").is_some();
     let explicit_picoquic_include_lib = explicit_picoquic_include || explicit_picoquic_lib;
     let mut picoquic_include_dir = locate_picoquic_include_dir();
-    let mut picoquic_lib_dir = locate_picoquic_lib_dir();
+    let mut picoquic_lib_dir = locate_picoquic_lib_dir(is_windows);
     let mut picotls_include_dir = locate_picotls_include_dir();
 
     if is_windows
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         build_picoquic(&openssl_paths, &target)?;
         picoquic_include_dir = locate_picoquic_include_dir();
-        picoquic_lib_dir = locate_picoquic_lib_dir();
+        picoquic_lib_dir = locate_picoquic_lib_dir(is_windows);
         picotls_include_dir = locate_picotls_include_dir();
     }
 

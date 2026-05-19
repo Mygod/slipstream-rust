@@ -45,7 +45,7 @@ if (!$executables) {
 
 $dumpbin = Get-DumpbinPath
 $allowedDependencyPatterns = @(
-    '^(?i:advapi32|bcrypt|bcryptprimitives|crypt32|kernel32|ntdll|user32|vcruntime140|vcruntime140_1|ws2_32)\.dll$',
+    '^(?i:advapi32|bcrypt|bcryptprimitives|crypt32|gdi32|kernel32|ntdll|user32|vcruntime140|vcruntime140_1|ws2_32)\.dll$',
     '^(?i:ucrtbase)\.dll$',
     '^(?i:api-ms-win-(core|crt)-[a-z0-9-]+)\.dll$'
 )
