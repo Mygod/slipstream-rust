@@ -80,8 +80,16 @@ runs:
         "OPENSSL_LIB_DIR=$(Join-Path $opensslRoot 'lib')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
     - name: Build picoquic with upstream Windows flow
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.windows-platform != 'ARM64'
       shell: pwsh
+      run: |
+        .\scripts\build_picoquic_windows.ps1 -Platform "${{ inputs.windows-platform }}"
+
+    - name: Build picoquic with upstream Windows flow (ARM64)
+      if: runner.os == 'Windows' && inputs.windows-platform == 'ARM64'
+      shell: pwsh
+      env:
+        CL: /D_WIN32_WINNT=0x0600 /FIwinsock2.h /FIws2tcpip.h
       run: |
         .\scripts\build_picoquic_windows.ps1 -Platform "${{ inputs.windows-platform }}"
 
