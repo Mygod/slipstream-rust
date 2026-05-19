@@ -319,6 +319,30 @@ function Get-CMakeLibraryPath {
     return $null
 }
 
+function Get-PkgConfigExecutable {
+    $candidates = @()
+    foreach ($path in @($env:PKG_CONFIG_EXECUTABLE, $env:PKG_CONFIG)) {
+        if (![string]::IsNullOrWhiteSpace($path)) {
+            $candidates += $path
+        }
+    }
+
+    $commands = @(Get-Command pkg-config.exe, pkgconf.exe -ErrorAction SilentlyContinue)
+    foreach ($command in $commands) {
+        if ($command) {
+            $candidates += $command.Source
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+
+    return $null
+}
+
 function Copy-CMakeLibrary {
     param(
         [Parameter(Mandatory = $true)]
@@ -373,6 +397,10 @@ function Invoke-CMakePicoquicBuild {
         "-DOPENSSL_USE_STATIC_LIBS=ON",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
     )
+    $pkgConfigExecutable = Get-PkgConfigExecutable
+    if ($pkgConfigExecutable) {
+        $cmakeArgs += "-DPKG_CONFIG_EXECUTABLE=$pkgConfigExecutable"
+    }
     & cmake @cmakeArgs
     if ($LASTEXITCODE -ne 0) {
         throw "CMake configure failed for picoquic"
