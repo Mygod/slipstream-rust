@@ -150,36 +150,39 @@ pub(crate) fn locate_picotls_include_dir() -> Option<PathBuf> {
     }
 
     if let Ok(dir) = env::var("PICOQUIC_BUILD_DIR") {
-        let build_dir = PathBuf::from(dir);
-        for candidate in picotls_include_candidates_from_build_dir(&build_dir) {
-            if has_picotls_header(&candidate) {
-                return Some(candidate);
-            }
+        let candidate = Path::new(&dir)
+            .join("_deps")
+            .join("picotls-src")
+            .join("include");
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
         }
     }
 
     if let Ok(dir) = env::var("PICOQUIC_LIB_DIR") {
-        let lib_dir = PathBuf::from(dir);
-        for candidate in picotls_include_candidates_from_build_dir(&lib_dir) {
+        let candidate = Path::new(&dir)
+            .join("_deps")
+            .join("picotls-src")
+            .join("include");
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
+        }
+        if let Some(parent) = Path::new(&dir).parent() {
+            let candidate = parent.join("_deps").join("picotls-src").join("include");
             if has_picotls_header(&candidate) {
                 return Some(candidate);
-            }
-        }
-        if let Some(parent) = lib_dir.parent() {
-            for candidate in picotls_include_candidates_from_build_dir(parent) {
-                if has_picotls_header(&candidate) {
-                    return Some(candidate);
-                }
             }
         }
     }
 
     if let Some(root) = locate_repo_root() {
-        let build_dir = root.join(".picoquic-build");
-        for candidate in picotls_include_candidates_from_build_dir(&build_dir) {
-            if has_picotls_header(&candidate) {
-                return Some(candidate);
-            }
+        let candidate = root
+            .join(".picoquic-build")
+            .join("_deps")
+            .join("picotls-src")
+            .join("include");
+        if has_picotls_header(&candidate) {
+            return Some(candidate);
         }
         let candidate = root.join("vendor").join("picotls").join("include");
         if has_picotls_header(&candidate) {
@@ -257,18 +260,6 @@ fn windows_stage_candidates(dir: &Path, target: &str) -> Vec<PathBuf> {
     vec![
         dir.join("windows").join(preferred_platform).join("Release"),
         dir.join(preferred_platform).join("Release"),
-    ]
-}
-
-fn picotls_include_candidates_from_build_dir(dir: &Path) -> Vec<PathBuf> {
-    let picotls_src = |base: &Path| base.join("_deps").join("picotls-src").join("include");
-    vec![
-        picotls_src(dir),
-        picotls_src(&dir.join("cmake")),
-        picotls_src(&dir.join("windows").join("x64").join("cmake")),
-        picotls_src(&dir.join("windows").join("ARM64").join("cmake")),
-        picotls_src(&dir.join("x64").join("cmake")),
-        picotls_src(&dir.join("ARM64").join("cmake")),
     ]
 }
 
