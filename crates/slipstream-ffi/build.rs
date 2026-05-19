@@ -153,14 +153,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stateless_packet_src = cc_dir.join("slipstream_stateless_packet.c");
     let test_helpers_src = cc_dir.join("slipstream_test_helpers.c");
     let picotls_layout_src = cc_dir.join("picotls_layout.c");
-    let wincompat_src = cc_dir.join("slipstream_wincompat.c");
     println!("cargo:rerun-if-changed={}", cc_src.display());
     println!("cargo:rerun-if-changed={}", mixed_cc_src.display());
     println!("cargo:rerun-if-changed={}", poll_src.display());
     println!("cargo:rerun-if-changed={}", stateless_packet_src.display());
     println!("cargo:rerun-if-changed={}", test_helpers_src.display());
     println!("cargo:rerun-if-changed={}", picotls_layout_src.display());
-    println!("cargo:rerun-if-changed={}", wincompat_src.display());
     let picoquic_internal = picoquic_include_dir.join("picoquic_internal.h");
     if picoquic_internal.exists() {
         println!("cargo:rerun-if-changed={}", picoquic_internal.display());
@@ -203,12 +201,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[&picoquic_include_dir, &picotls_include_dir],
     )?;
     object_paths.push(picotls_layout_obj);
-
-    if is_windows {
-        let wincompat_obj = out_dir.join("slipstream_wincompat.c.o");
-        compile_cc(&cc, &wincompat_src, &wincompat_obj, &picoquic_include_dir)?;
-        object_paths.push(wincompat_obj);
-    }
 
     let archive = out_dir.join("libslipstream_client_objs.a");
     create_archive(&ar, &cc, &archive, &object_paths)?;

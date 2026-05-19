@@ -382,7 +382,11 @@ function Invoke-CMakePicoquicBuild {
         [string]$Platform
     )
 
-    $wincompatIncludeDir = (Join-Path $PicoquicDir "picoquic").Replace('\', '/')
+    $picotlsWindowsCompatOverlay = Join-Path $RepoRoot "scripts\cmake\picotls-windows-compat.cmake"
+    if (!(Test-Path $picotlsWindowsCompatOverlay)) {
+        throw "picotls Windows compatibility CMake overlay not found at $picotlsWindowsCompatOverlay"
+    }
+    $picotlsWindowsCompatOverlay = $picotlsWindowsCompatOverlay.Replace('\', '/')
     $cmakeArgs = @(
         "-S", $PicoquicDir,
         "-B", $BuildDir,
@@ -396,8 +400,7 @@ function Invoke-CMakePicoquicBuild {
         "-Dpicoquic_BUILD_TESTS=OFF",
         "-DOPENSSL_ROOT_DIR=$OpenSslStageDir",
         "-DOPENSSL_USE_STATIC_LIBS=ON",
-        "-DCMAKE_C_FLAGS_INIT=/I$wincompatIncludeDir",
-        "-DCMAKE_CXX_FLAGS_INIT=/I$wincompatIncludeDir",
+        "-DCMAKE_PROJECT_picotls_INCLUDE=$picotlsWindowsCompatOverlay",
         "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
     )
     $pkgConfigExecutable = Get-PkgConfigExecutable
