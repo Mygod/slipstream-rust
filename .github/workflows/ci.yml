@@ -189,6 +189,7 @@ jobs:
           target: x86_64-pc-windows-msvc
           artifact-name: slipstream-windows-x86_64
           windows-platform: x64
+          vcpkg-triplet: x64-windows-static-md
 
   build-binaries-windows-arm64:
     name: Build Binaries (windows-arm64)

@@ -13,7 +13,7 @@ inputs:
     required: false
     default: x64
   vcpkg-triplet:
-    description: vcpkg triplet used when a Windows target needs vcpkg OpenSSL.
+    description: vcpkg triplet used for Windows OpenSSL.
     required: false
     default: ""
 
@@ -79,7 +79,7 @@ runs:
         "OPENSSL_INCLUDE_DIR=$(Join-Path $opensslRoot 'include')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
         "OPENSSL_LIB_DIR=$(Join-Path $opensslRoot 'lib')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-    - name: Build picoquic with upstream Windows flow
+    - name: Build picoquic with CMake (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |

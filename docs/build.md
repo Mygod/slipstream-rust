@@ -40,15 +40,15 @@ picoquic/picotls build directories or use the Windows helper below.
 
 ## Windows target build
 
-Windows binary builds are supported in GitHub Actions on the hosted
-`windows-latest` runner targeting `x86_64-pc-windows-msvc`. The workflow runs
-`scripts/build_picoquic_windows.ps1`, which builds picotls and picoquic with the
-upstream Visual Studio projects, stages static OpenSSL libraries from the runner
-image, and exports the Cargo environment through `GITHUB_ENV`.
+Windows binary builds are supported in GitHub Actions for
+`x86_64-pc-windows-msvc` and `aarch64-pc-windows-msvc`. The workflow runs
+`scripts/build_picoquic_windows.ps1`, which builds picotls and picoquic with
+CMake, stages static OpenSSL libraries, and exports the Cargo environment
+through `GITHUB_ENV`.
 
 Other Windows build arrangements are not blocked when `PICOQUIC_INCLUDE_DIR`,
 `PICOQUIC_LIB_DIR`, and `PICOTLS_INCLUDE_DIR` point at compatible prebuilt
-artifacts, but CI only exercises `x86_64-pc-windows-msvc`.
+artifacts, but CI only exercises the two Windows MSVC targets above.
 
 The uploaded Windows artifact is expected to contain only the two Slipstream
 executables plus checksums. CI rejects artifacts with non-platform DLL

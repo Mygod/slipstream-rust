@@ -28,7 +28,7 @@ git submodule update --init --recursive
 
 On non-Windows hosts, `cargo build` will auto-build picoquic via
 `./scripts/build_picoquic.sh` when libs are missing (outputs to
-`.picoquic-build/`). For the Windows `x86_64-pc-windows-msvc` CI flow, run
+`.picoquic-build/`). For Windows MSVC targets, run
 `pwsh -File ./scripts/build_picoquic_windows.ps1` once, then build with Cargo.
 See `docs/build.md` for details.
 
