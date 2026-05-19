@@ -11,11 +11,24 @@ use super::resolver::{reset_resolver_path, ResolverState};
 
 const PATH_PROBE_INITIAL_DELAY_US: u64 = 250_000;
 const PATH_PROBE_MAX_DELAY_US: u64 = 10_000_000;
+const PATH_PROBE_DISABLE_AFTER_ATTEMPTS: u32 = 5;
+const PATH_PROBE_DISABLE_US: u64 = 300_000_000;
 
 pub(crate) fn refresh_resolver_path(
     cnx: *mut picoquic_cnx_t,
     resolver: &mut ResolverState,
 ) -> bool {
+    let now = unsafe { picoquic_current_time() };
+    if resolver.disabled_until > now {
+        resolver.added = false;
+        resolver.path_id = -1;
+        resolver.unique_path_id = None;
+        resolver.local_addr_storage = None;
+        resolver.pending_polls = 0;
+        resolver.inflight_poll_ids.clear();
+        resolver.last_pacing_snapshot = None;
+        return false;
+    }
     if let Some(unique_path_id) = resolver.unique_path_id {
         let path_id = unsafe { slipstream_get_path_id_from_unique(cnx, unique_path_id) };
         if path_id >= 0 {
@@ -64,6 +77,9 @@ pub(crate) fn add_paths(
         if resolver.added {
             continue;
         }
+        if resolver.disabled_until > now {
+            continue;
+        }
         if resolver.next_probe_at > now {
             continue;
         }
@@ -90,12 +106,18 @@ pub(crate) fn add_paths(
             continue;
         }
         resolver.probe_attempts = resolver.probe_attempts.saturating_add(1);
-        let delay = path_probe_backoff(resolver.probe_attempts);
+        let attempt = resolver.probe_attempts;
+        let mut delay = path_probe_backoff(resolver.probe_attempts);
+        if resolver.probe_attempts >= PATH_PROBE_DISABLE_AFTER_ATTEMPTS {
+            resolver.disabled_until = now.saturating_add(PATH_PROBE_DISABLE_US);
+            resolver.probe_attempts = 0;
+            delay = PATH_PROBE_DISABLE_US;
+        }
         resolver.next_probe_at = now.saturating_add(delay);
         warn!(
             "Failed adding path {} (attempt {}), retrying in {}ms",
             resolver.addr,
-            resolver.probe_attempts,
+            attempt,
             delay / 1000
         );
     }

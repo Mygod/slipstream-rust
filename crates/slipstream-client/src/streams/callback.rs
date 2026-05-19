@@ -23,6 +23,16 @@ fn close_event_label(event: picoquic_call_back_event_t) -> &'static str {
     }
 }
 
+fn close_reason_label(reason: u64) -> &'static str {
+    match reason {
+        0 => "none",
+        0x101 => "slipstream_internal_error",
+        0x105 => "slipstream_file_cancel_error",
+        0x433 => "picoquic_idle_timeout",
+        _ => "unknown",
+    }
+}
+
 pub(crate) unsafe extern "C" fn client_callback(
     cnx: *mut picoquic_cnx_t,
     stream_id: u64,
@@ -103,13 +113,17 @@ pub(crate) unsafe extern "C" fn client_callback(
                 );
             }
             warn!(
-                "Connection closed event={} state={:?} local_error=0x{:x} remote_error=0x{:x} local_app=0x{:x} remote_app=0x{:x} ready={}",
+                "Connection closed event={} state={:?} local_error=0x{:x}({}) remote_error=0x{:x}({}) local_app=0x{:x}({}) remote_app=0x{:x}({}) ready={}",
                 close_event_label(fin_or_event),
                 cnx_state,
                 local_reason,
+                close_reason_label(local_reason),
                 remote_reason,
+                close_reason_label(remote_reason),
                 local_app_reason,
+                close_reason_label(local_app_reason),
                 remote_app_reason,
+                close_reason_label(remote_app_reason),
                 state.ready
             );
         }
@@ -246,10 +260,14 @@ pub(super) fn handle_stream_data(
         unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR) };
         state.streams.remove(&stream_id);
     } else if remove_stream {
-        if debug_streams {
-            debug!("stream {}: finished", stream_id);
+        if let Some(stream) = state.streams.remove(&stream_id) {
+            if debug_streams {
+                debug!(
+                    "stream {}: finished rx_bytes={} tx_bytes={}",
+                    stream_id, stream.flow.rx_bytes, stream.tx_bytes
+                );
+            }
         }
-        state.streams.remove(&stream_id);
     }
 
     check_stream_invariants(state, stream_id, "handle_stream_data");

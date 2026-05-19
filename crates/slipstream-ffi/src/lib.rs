@@ -31,6 +31,7 @@ pub struct ClientConfig<'a> {
     pub congestion_control: Option<&'a str>,
     pub gso: bool,
     pub keep_alive_interval: usize,
+    pub quic_idle_timeout_seconds: u64,
     pub debug_poll: bool,
     pub debug_streams: bool,
 }

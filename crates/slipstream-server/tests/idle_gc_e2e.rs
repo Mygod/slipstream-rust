@@ -62,6 +62,7 @@ fn idle_gc_closes_connection() {
         reset_seed_path: None,
         fallback_addr: None,
         idle_timeout_seconds: Some(1),
+        keep_alive_interval_ms: Some(0),
         envs: &[],
         rust_log: "debug",
         capture_logs: true,
@@ -137,8 +138,14 @@ fn idle_gc_closes_connection() {
         let snapshot = log_snapshot(&client_logs);
         panic!("client did not accept TCP connection\n{}", snapshot);
     }
-    if !wait_for_log(&client_logs, "stateless_reset", Duration::from_secs(5)) {
+    if !wait_for_log(&client_logs, "stateless_reset", Duration::from_secs(5))
+        && !wait_for_log(
+            &client_logs,
+            "picoquic_idle_timeout",
+            Duration::from_secs(1),
+        )
+    {
         let snapshot = log_snapshot(&client_logs);
-        panic!("expected stateless reset close\n{}", snapshot);
+        panic!("expected idle close\n{}", snapshot);
     }
 }

@@ -55,6 +55,7 @@ fn cert_pinning_e2e() {
         reset_seed_path: None,
         fallback_addr: None,
         idle_timeout_seconds: None,
+        keep_alive_interval_ms: None,
         envs: &[],
         rust_log: "info",
         capture_logs: false,

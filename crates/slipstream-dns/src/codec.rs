@@ -77,7 +77,8 @@ pub fn decode_query_with_domains(
         }
     };
 
-    let undotted = dots::undotify(&subdomain_raw);
+    let subdomain_raw = strip_cache_buster_label(&subdomain_raw);
+    let undotted = dots::undotify(subdomain_raw);
     if undotted.is_empty() {
         return Err(DecodeQueryError::Reply {
             id: header.id,
@@ -108,6 +109,22 @@ pub fn decode_query_with_domains(
         question,
         payload,
     })
+}
+
+fn strip_cache_buster_label(subdomain: &str) -> &str {
+    let Some((payload, nonce)) = subdomain.rsplit_once('.') else {
+        return subdomain;
+    };
+    if nonce.len() == 5
+        && nonce.as_bytes()[0] == b'0'
+        && nonce.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        payload
+    } else {
+        subdomain
+    }
 }
 
 pub fn encode_query(params: &QueryParams<'_>) -> Result<Vec<u8>, DnsError> {
