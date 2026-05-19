@@ -35,7 +35,8 @@ You can disable auto-build with:
 PICOQUIC_AUTO_BUILD=0 cargo build -p slipstream-client -p slipstream-server
 ```
 
-Windows targets are not supported from Linux hosts in this repo.
+For Windows targets, Cargo does not auto-build picoquic; provide explicit
+picoquic/picotls build directories or use the Windows helper below.
 
 ## Windows target build
 
@@ -44,6 +45,10 @@ Windows binary builds are supported in GitHub Actions on the hosted
 `scripts/build_picoquic_windows.ps1`, which builds picotls and picoquic with the
 upstream Visual Studio projects, stages static OpenSSL libraries from the runner
 image, and exports the Cargo environment through `GITHUB_ENV`.
+
+Other Windows build arrangements are not blocked when `PICOQUIC_INCLUDE_DIR`,
+`PICOQUIC_LIB_DIR`, and `PICOTLS_INCLUDE_DIR` point at compatible prebuilt
+artifacts, but CI only exercises `x86_64-pc-windows-msvc`.
 
 The uploaded Windows artifact is expected to contain only the two Slipstream
 executables plus checksums. CI rejects artifacts with non-platform DLL

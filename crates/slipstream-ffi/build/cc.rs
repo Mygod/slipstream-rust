@@ -73,7 +73,7 @@ pub(crate) fn resolve_ar(target: &str, cc: &CcTool) -> String {
     if let Ok(ar) = env::var("AR") {
         return ar;
     }
-    if (target.contains("windows") || target.contains("pc-windows")) && target.contains("msvc") {
+    if target.contains("msvc") {
         return "lib.exe".to_string();
     }
     // For non-Windows targets, look for llvm-ar or ar in the compiler directory
@@ -97,9 +97,9 @@ pub(crate) fn create_archive(
     objects: &[PathBuf],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = env::var("TARGET").unwrap_or_default();
-    let is_windows = target.contains("windows") || target.contains("pc-windows");
+    let is_msvc = target.contains("msvc");
 
-    if is_windows {
+    if is_msvc {
         let mut lib_cmd = Command::new(ar);
         for (name, value) in cc.env() {
             lib_cmd.env(name, value);
@@ -136,10 +136,11 @@ pub(crate) fn compile_cc(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = env::var("TARGET").unwrap_or_default();
     let is_windows = target.contains("windows") || target.contains("pc-windows");
+    let is_msvc = target.contains("msvc");
 
     let mut cmd = cc.command();
 
-    if is_windows {
+    if is_msvc {
         cmd.arg("/c")
             .arg(format!("/Fo:{}", output.display()))
             .arg(source)
@@ -149,7 +150,16 @@ pub(crate) fn compile_cc(
         }
         cmd.arg(format!("/I{}", picoquic_include_dir.display()));
     } else {
-        cmd.arg("-c").arg("-fPIC").arg("-o").arg(output).arg(source);
+        cmd.arg("-c").arg("-o").arg(output).arg(source);
+        if !is_windows {
+            cmd.arg("-fPIC");
+        }
+        if is_windows {
+            cmd.arg("-D_WINDOWS");
+            if target.contains("x86_64") {
+                cmd.arg("-D_WINDOWS64");
+            }
+        }
         cmd.arg("-I").arg(picoquic_include_dir);
     }
 
@@ -168,10 +178,11 @@ pub(crate) fn compile_cc_with_includes(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let target = env::var("TARGET").unwrap_or_default();
     let is_windows = target.contains("windows") || target.contains("pc-windows");
+    let is_msvc = target.contains("msvc");
 
     let mut cmd = cc.command();
 
-    if is_windows {
+    if is_msvc {
         cmd.arg("/c")
             .arg(format!("/Fo:{}", output.display()))
             .arg(source)
@@ -183,7 +194,16 @@ pub(crate) fn compile_cc_with_includes(
             cmd.arg(format!("/I{}", dir.display()));
         }
     } else {
-        cmd.arg("-c").arg("-fPIC").arg("-o").arg(output).arg(source);
+        cmd.arg("-c").arg("-o").arg(output).arg(source);
+        if !is_windows {
+            cmd.arg("-fPIC");
+        }
+        if is_windows {
+            cmd.arg("-D_WINDOWS");
+            if target.contains("x86_64") {
+                cmd.arg("-D_WINDOWS64");
+            }
+        }
         for dir in include_dirs {
             cmd.arg("-I").arg(dir);
         }

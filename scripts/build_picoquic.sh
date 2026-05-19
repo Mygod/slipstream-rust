@@ -12,22 +12,6 @@ if [[ ! -d "${PICOQUIC_DIR}" ]]; then
   exit 1
 fi
 
-IS_WINDOWS=0
-case "${OSTYPE:-}" in
-  msys*|cygwin*) IS_WINDOWS=1 ;;
-esac
-if [[ "$IS_WINDOWS" == "0" ]]; then
-  UNAME_S=$(uname -s 2>/dev/null || echo "")
-  case "$UNAME_S" in
-    MSYS*|MINGW*|CYGWIN*) IS_WINDOWS=1 ;;
-  esac
-fi
-
-if [[ "$IS_WINDOWS" == "1" ]]; then
-  echo "Windows builds are supported via scripts/build_picoquic_windows.ps1. This CMake helper is non-Windows only." >&2
-  exit 1
-fi
-
 CMAKE_ARGS=(
   "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
   "-DPICOQUIC_FETCH_PTLS=${FETCH_PTLS}"

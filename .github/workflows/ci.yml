@@ -148,39 +148,6 @@ jobs:
           echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
 
-      - name: Install build dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install pkgconfiglite strawberryperl -y
-
-          # Setup Perl for OpenSSL vendored build
-          $perlPaths = @(
-            "C:\Strawberry\perl\bin",
-            "C:\Program Files\Strawberry\perl\bin",
-            "${env:ProgramFiles}\Strawberry\perl\bin"
-          )
-
-          foreach ($path in $perlPaths) {
-            $exe = Join-Path $path "perl.exe"
-            if (Test-Path $exe) {
-              $env:Path = "$path;$env:Path"
-              echo "PATH=$path`;$env:Path" >> $env:GITHUB_ENV
-              echo "PERL=$exe" >> $env:GITHUB_ENV
-              Write-Host "Found Strawberry Perl at $path"
-
-              # Install Locale::Maketext::Simple if needed
-              $moduleCheck = & $exe -e "use Locale::Maketext::Simple; print 'OK'" 2>&1
-              if ($LASTEXITCODE -ne 0) {
-                $cpanmExe = Join-Path $path "cpanm.bat"
-                if (Test-Path $cpanmExe) {
-                  & $cpanmExe --notest Locale::Maketext::Simple 2>&1 | Out-String | Write-Host
-                }
-              }
-              break
-            }
-          }
-
       - name: Build picoquic with upstream Windows flow
         if: runner.os == 'Windows'
         shell: pwsh

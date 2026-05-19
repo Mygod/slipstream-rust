@@ -86,10 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let openssl_paths = resolve_openssl_paths();
-    let host = env::var("HOST").unwrap_or_default();
     let target = env::var("TARGET").unwrap_or_default();
     let is_windows = target.contains("windows") || target.contains("pc-windows");
-    let host_is_windows = host.contains("windows") || host.contains("pc-windows");
     let auto_build = env_flag("PICOQUIC_AUTO_BUILD", true);
     let openssl_static = cfg!(feature = "openssl-static") || env_flag("OPENSSL_STATIC", false);
     let explicit_picoquic_include = env::var_os("PICOQUIC_INCLUDE_DIR").is_some();
@@ -98,17 +96,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut picoquic_include_dir = locate_picoquic_include_dir();
     let mut picoquic_lib_dir = locate_picoquic_lib_dir();
     let mut picotls_include_dir = locate_picotls_include_dir();
-
-    if is_windows && target != "x86_64-pc-windows-msvc" {
-        return Err("Windows builds are only supported for x86_64-pc-windows-msvc.".into());
-    }
-
-    if is_windows && !host_is_windows {
-        return Err(
-            "Windows targets are only supported from a Windows host. Cross-building picoquic/picotls from Linux is unsupported in this repo."
-                .into(),
-        );
-    }
 
     if is_windows
         && auto_build
