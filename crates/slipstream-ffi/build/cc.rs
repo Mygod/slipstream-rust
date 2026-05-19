@@ -124,7 +124,7 @@ pub(crate) fn compile_cc(
             .arg(format!("/Fo:{}", output.display()))
             .arg(source)
             .arg("/D_WINDOWS");
-        if target.contains("x86_64") {
+        if target.contains("x86_64") || target.contains("aarch64") {
             cmd.arg("/D_WINDOWS64");
         }
         cmd.arg(format!("/I{}", picoquic_include_dir.display()));
@@ -135,7 +135,7 @@ pub(crate) fn compile_cc(
         }
         if is_windows {
             cmd.arg("-D_WINDOWS");
-            if target.contains("x86_64") {
+            if target.contains("x86_64") || target.contains("aarch64") {
                 cmd.arg("-D_WINDOWS64");
             }
         }
@@ -166,7 +166,7 @@ pub(crate) fn compile_cc_with_includes(
             .arg(format!("/Fo:{}", output.display()))
             .arg(source)
             .arg("/D_WINDOWS");
-        if target.contains("x86_64") {
+        if target.contains("x86_64") || target.contains("aarch64") {
             cmd.arg("/D_WINDOWS64");
         }
         for dir in include_dirs {
@@ -179,7 +179,7 @@ pub(crate) fn compile_cc_with_includes(
         }
         if is_windows {
             cmd.arg("-D_WINDOWS");
-            if target.contains("x86_64") {
+            if target.contains("x86_64") || target.contains("aarch64") {
                 cmd.arg("-D_WINDOWS64");
             }
         }

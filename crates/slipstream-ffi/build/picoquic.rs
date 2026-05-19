@@ -94,7 +94,7 @@ pub(crate) fn locate_picoquic_include_dir() -> Option<PathBuf> {
     None
 }
 
-pub(crate) fn locate_picoquic_lib_dir(is_windows: bool) -> Option<PathBuf> {
+pub(crate) fn locate_picoquic_lib_dir(is_windows: bool, target: &str) -> Option<PathBuf> {
     if let Ok(dir) = env::var("PICOQUIC_LIB_DIR") {
         let candidate = PathBuf::from(dir);
         if has_picoquic_libs(&candidate) {
@@ -105,7 +105,7 @@ pub(crate) fn locate_picoquic_lib_dir(is_windows: bool) -> Option<PathBuf> {
     if let Ok(dir) = env::var("PICOQUIC_BUILD_DIR") {
         let build_dir = PathBuf::from(&dir);
         if is_windows {
-            for candidate in windows_stage_candidates(&build_dir) {
+            for candidate in windows_stage_candidates(&build_dir, target) {
                 if has_picoquic_libs(&candidate) {
                     return Some(candidate);
                 }
@@ -123,7 +123,7 @@ pub(crate) fn locate_picoquic_lib_dir(is_windows: bool) -> Option<PathBuf> {
     if let Some(root) = locate_repo_root() {
         let build_dir = root.join(".picoquic-build");
         if is_windows {
-            for candidate in windows_stage_candidates(&build_dir) {
+            for candidate in windows_stage_candidates(&build_dir, target) {
                 if has_picoquic_libs(&candidate) {
                     return Some(candidate);
                 }
@@ -251,10 +251,15 @@ fn has_picotls_header(dir: &Path) -> bool {
     dir.join("picotls.h").exists()
 }
 
-fn windows_stage_candidates(dir: &Path) -> [PathBuf; 2] {
-    [
-        dir.join("windows").join("x64").join("Release"),
-        dir.join("x64").join("Release"),
+fn windows_stage_candidates(dir: &Path, target: &str) -> Vec<PathBuf> {
+    let preferred_platform = if target.contains("aarch64") {
+        "ARM64"
+    } else {
+        "x64"
+    };
+    vec![
+        dir.join("windows").join(preferred_platform).join("Release"),
+        dir.join(preferred_platform).join("Release"),
     ]
 }
 

@@ -92,6 +92,10 @@ function Get-OpenSslStaticLibraryPair {
         @{
             Ssl = "libssl_static.lib"
             Crypto = "libcrypto_static.lib"
+        },
+        @{
+            Ssl = "libssl.lib"
+            Crypto = "libcrypto.lib"
         }
     )
 
@@ -200,6 +204,16 @@ function Get-OpenSslLayout {
         "C:\OpenSSL-Win64",
         "C:\OpenSSL"
     )
+    $vcpkgTriplet = if ($Platform -ieq "ARM64") {
+        "arm64-windows-static-md"
+    } else {
+        "x64-windows-static-md"
+    }
+    foreach ($path in @($env:VCPKG_INSTALLATION_ROOT, $env:VCPKG_ROOT, "C:\vcpkg")) {
+        if (![string]::IsNullOrWhiteSpace($path)) {
+            $opensslPaths += Join-Path $path "installed\$vcpkgTriplet"
+        }
+    }
 
     foreach ($path in $opensslPaths) {
         if (!(Test-Path $path)) {
@@ -268,6 +282,124 @@ function Initialize-OpenSslStage {
     Write-Host "OpenSSL libraries: ${sslName}, ${cryptoName}"
 }
 
+function Export-PicoquicStage {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PicoquicDir,
+        [Parameter(Mandatory = $true)]
+        [string]$PicotlsIncludeDir,
+        [Parameter(Mandatory = $true)]
+        [string]$StageDir
+    )
+
+    Export-EnvValue -Name "PICOQUIC_INCLUDE_DIR" -Value (Join-Path $PicoquicDir "picoquic")
+    Export-EnvValue -Name "PICOQUIC_LIB_DIR" -Value $StageDir
+    Export-EnvValue -Name "PICOTLS_INCLUDE_DIR" -Value $PicotlsIncludeDir
+}
+
+function Get-CMakeLibraryPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDir,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Names,
+        [Parameter(Mandatory = $true)]
+        [string]$Configuration
+    )
+
+    foreach ($name in $Names) {
+        $foundLibraries = Get-ChildItem -Path $BuildDir -Filter $name -Recurse -File |
+            Where-Object { $_.FullName -match "\\$Configuration\\" } |
+            Sort-Object FullName
+        if ($foundLibraries) {
+            return $foundLibraries[0].FullName
+        }
+    }
+
+    return $null
+}
+
+function Copy-CMakeLibrary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDir,
+        [Parameter(Mandatory = $true)]
+        [string]$StageDir,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Names,
+        [Parameter(Mandatory = $true)]
+        [string]$Configuration,
+        [switch]$Required
+    )
+
+    $libPath = Get-CMakeLibraryPath -BuildDir $BuildDir -Names $Names -Configuration $Configuration
+    if (!$libPath) {
+        if ($Required) {
+            throw "Missing expected CMake library. Checked names: $($Names -join ', ')"
+        }
+        return
+    }
+    Copy-Item -Force $libPath $StageDir
+}
+
+function Invoke-CMakePicoquicBuild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PicoquicDir,
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDir,
+        [Parameter(Mandatory = $true)]
+        [string]$StageDir,
+        [Parameter(Mandatory = $true)]
+        [string]$OpenSslStageDir,
+        [Parameter(Mandatory = $true)]
+        [string]$Configuration,
+        [Parameter(Mandatory = $true)]
+        [string]$Platform
+    )
+
+    $cmakeArgs = @(
+        "-S", $PicoquicDir,
+        "-B", $BuildDir,
+        "-G", "Visual Studio 17 2022",
+        "-A", $Platform,
+        "-DPICOQUIC_FETCH_PTLS=ON",
+        "-DBUILD_DEMO=OFF",
+        "-DBUILD_HTTP=OFF",
+        "-DBUILD_LOGLIB=OFF",
+        "-DBUILD_LOGREADER=OFF",
+        "-Dpicoquic_BUILD_TESTS=OFF",
+        "-DOPENSSL_ROOT_DIR=$OpenSslStageDir",
+        "-DOPENSSL_USE_STATIC_LIBS=ON",
+        "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+    )
+    & cmake @cmakeArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "CMake configure failed for picoquic"
+    }
+    & cmake --build $BuildDir --config $Configuration --target picoquic-core
+    if ($LASTEXITCODE -ne 0) {
+        throw "CMake build failed for picoquic"
+    }
+
+    $picotlsIncludeDir = Join-Path $BuildDir "_deps\picotls-src\include"
+    if (!(Test-Path $picotlsIncludeDir)) {
+        throw "CMake picotls include directory not found at $picotlsIncludeDir"
+    }
+
+    New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
+    Copy-CMakeLibrary -BuildDir $BuildDir -StageDir $StageDir -Names @("picoquic-core.lib", "picoquic.lib") -Configuration $Configuration -Required
+    Copy-CMakeLibrary -BuildDir $BuildDir -StageDir $StageDir -Names @("picotls-core.lib") -Configuration $Configuration -Required
+    Copy-CMakeLibrary -BuildDir $BuildDir -StageDir $StageDir -Names @("picotls-openssl.lib") -Configuration $Configuration -Required
+    Copy-CMakeLibrary -BuildDir $BuildDir -StageDir $StageDir -Names @("picotls-minicrypto.lib") -Configuration $Configuration -Required
+    Copy-CMakeLibrary -BuildDir $BuildDir -StageDir $StageDir -Names @("picotls-fusion.lib") -Configuration $Configuration
+    Copy-CMakeLibrary -BuildDir $BuildDir -StageDir $StageDir -Names @("picotls-minicrypto-deps.lib") -Configuration $Configuration
+    Copy-CMakeLibrary -BuildDir $BuildDir -StageDir $StageDir -Names @("cifra.lib") -Configuration $Configuration
+    Copy-CMakeLibrary -BuildDir $BuildDir -StageDir $StageDir -Names @("microecc.lib") -Configuration $Configuration
+    New-Item -ItemType File -Force -Path (Join-Path $StageDir "picotls-minicrypto-deps-embedded.marker") | Out-Null
+    Export-PicoquicStage -PicoquicDir $PicoquicDir -PicotlsIncludeDir $picotlsIncludeDir -StageDir $StageDir
+}
+
 if (!$IsWindows) {
     throw "scripts/build_picoquic_windows.ps1 must be run on a Windows host."
 }
@@ -310,6 +442,29 @@ if ([string]::IsNullOrWhiteSpace($WindowsSdk)) {
 
 $opensslLayout = Get-OpenSslLayout
 Initialize-OpenSslStage -Layout $opensslLayout -StageDir $OpenSslStageDir
+
+if ($Platform -ieq "ARM64") {
+    $cmakeBuildDir = Join-Path (Split-Path -Parent $StageDir) "cmake"
+    Invoke-CMakePicoquicBuild `
+        -PicoquicDir $PicoquicDir `
+        -BuildDir $cmakeBuildDir `
+        -StageDir $StageDir `
+        -OpenSslStageDir $OpenSslStageDir `
+        -Configuration $Configuration `
+        -Platform $Platform
+
+    Get-ChildItem -Path $StageDir -Filter "*.lib" |
+        Sort-Object Name |
+        Select-Object Name, FullName |
+        Format-Table -AutoSize |
+        Out-String |
+        Write-Host
+
+    Write-Host "Staged Windows picoquic artifacts in $StageDir"
+    Write-Host "picoquic headers: $(Join-Path $PicoquicDir 'picoquic')"
+    Write-Host "picotls headers: $env:PICOTLS_INCLUDE_DIR"
+    return
+}
 
 if (!(Test-Path $PicotlsDir)) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PicotlsDir) | Out-Null
@@ -410,6 +565,11 @@ foreach ($lib in $requiredLibs) {
     }
     Copy-Item -Force $libPath $StageDir
 }
+
+Export-PicoquicStage `
+    -PicoquicDir $PicoquicDir `
+    -PicotlsIncludeDir (Join-Path $PicotlsDir "include") `
+    -StageDir $StageDir
 
 Get-ChildItem -Path $StageDir -Filter "*.lib" |
     Sort-Object Name |

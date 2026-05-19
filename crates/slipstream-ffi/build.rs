@@ -94,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let explicit_picoquic_lib = env::var_os("PICOQUIC_LIB_DIR").is_some();
     let explicit_picoquic_include_lib = explicit_picoquic_include || explicit_picoquic_lib;
     let mut picoquic_include_dir = locate_picoquic_include_dir();
-    let mut picoquic_lib_dir = locate_picoquic_lib_dir(is_windows);
+    let mut picoquic_lib_dir = locate_picoquic_lib_dir(is_windows, &target);
     let mut picotls_include_dir = locate_picotls_include_dir();
 
     if is_windows
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         build_picoquic(&openssl_paths, &target)?;
         picoquic_include_dir = locate_picoquic_include_dir();
-        picoquic_lib_dir = locate_picoquic_lib_dir(is_windows);
+        picoquic_lib_dir = locate_picoquic_lib_dir(is_windows, &target);
         picotls_include_dir = locate_picotls_include_dir();
     }
 
@@ -209,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let picoquic_libs = resolve_picoquic_libs(&picoquic_lib_dir)
         .ok_or_else(|| missing_picoquic_libs_message(is_windows).to_string())?;
-    if is_windows && !has_windows_minicrypto_support_libs(&picoquic_libs.libs) {
+    if is_windows && !has_windows_minicrypto_support_libs(&picoquic_lib_dir, &picoquic_libs.libs) {
         return Err(
             "Missing Windows picotls dependency libraries. Provide upstream cifra.lib and microecc.lib (preferred) or picotls-minicrypto-deps.lib in PICOQUIC_LIB_DIR."
                 .into(),
@@ -336,8 +336,11 @@ fn add_parent_dir(dirs: &mut Vec<PathBuf>, path: &Path) {
     }
 }
 
-fn has_windows_minicrypto_support_libs(libs: &[&str]) -> bool {
+fn has_windows_minicrypto_support_libs(dir: &Path, libs: &[&str]) -> bool {
     if !has_any_lib(libs, &["picotls_minicrypto", "picotls-minicrypto"]) {
+        return true;
+    }
+    if dir.join("picotls-minicrypto-deps-embedded.marker").exists() {
         return true;
     }
 
