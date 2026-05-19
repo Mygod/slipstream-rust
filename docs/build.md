@@ -46,6 +46,17 @@ Windows binary builds are supported in GitHub Actions for
 CMake, stages static OpenSSL libraries, and exports the Cargo environment
 through `GITHUB_ENV`.
 
+For manual Windows builds, run the helper for the target platform before the
+matching Cargo build:
+
+```
+pwsh -File ./scripts/build_picoquic_windows.ps1
+cargo build -p slipstream-client -p slipstream-server --target x86_64-pc-windows-msvc
+
+pwsh -File ./scripts/build_picoquic_windows.ps1 -Platform ARM64
+cargo build -p slipstream-client -p slipstream-server --target aarch64-pc-windows-msvc
+```
+
 Other Windows build arrangements are not blocked when `PICOQUIC_INCLUDE_DIR`,
 `PICOQUIC_LIB_DIR`, and `PICOTLS_INCLUDE_DIR` point at compatible prebuilt
 artifacts, but CI only exercises the two Windows MSVC targets above.
