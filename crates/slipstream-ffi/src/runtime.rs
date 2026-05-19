@@ -9,9 +9,6 @@ use crate::picoquic::{
     picoquic_stop_sending, slipstream_take_stateless_packet_for_cid, SockaddrStorage,
     PICOQUIC_MAX_PACKET_SIZE,
 };
-#[cfg(windows)]
-use libc::{c_char, c_int, c_ulong, size_t};
-#[cfg(not(windows))]
 use libc::{c_char, c_int, c_ulong, size_t};
 use slipstream_core::tcp::stream_write_buffer_bytes;
 use std::ffi::CStr;

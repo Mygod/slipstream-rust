@@ -46,7 +46,7 @@ function Invoke-MSBuildProject {
         [string]$WindowsSdk
     )
 
-    $args = @(
+    $msbuildArgs = @(
         "/p:Configuration=$Configuration",
         "/p:Platform=$Platform",
         "/p:PlatformToolset=$PlatformToolset",
@@ -54,10 +54,10 @@ function Invoke-MSBuildProject {
         "/m"
     )
     if (![string]::IsNullOrWhiteSpace($Target)) {
-        $args += "/t:$Target"
+        $msbuildArgs += "/t:$Target"
     }
-    $args += $Project
-    & $MsBuild @args
+    $msbuildArgs += $Project
+    & $MsBuild @msbuildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "MSBuild failed for $Project"
     }
