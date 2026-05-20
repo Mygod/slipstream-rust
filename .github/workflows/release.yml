@@ -212,12 +212,6 @@ jobs:
             exit 1
           fi
 
-          immutable_enabled="$(gh api "repos/${GITHUB_REPOSITORY}/immutable-releases" -H X-GitHub-Api-Version:2026-03-10 --jq '.enabled')"
-          if [[ "${immutable_enabled}" != "true" ]]; then
-            echo "Repository immutable releases are not enabled." >&2
-            exit 1
-          fi
-
           gh release create "${version}" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${target}" \
