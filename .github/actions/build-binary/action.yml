@@ -132,7 +132,7 @@ runs:
       run: ./scripts/verify_windows_artifact_deps.ps1 -DistDir dist -TargetPlatform "${{ inputs.windows-platform }}"
 
     - name: Upload binaries
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
         path: |

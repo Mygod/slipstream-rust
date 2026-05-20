@@ -334,7 +334,7 @@ jobs:
 
       - name: Upload benchmark logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-${{ matrix.name }}-logs
           path: .interop/${{ matrix.artifact_glob }}
@@ -371,7 +371,7 @@ jobs:
 
       - name: Upload memory logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-rust-rust-mem-logs
           path: .interop/mem-rust-rust-*.csv
