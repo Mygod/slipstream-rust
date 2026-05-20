@@ -111,7 +111,7 @@ jobs:
 
   build-binaries-macos-arm64:
     name: Build Binaries (macos-arm64)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 40
     steps:
       - name: Check out slipstream-rust
