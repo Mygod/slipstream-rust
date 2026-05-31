@@ -1,6 +1,7 @@
 use crate::openssl::OpenSslPaths;
 use crate::util::locate_repo_root;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -31,9 +32,16 @@ pub(crate) fn build_picoquic(
     let mut command = Command::new(script);
     command
         .env("PICOQUIC_DIR", picoquic_dir)
-        .env("PICOQUIC_BUILD_DIR", build_dir)
+        .env("PICOQUIC_BUILD_DIR", &build_dir)
         .env("PICOQUIC_TARGET", target);
     if target.contains("android") {
+        let empty_pkg_config_dir = build_dir.join("empty-pkgconfig");
+        fs::create_dir_all(&empty_pkg_config_dir)?;
+        command
+            .env("CARGO_FEATURE_PICOQUIC_MINIMAL_BUILD", "1")
+            .env("PKG_CONFIG_PATH", "")
+            .env("PKG_CONFIG_LIBDIR", empty_pkg_config_dir)
+            .env("PKG_CONFIG_SYSROOT_DIR", "");
         if let Ok(value) = env::var("ANDROID_NDK_HOME") {
             command.env("ANDROID_NDK_HOME", value);
         }
@@ -46,11 +54,19 @@ pub(crate) fn build_picoquic(
     }
     if let Some(root) = &openssl_paths.root {
         command.env("OPENSSL_ROOT_DIR", root);
+
+        if let Some(crypto) = find_openssl_library(root, "crypto") {
+            command.env("OPENSSL_CRYPTO_LIBRARY", crypto);
+        }
+        if let Some(ssl) = find_openssl_library(root, "ssl") {
+            command.env("OPENSSL_SSL_LIBRARY", ssl);
+        }
     }
     let prefer_static_openssl = cfg!(feature = "openssl-static");
+    let vendored_openssl = cfg!(feature = "openssl-vendored");
     let openssl_no_vendor = env::var_os("OPENSSL_NO_VENDOR").is_some();
     let explicit_static = env::var_os("OPENSSL_USE_STATIC_LIBS").is_some();
-    if prefer_static_openssl && !openssl_no_vendor && !explicit_static {
+    if (prefer_static_openssl || vendored_openssl) && !openssl_no_vendor && !explicit_static {
         command.env("OPENSSL_USE_STATIC_LIBS", "TRUE");
     }
     if let Some(include) = &openssl_paths.include {
@@ -249,6 +265,17 @@ fn has_picoquic_internal_header(dir: &Path) -> bool {
 
 fn has_picotls_header(dir: &Path) -> bool {
     dir.join("picotls.h").exists()
+}
+
+fn find_openssl_library(root: &Path, stem: &str) -> Option<PathBuf> {
+    let candidates = [
+        root.join("lib").join(format!("lib{stem}.a")),
+        root.join("lib64").join(format!("lib{stem}.a")),
+        root.join("lib").join(format!("lib{stem}.so")),
+        root.join("lib64").join(format!("lib{stem}.so")),
+    ];
+
+    candidates.into_iter().find(|candidate| candidate.exists())
 }
 
 fn windows_stage_candidates(dir: &Path, target: &str) -> Vec<PathBuf> {
