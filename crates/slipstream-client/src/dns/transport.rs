@@ -2,15 +2,18 @@ use crate::error::ClientError;
 use slipstream_core::net::is_transient_udp_error;
 use std::io::{Error, ErrorKind};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},
-    TcpStream, UdpSocket,
+    TcpSocket, TcpStream, UdpSocket,
 };
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tracing::warn;
 
 const DNS_TCP_MAX_MESSAGE_SIZE: usize = u16::MAX as usize;
+const DNS_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum TcpReadEvent {
     Packet(Vec<u8>),
@@ -184,8 +187,15 @@ impl TcpResolverTransport {
 async fn connect_tcp_resolver(
     resolver: SocketAddr,
 ) -> Result<(TcpStream, SocketAddr), ClientError> {
-    let stream = TcpStream::connect(resolver)
+    let socket = match resolver {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    }
+    .map_err(|err| ClientError::new(err.to_string()))?;
+    protect_tcp_socket(&socket)?;
+    let stream = timeout(DNS_TCP_CONNECT_TIMEOUT, socket.connect(resolver))
         .await
+        .map_err(|_| ClientError::new("DNS-over-TCP resolver connect timed out"))?
         .map_err(|err| ClientError::new(err.to_string()))?;
     stream
         .set_nodelay(true)
@@ -194,6 +204,22 @@ async fn connect_tcp_resolver(
         .local_addr()
         .map_err(|err| ClientError::new(err.to_string()))?;
     Ok((stream, local_addr))
+}
+
+#[cfg(target_os = "android")]
+fn protect_tcp_socket(socket: &TcpSocket) -> Result<(), ClientError> {
+    use std::os::fd::AsRawFd;
+
+    if crate::platform::protect_socket_fd(socket.as_raw_fd()) {
+        Ok(())
+    } else {
+        Err(ClientError::new("Android VPN socket protection failed"))
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn protect_tcp_socket(_socket: &TcpSocket) -> Result<(), ClientError> {
+    Ok(())
 }
 
 fn spawn_tcp_reader(mut reader: OwnedReadHalf) -> mpsc::UnboundedReceiver<TcpReadEvent> {

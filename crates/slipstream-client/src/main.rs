@@ -2,6 +2,7 @@ mod dns;
 mod error;
 mod pacing;
 mod pinning;
+mod platform;
 mod runtime;
 mod streams;
 
@@ -13,7 +14,7 @@ use slipstream_core::{
 use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec, ResolverTransport};
 use tokio::runtime::Builder;
 
-use runtime::run_client;
+use runtime::run_client_with_control;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -219,7 +220,7 @@ fn main() {
         .enable_time()
         .build()
         .expect("Failed to build Tokio runtime");
-    match runtime.block_on(run_client(&config)) {
+    match runtime.block_on(run_client_with_control(&config, None, None)) {
         Ok(code) => std::process::exit(code),
         Err(err) => exit_with_error("Client error", err, 1),
     }

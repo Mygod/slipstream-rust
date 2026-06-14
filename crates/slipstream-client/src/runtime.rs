@@ -35,6 +35,8 @@ use slipstream_ffi::{
     ResolverTransport,
 };
 use std::ffi::CString;
+use std::future::pending;
+use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
@@ -61,7 +63,12 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
     dropped
 }
 
-pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
+pub async fn run_client_with_control(
+    config: &ClientConfig<'_>,
+    mut shutdown_rx: Option<mpsc::UnboundedReceiver<()>>,
+    ready_tx: Option<std_mpsc::Sender<bool>>,
+) -> Result<i32, ClientError> {
+    report_ready(&ready_tx, false);
     let domain_len = config.domain.len();
     let mtu = compute_mtu(domain_len)?;
     let (mut dns_transport, peer_addr_mode) = match config.resolver_transport {
@@ -119,6 +126,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let mut reconnect_delay = Duration::from_millis(RECONNECT_SLEEP_MIN_MS);
 
     loop {
+        if shutdown_requested(&mut shutdown_rx) {
+            return Ok(0);
+        }
         let mut resolvers =
             resolve_resolvers(config.resolvers, mtu, config.debug_poll, peer_addr_mode)?;
         if resolvers.is_empty() {
@@ -220,8 +230,12 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
+        let mut ready_reported = false;
 
         loop {
+            if shutdown_requested(&mut shutdown_rx) {
+                return Ok(0);
+            }
             let current_time = unsafe { picoquic_current_time() };
             drain_commands(cnx, state_ptr, &mut command_rx);
             drain_stream_data(cnx, state_ptr);
@@ -232,6 +246,10 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
 
             let ready = unsafe { (*state_ptr).is_ready() };
             if ready {
+                if !ready_reported {
+                    report_ready(&ready_tx, true);
+                    ready_reported = true;
+                }
                 unsafe {
                     (*state_ptr).update_acceptor_limit(cnx);
                 }
@@ -301,6 +319,9 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     if let Some(command) = command {
                         handle_command(cnx, state_ptr, command);
                     }
+                }
+                _ = wait_for_shutdown(&mut shutdown_rx) => {
+                    return Ok(0);
                 }
                 _ = data_notify.notified() => {}
                 recv = dns_transport.recv_from(&mut recv_buf) => {
@@ -609,6 +630,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         unsafe {
             picoquic_close(cnx, 0);
         }
+        report_ready(&ready_tx, false);
 
         unsafe {
             (*state_ptr).reset_for_reconnect();
@@ -624,11 +646,39 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
         // Sleep in small chunks and drop commands that arrive while disconnected.
         let mut remaining_sleep = reconnect_delay;
         while remaining_sleep > Duration::ZERO {
+            if shutdown_requested(&mut shutdown_rx) {
+                return Ok(0);
+            }
             let chunk = remaining_sleep.min(Duration::from_millis(100));
             sleep(chunk).await;
             remaining_sleep -= chunk;
             let _ = drain_disconnected_commands(&mut command_rx);
         }
         reconnect_delay = (reconnect_delay * 2).min(Duration::from_millis(RECONNECT_SLEEP_MAX_MS));
+    }
+}
+
+fn report_ready(ready_tx: &Option<std_mpsc::Sender<bool>>, ready: bool) {
+    if let Some(ready_tx) = ready_tx {
+        let _ = ready_tx.send(ready);
+    }
+}
+
+fn shutdown_requested(shutdown_rx: &mut Option<mpsc::UnboundedReceiver<()>>) -> bool {
+    match shutdown_rx {
+        Some(rx) => match rx.try_recv() {
+            Ok(()) | Err(mpsc::error::TryRecvError::Disconnected) => true,
+            Err(mpsc::error::TryRecvError::Empty) => false,
+        },
+        None => false,
+    }
+}
+
+async fn wait_for_shutdown(shutdown_rx: &mut Option<mpsc::UnboundedReceiver<()>>) {
+    match shutdown_rx {
+        Some(rx) => {
+            let _ = rx.recv().await;
+        }
+        None => pending::<()>().await,
     }
 }

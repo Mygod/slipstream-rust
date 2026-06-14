@@ -20,7 +20,7 @@ pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
 }
 
 pub(crate) async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {
-    bind_first_resolved_with_ipv4_fallback(
+    let socket = bind_first_resolved_with_ipv4_fallback(
         "::",
         0,
         |addr| bind_udp_socket_addr(addr, "UDP socket"),
@@ -28,7 +28,9 @@ pub(crate) async fn bind_udp_socket() -> Result<TokioUdpSocket, ClientError> {
     )
     .await
     .map(|(socket, _)| socket)
-    .map_err(map_io)
+    .map_err(map_io)?;
+    protect_udp_socket(&socket)?;
+    Ok(socket)
 }
 
 pub(crate) async fn bind_tcp_listener(
@@ -40,4 +42,20 @@ pub(crate) async fn bind_tcp_listener(
 
 pub(crate) fn map_io(err: std::io::Error) -> ClientError {
     ClientError::new(err.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn protect_udp_socket(socket: &TokioUdpSocket) -> Result<(), ClientError> {
+    use std::os::fd::AsRawFd;
+
+    if crate::platform::protect_socket_fd(socket.as_raw_fd()) {
+        Ok(())
+    } else {
+        Err(ClientError::new("Android VPN socket protection failed"))
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn protect_udp_socket(_socket: &TokioUdpSocket) -> Result<(), ClientError> {
+    Ok(())
 }

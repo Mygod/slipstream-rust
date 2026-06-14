@@ -7,8 +7,13 @@ license = "Apache-2.0"
 repository = "https://github.com/Mygod/slipstream-rust"
 readme = "../../README.md"
 
+[lib]
+name = "slipstream"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 clap = { workspace = true }
+jni = "0.21"
 libc = "0.2"
 openssl = "0.10"
 socket2 = "0.6"
