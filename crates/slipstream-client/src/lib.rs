@@ -12,7 +12,7 @@ use jni::{JNIEnv, JavaVM};
 use slipstream_core::{normalize_domain, parse_host_port_parts, AddressKind};
 use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec, ResolverTransport};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -22,9 +22,11 @@ use tokio::sync::mpsc;
 struct ClientHandle {
     stop_tx: mpsc::UnboundedSender<()>,
     thread: JoinHandle<()>,
+    generation: u64,
 }
 
 static CLIENT: OnceLock<Mutex<Option<ClientHandle>>> = OnceLock::new();
+static CLIENT_GENERATION: AtomicU64 = AtomicU64::new(0);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
@@ -48,6 +50,22 @@ fn set_last_error(message: impl Into<String>) {
 fn clear_last_error() {
     if let Ok(mut last_error) = last_error_slot().lock() {
         *last_error = None;
+    }
+}
+
+fn is_current_generation(generation: u64) -> bool {
+    CLIENT_GENERATION.load(Ordering::SeqCst) == generation
+}
+
+fn store_running(generation: u64, value: bool) {
+    if is_current_generation(generation) {
+        RUNNING.store(value, Ordering::SeqCst);
+    }
+}
+
+fn store_ready(generation: u64, value: bool) {
+    if is_current_generation(generation) {
+        READY.store(value, Ordering::SeqCst);
     }
 }
 
@@ -141,11 +159,12 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
     let (stop_tx, stop_rx) = mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = std_mpsc::channel();
     let (started_tx, started_rx) = std_mpsc::channel();
+    let generation = CLIENT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let thread = match thread::Builder::new()
         .name("slipstream-client".to_string())
         .spawn(move || {
-            RUNNING.store(true, Ordering::SeqCst);
-            READY.store(false, Ordering::SeqCst);
+            store_running(generation, true);
+            store_ready(generation, false);
             let _ = started_tx.send(());
             let runtime = match Builder::new_current_thread()
                 .enable_io()
@@ -155,7 +174,7 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
                 Ok(runtime) => runtime,
                 Err(err) => {
                     set_last_error(format!("failed to build Tokio runtime: {}", err));
-                    RUNNING.store(false, Ordering::SeqCst);
+                    store_running(generation, false);
                     return;
                 }
             };
@@ -179,12 +198,16 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
             )) {
                 set_last_error(err.to_string());
             }
-            READY.store(false, Ordering::SeqCst);
-            RUNNING.store(false, Ordering::SeqCst);
+            store_ready(generation, false);
+            store_running(generation, false);
         }) {
         Ok(thread) => thread,
         Err(err) => {
             set_last_error(format!("failed to spawn Slipstream client thread: {}", err));
+            if is_current_generation(generation) {
+                RUNNING.store(false, Ordering::SeqCst);
+                READY.store(false, Ordering::SeqCst);
+            }
             return -10;
         }
     };
@@ -197,13 +220,17 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
 
     thread::spawn(move || {
         while let Ok(ready) = ready_rx.recv() {
-            READY.store(ready, Ordering::SeqCst);
+            store_ready(generation, ready);
         }
-        READY.store(false, Ordering::SeqCst);
+        store_ready(generation, false);
     });
 
     if let Ok(mut client) = client_slot().lock() {
-        *client = Some(ClientHandle { stop_tx, thread });
+        *client = Some(ClientHandle {
+            stop_tx,
+            thread,
+            generation,
+        });
         0
     } else {
         set_last_error("failed to lock Slipstream client state");
@@ -258,6 +285,7 @@ fn stop_running_client() -> Result<(), String> {
         .lock()
         .map_err(|_| "failed to lock Slipstream client state".to_string())?
         .take();
+    let generation = handle.as_ref().map(|handle| handle.generation);
     if let Some(handle) = handle {
         let _ = handle.stop_tx.send(());
         let deadline = Instant::now() + STOP_JOIN_TIMEOUT;
@@ -270,8 +298,10 @@ fn stop_running_client() -> Result<(), String> {
             set_last_error("Slipstream client stop timed out; detached native thread");
         }
     }
-    RUNNING.store(false, Ordering::SeqCst);
-    READY.store(false, Ordering::SeqCst);
+    if generation.map_or(true, is_current_generation) {
+        RUNNING.store(false, Ordering::SeqCst);
+        READY.store(false, Ordering::SeqCst);
+    }
     Ok(())
 }
 
