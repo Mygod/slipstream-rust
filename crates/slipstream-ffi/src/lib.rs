@@ -21,6 +21,12 @@ pub struct ResolverSpec {
     pub mode: ResolverMode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolverTransport {
+    Udp,
+    Tcp,
+}
+
 #[derive(Debug)]
 pub struct ClientConfig<'a> {
     pub tcp_listen_host: &'a str,
@@ -30,6 +36,7 @@ pub struct ClientConfig<'a> {
     pub cert: Option<&'a str>,
     pub congestion_control: Option<&'a str>,
     pub gso: bool,
+    pub resolver_transport: ResolverTransport,
     pub keep_alive_interval: usize,
     pub debug_poll: bool,
     pub debug_streams: bool,

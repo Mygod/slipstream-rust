@@ -73,6 +73,18 @@ cargo run -p slipstream-client -- \
   --domain example.com
 ```
 
+Use DNS-over-TCP between the client and resolver when UDP is shaped or blocked:
+
+```
+cargo run -p slipstream-client -- \
+  --tcp-listen-port 7000 \
+  --resolver 1.1.1.1:53 \
+  --resolver-transport tcp \
+  --domain example.com
+```
+
+TCP resolver transport intentionally uses only the first resolver path.
+
 Note: You can also run the client against a resolver that forwards to the server. For local testing, see the interop docs.
 
 ## Production note: conntrack for UDP/53

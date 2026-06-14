@@ -5,12 +5,12 @@ mod pinning;
 mod runtime;
 mod streams;
 
-use clap::{parser::ValueSource, ArgGroup, CommandFactory, FromArgMatches, Parser};
+use clap::{parser::ValueSource, ArgGroup, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use slipstream_core::{
     cli::{exit_with_error, exit_with_message, init_logging, unwrap_or_exit},
     normalize_domain, parse_host_port, parse_host_port_parts, sip003, AddressKind, HostPort,
 };
-use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec};
+use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec, ResolverTransport};
 use tokio::runtime::Builder;
 
 use runtime::run_client;
@@ -58,6 +58,23 @@ struct Args {
     debug_poll: bool,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
+    #[arg(long = "resolver-transport", value_enum, default_value_t = ResolverTransportArg::Udp)]
+    resolver_transport: ResolverTransportArg,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ResolverTransportArg {
+    Udp,
+    Tcp,
+}
+
+impl From<ResolverTransportArg> for ResolverTransport {
+    fn from(value: ResolverTransportArg) -> Self {
+        match value {
+            ResolverTransportArg::Udp => ResolverTransport::Udp,
+            ResolverTransportArg::Tcp => ResolverTransport::Tcp,
+        }
+    }
 }
 
 fn main() {
@@ -100,8 +117,19 @@ fn main() {
         }
     };
 
+    let resolver_transport = if cli_provided(&matches, "resolver_transport") {
+        ResolverTransport::from(args.resolver_transport)
+    } else {
+        unwrap_or_exit(
+            parse_resolver_transport(&sip003_env.plugin_options),
+            "SIP003 env error",
+            2,
+        )
+        .unwrap_or_else(|| ResolverTransport::from(args.resolver_transport))
+    };
+
     let cli_has_resolvers = has_cli_resolvers(&matches);
-    let resolvers = if cli_has_resolvers {
+    let mut resolvers = if cli_has_resolvers {
         unwrap_or_exit(build_resolvers(&matches, true), "Resolver error", 2)
     } else {
         let resolver_options = unwrap_or_exit(
@@ -138,6 +166,7 @@ fn main() {
             }
         }
     };
+    apply_resolver_transport(&mut resolvers, resolver_transport);
 
     let congestion_control = if args.congestion_control.is_some() {
         args.congestion_control.clone()
@@ -180,6 +209,7 @@ fn main() {
         domain: &domain,
         cert: cert.as_deref(),
         keep_alive_interval: keep_alive_interval as usize,
+        resolver_transport,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
     };
@@ -344,6 +374,33 @@ fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<
     Ok(last)
 }
 
+fn parse_resolver_transport(
+    options: &[sip003::Sip003Option],
+) -> Result<Option<ResolverTransport>, String> {
+    let mut last = None;
+    for option in options {
+        if option.key == "resolver-transport" {
+            let value = option.value.trim();
+            last = Some(match value {
+                "udp" => ResolverTransport::Udp,
+                "tcp" => ResolverTransport::Tcp,
+                _ => return Err(format!("Invalid resolver-transport value: {}", value)),
+            });
+        }
+    }
+    Ok(last)
+}
+
+fn apply_resolver_transport(resolvers: &mut Vec<ResolverSpec>, transport: ResolverTransport) {
+    if transport == ResolverTransport::Tcp && resolvers.len() > 1 {
+        tracing::warn!(
+            "TCP resolver transport uses a single resolver; ignoring {} extra resolver(s)",
+            resolvers.len() - 1
+        );
+        resolvers.truncate(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +525,42 @@ mod tests {
         let parsed = parse_resolvers_from_options(&options).expect("options should parse");
         assert!(parsed.resolvers.is_empty());
         assert!(parsed.authoritative_remote);
+    }
+
+    #[test]
+    fn parses_plugin_resolver_transport() {
+        let options = vec![sip003::Sip003Option {
+            key: "resolver-transport".to_string(),
+            value: "tcp".to_string(),
+        }];
+        assert_eq!(
+            parse_resolver_transport(&options).expect("transport should parse"),
+            Some(ResolverTransport::Tcp)
+        );
+    }
+
+    #[test]
+    fn tcp_transport_keeps_only_first_resolver() {
+        let mut resolvers = vec![
+            ResolverSpec {
+                resolver: HostPort {
+                    host: "1.1.1.1".to_string(),
+                    port: 53,
+                    family: slipstream_core::AddressFamily::V4,
+                },
+                mode: ResolverMode::Recursive,
+            },
+            ResolverSpec {
+                resolver: HostPort {
+                    host: "2.2.2.2".to_string(),
+                    port: 53,
+                    family: slipstream_core::AddressFamily::V4,
+                },
+                mode: ResolverMode::Recursive,
+            },
+        ];
+        apply_resolver_transport(&mut resolvers, ResolverTransport::Tcp);
+        assert_eq!(resolvers.len(), 1);
+        assert_eq!(resolvers[0].resolver.host, "1.1.1.1");
     }
 }

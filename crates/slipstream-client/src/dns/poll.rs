@@ -1,15 +1,14 @@
 use crate::error::ClientError;
-use slipstream_core::net::is_transient_udp_error;
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_prepare_packet_ex, slipstream_request_poll,
 };
 use slipstream_ffi::{ClientConfig, ResolverMode};
 use std::collections::HashMap;
-use tokio::net::UdpSocket as TokioUdpSocket;
 
 use super::path::refresh_resolver_path;
 use super::resolver::{sockaddr_storage_to_socket_addr, PeerAddrMode, ResolverState};
+use super::transport::DnsTransport;
 
 const AUTHORITATIVE_POLL_TIMEOUT_US: u64 = 5_000_000;
 
@@ -32,7 +31,7 @@ pub(crate) fn expire_inflight_polls(inflight_poll_ids: &mut HashMap<u16, u64>, n
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_poll_queries(
     cnx: *mut picoquic_cnx_t,
-    udp: &TokioUdpSocket,
+    dns_transport: &mut DnsTransport,
     config: &ClientConfig<'_>,
     local_addr_storage: &mut slipstream_ffi::SockaddrStorage,
     dns_id: &mut u16,
@@ -104,8 +103,8 @@ pub(crate) async fn send_poll_queries(
 
         let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
         let dest = peer_addr_mode.canonicalize(dest);
-        if let Err(err) = udp.send_to(&packet, dest).await {
-            if is_transient_udp_error(&err) {
+        if let Err(err) = dns_transport.send_to(&packet, dest).await {
+            if dns_transport.is_transient_recv_error(&err) {
                 remaining_count = remaining_count.saturating_add(1);
                 *remaining = remaining_count;
                 break;

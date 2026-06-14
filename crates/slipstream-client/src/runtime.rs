@@ -9,7 +9,7 @@ use self::setup::{bind_tcp_listener, bind_udp_socket, compute_mtu, map_io};
 use crate::dns::{
     add_paths, expire_inflight_polls, handle_dns_response, maybe_report_debug,
     refresh_resolver_path, resolve_resolvers, resolver_mode_to_c, send_poll_queries,
-    sockaddr_storage_to_socket_addr, DnsResponseContext, PeerAddrMode,
+    sockaddr_storage_to_socket_addr, DnsResponseContext, DnsTransport, PeerAddrMode,
 };
 use crate::error::ClientError;
 use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
@@ -18,7 +18,6 @@ use crate::streams::{
     acceptor::ClientAcceptor, client_callback, drain_commands, drain_stream_data, handle_command,
     ClientState, Command,
 };
-use slipstream_core::net::is_transient_udp_error;
 use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
 use slipstream_ffi::{
     configure_quic_with_custom,
@@ -33,6 +32,7 @@ use slipstream_ffi::{
         PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
+    ResolverTransport,
 };
 use std::ffi::CString;
 use std::sync::Arc;
@@ -64,9 +64,25 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
 pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
     let domain_len = config.domain.len();
     let mtu = compute_mtu(domain_len)?;
-    let udp = bind_udp_socket().await?;
-    let udp_local_addr = udp.local_addr().map_err(map_io)?;
-    let peer_addr_mode = PeerAddrMode::from_local_addr(udp_local_addr);
+    let (mut dns_transport, peer_addr_mode) = match config.resolver_transport {
+        ResolverTransport::Udp => {
+            let udp = bind_udp_socket().await?;
+            let udp_local_addr = udp.local_addr().map_err(map_io)?;
+            (
+                DnsTransport::udp(udp),
+                PeerAddrMode::from_local_addr(udp_local_addr),
+            )
+        }
+        ResolverTransport::Tcp => {
+            let peer_addr_mode = PeerAddrMode::Native;
+            let resolvers =
+                resolve_resolvers(config.resolvers, mtu, config.debug_poll, peer_addr_mode)?;
+            if resolvers.is_empty() {
+                return Err(ClientError::new("At least one resolver is required"));
+            }
+            (DnsTransport::tcp(resolvers[0].addr).await?, peer_addr_mode)
+        }
+    };
 
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let data_notify = Arc::new(Notify::new());
@@ -109,7 +125,8 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
             return Err(ClientError::new("At least one resolver is required"));
         }
 
-        let mut local_addr_storage = socket_addr_to_storage(udp_local_addr);
+        let mut local_addr_storage =
+            socket_addr_to_storage(dns_transport.local_addr().map_err(map_io)?);
 
         let current_time = unsafe { picoquic_current_time() };
         let quic = unsafe {
@@ -286,25 +303,40 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                     }
                 }
                 _ = data_notify.notified() => {}
-                recv = udp.recv_from(&mut recv_buf) => {
+                recv = dns_transport.recv_from(&mut recv_buf) => {
                     match recv {
                         Ok((size, peer)) => {
-                            let mut response_ctx = DnsResponseContext {
-                                quic,
-                                local_addr_storage: &local_addr_storage,
-                                peer_addr_mode,
-                                resolvers: &mut resolvers,
-                            };
-                            handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
+                            local_addr_storage =
+                                socket_addr_to_storage(dns_transport.local_addr().map_err(map_io)?);
+                            handle_dns_response(
+                                &recv_buf[..size],
+                                peer,
+                                &mut DnsResponseContext {
+                                    quic,
+                                    local_addr_storage: &local_addr_storage,
+                                    peer_addr_mode,
+                                    resolvers: &mut resolvers,
+                                },
+                            )?;
                             for _ in 1..packet_loop_recv_max {
-                                match udp.try_recv_from(&mut recv_buf) {
-                                    Ok((size, peer)) => {
-                                        handle_dns_response(&recv_buf[..size], peer, &mut response_ctx)?;
+                                match dns_transport.try_recv_from(&mut recv_buf) {
+                                    Ok(Some((size, peer))) => {
+                                        local_addr_storage =
+                                            socket_addr_to_storage(dns_transport.local_addr().map_err(map_io)?);
+                                        handle_dns_response(
+                                            &recv_buf[..size],
+                                            peer,
+                                            &mut DnsResponseContext {
+                                                quic,
+                                                local_addr_storage: &local_addr_storage,
+                                                peer_addr_mode,
+                                                resolvers: &mut resolvers,
+                                            },
+                                        )?;
                                     }
-                                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
-                                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                                    Ok(None) => break,
                                     Err(err) => {
-                                        if is_transient_udp_error(&err) {
+                                        if dns_transport.is_transient_recv_error(&err) {
                                             break;
                                         }
                                         return Err(map_io(err));
@@ -313,7 +345,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                             }
                         }
                         Err(err) => {
-                            if !is_transient_udp_error(&err) {
+                            if !dns_transport.is_transient_recv_error(&err) {
                                 return Err(map_io(err));
                             }
                         }
@@ -407,8 +439,8 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                 let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
                 let dest = peer_addr_mode.canonicalize(dest);
                 local_addr_storage = addr_from;
-                if let Err(err) = udp.send_to(&packet, dest).await {
-                    if !is_transient_udp_error(&err) {
+                if let Err(err) = dns_transport.send_to(&packet, dest).await {
+                    if !dns_transport.is_transient_recv_error(&err) {
                         return Err(map_io(err));
                     }
                 }
@@ -482,7 +514,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                             let mut to_send = poll_deficit.min(burst_max);
                             send_poll_queries(
                                 cnx,
-                                &udp,
+                                &mut dns_transport,
                                 config,
                                 &mut local_addr_storage,
                                 &mut dns_id,
@@ -502,7 +534,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                                 let mut to_send = burst_max;
                                 send_poll_queries(
                                     cnx,
-                                    &udp,
+                                    &mut dns_transport,
                                     config,
                                     &mut local_addr_storage,
                                     &mut dns_id,
@@ -520,7 +552,7 @@ pub async fn run_client(config: &ClientConfig<'_>) -> Result<i32, ClientError> {
                                 let mut pending = resolver.pending_polls;
                                 send_poll_queries(
                                     cnx,
-                                    &udp,
+                                    &mut dns_transport,
                                     config,
                                     &mut local_addr_storage,
                                     &mut dns_id,

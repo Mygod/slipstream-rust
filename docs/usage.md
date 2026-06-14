@@ -18,6 +18,7 @@ Common flags:
 - --congestion-control <bbr|dcubic> (optional; overrides congestion control for all resolvers)
 - --cert <PATH> (optional; PEM-encoded server certificate for strict leaf pinning)
 - --authoritative <IP:PORT> (repeatable; mark a resolver path as authoritative and use pacing-based polling)
+- --resolver-transport <udp|tcp> (default: udp; TCP mode uses the first resolver only)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <MILLISECONDS> (default: 400)
 
@@ -41,6 +42,7 @@ Notes:
 - The pinned certificate must match the server leaf exactly; CA bundles are not supported.
 - Resolver order follows the CLI; the first resolver becomes path 0.
 - Resolver addresses must be unique; duplicates are rejected.
+- `--resolver-transport tcp` keeps one persistent DNS-over-TCP connection to the first resolver and ignores any additional resolver paths.
 - --authoritative keeps the DNS wire format unchanged and remains C interop safe.
 - Use --authoritative only when you control the resolver/server path and can absorb high QPS bursts.
 - When --congestion-control is omitted, authoritative paths default to bbr and recursive paths default to dcubic.
