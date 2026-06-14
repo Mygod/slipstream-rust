@@ -15,7 +15,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc as std_mpsc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
 
@@ -28,6 +28,8 @@ static CLIENT: OnceLock<Mutex<Option<ClientHandle>>> = OnceLock::new();
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+const STOP_JOIN_POLL: Duration = Duration::from_millis(25);
 
 fn client_slot() -> &'static Mutex<Option<ClientHandle>> {
     CLIENT.get_or_init(|| Mutex::new(None))
@@ -79,9 +81,11 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
     resolver_transport: JString<'_>,
 ) -> jint {
     clear_last_error();
-    if stop_running_client().is_err() {
+    if RUNNING.load(Ordering::SeqCst) {
+        set_last_error("Slipstream client is already running");
         return -10;
     }
+    let _ = stop_running_client();
 
     let domain = match java_string(&mut env, &domain)
         .and_then(|value| normalize_domain(&value).map_err(|err| err.to_string()))
@@ -256,7 +260,15 @@ fn stop_running_client() -> Result<(), String> {
         .take();
     if let Some(handle) = handle {
         let _ = handle.stop_tx.send(());
-        let _ = handle.thread.join();
+        let deadline = Instant::now() + STOP_JOIN_TIMEOUT;
+        while !handle.thread.is_finished() && Instant::now() < deadline {
+            thread::sleep(STOP_JOIN_POLL);
+        }
+        if handle.thread.is_finished() {
+            let _ = handle.thread.join();
+        } else {
+            set_last_error("Slipstream client stop timed out; detached native thread");
+        }
     }
     RUNNING.store(false, Ordering::SeqCst);
     READY.store(false, Ordering::SeqCst);
