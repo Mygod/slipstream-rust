@@ -7,7 +7,7 @@ use crate::streams::{ClientState, PathEvent};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_get_default_path_quality, picoquic_get_path_addr,
     picoquic_get_path_quality, slipstream_get_path_id_from_unique, slipstream_set_path_ack_delay,
-    slipstream_set_path_mode, PICOQUIC_PACKET_LOOP_SEND_MAX,
+    slipstream_set_path_mode,
 };
 use slipstream_ffi::ResolverMode;
 use std::net::SocketAddr;
@@ -102,8 +102,8 @@ pub(crate) fn loop_burst_total(resolvers: &[ResolverState], base: usize) -> usiz
     })
 }
 
-pub(crate) fn path_poll_burst_max(resolver: &ResolverState) -> usize {
-    PICOQUIC_PACKET_LOOP_SEND_MAX.saturating_mul(path_loop_multiplier(resolver.mode))
+pub(crate) fn path_poll_burst_max(resolver: &ResolverState, base: usize) -> usize {
+    base.saturating_mul(path_loop_multiplier(resolver.mode))
 }
 
 fn path_loop_multiplier(mode: ResolverMode) -> usize {

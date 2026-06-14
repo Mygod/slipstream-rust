@@ -2,15 +2,12 @@ use crate::error::ClientError;
 use slipstream_core::net::{
     bind_first_resolved_with_ipv4_fallback, bind_tcp_listener_addr, bind_udp_socket_addr,
 };
+use slipstream_dns::max_payload_len_for_domain;
 use tokio::net::{TcpListener as TokioTcpListener, UdpSocket as TokioUdpSocket};
 
-pub(crate) fn compute_mtu(domain_len: usize) -> Result<u32, ClientError> {
-    if domain_len >= 240 {
-        return Err(ClientError::new(
-            "Domain name is too long for DNS transport",
-        ));
-    }
-    let mtu = ((240.0 - domain_len as f64) / 1.6) as u32;
+pub(crate) fn compute_mtu(domain: &str) -> Result<u32, ClientError> {
+    let mtu =
+        max_payload_len_for_domain(domain).map_err(|err| ClientError::new(err.to_string()))? as u32;
     if mtu == 0 {
         return Err(ClientError::new(
             "MTU computed to zero; check domain length",

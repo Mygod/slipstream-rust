@@ -48,6 +48,11 @@ const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const SLIPSTREAM_SNI: &str = "test.example.com";
 const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
+const DNS_TCP_PACKET_LOOP_BURST: usize = 64;
+const DNS_TCP_RECURSIVE_POLL_CREDIT: usize = 4;
+const DNS_TCP_RECURSIVE_POLL_SEED: usize = 16;
+const DNS_UDP_RECURSIVE_POLL_CREDIT: usize = 1;
+const DNS_UDP_RECURSIVE_POLL_SEED: usize = 1;
 const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
@@ -69,8 +74,22 @@ pub async fn run_client_with_control(
     ready_tx: Option<std_mpsc::Sender<bool>>,
 ) -> Result<i32, ClientError> {
     report_ready(&ready_tx, false);
-    let domain_len = config.domain.len();
-    let mtu = compute_mtu(domain_len)?;
+    let mtu = compute_mtu(config.domain)?;
+    let (packet_loop_send_base, packet_loop_recv_base, recursive_poll_credit, recursive_poll_seed) =
+        match config.resolver_transport {
+            ResolverTransport::Tcp => (
+                DNS_TCP_PACKET_LOOP_BURST,
+                DNS_TCP_PACKET_LOOP_BURST,
+                DNS_TCP_RECURSIVE_POLL_CREDIT,
+                DNS_TCP_RECURSIVE_POLL_SEED,
+            ),
+            ResolverTransport::Udp => (
+                PICOQUIC_PACKET_LOOP_SEND_MAX,
+                PICOQUIC_PACKET_LOOP_RECV_MAX,
+                DNS_UDP_RECURSIVE_POLL_CREDIT,
+                DNS_UDP_RECURSIVE_POLL_SEED,
+            ),
+        };
     let (mut dns_transport, peer_addr_mode) = match config.resolver_transport {
         ResolverTransport::Udp => {
             let udp = bind_udp_socket().await?;
@@ -225,8 +244,9 @@ pub async fn run_client_with_control(
         let mut dns_id = 1u16;
         let mut recv_buf = vec![0u8; 4096];
         let mut send_buf = vec![0u8; PICOQUIC_MAX_PACKET_SIZE];
-        let packet_loop_send_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_SEND_MAX);
-        let packet_loop_recv_max = loop_burst_total(&resolvers, PICOQUIC_PACKET_LOOP_RECV_MAX);
+        let packet_loop_send_max = loop_burst_total(&resolvers, packet_loop_send_base);
+        let packet_loop_recv_max = loop_burst_total(&resolvers, packet_loop_recv_base);
+        let recursive_poll_burst_max = packet_loop_send_base;
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
@@ -337,6 +357,8 @@ pub async fn run_client_with_control(
                                     local_addr_storage: &local_addr_storage,
                                     peer_addr_mode,
                                     resolvers: &mut resolvers,
+                                    recursive_poll_credit,
+                                    recursive_poll_burst_max,
                                 },
                             )?;
                             for _ in 1..packet_loop_recv_max {
@@ -352,6 +374,8 @@ pub async fn run_client_with_control(
                                                 local_addr_storage: &local_addr_storage,
                                                 peer_addr_mode,
                                                 resolvers: &mut resolvers,
+                                                recursive_poll_credit,
+                                                recursive_poll_burst_max,
                                             },
                                         )?;
                                     }
@@ -418,7 +442,10 @@ pub async fn run_client_with_control(
                         if flow_blocked {
                             for resolver in resolvers.iter_mut() {
                                 if resolver.mode == ResolverMode::Recursive && resolver.added {
-                                    resolver.pending_polls = resolver.pending_polls.max(1);
+                                    resolver.pending_polls = resolver
+                                        .pending_polls
+                                        .max(recursive_poll_seed)
+                                        .min(recursive_poll_burst_max);
                                 }
                             }
                         }
@@ -531,7 +558,7 @@ pub async fn run_client_with_control(
                             );
                         }
                         if poll_deficit > 0 {
-                            let burst_max = path_poll_burst_max(resolver);
+                            let burst_max = path_poll_burst_max(resolver, packet_loop_send_base);
                             let mut to_send = poll_deficit.min(burst_max);
                             send_poll_queries(
                                 cnx,
@@ -550,7 +577,7 @@ pub async fn run_client_with_control(
                     ResolverMode::Recursive => {
                         resolver.last_pacing_snapshot = None;
                         if resolver.pending_polls > 0 {
-                            let burst_max = path_poll_burst_max(resolver);
+                            let burst_max = path_poll_burst_max(resolver, packet_loop_send_base);
                             if resolver.pending_polls > burst_max {
                                 let mut to_send = burst_max;
                                 send_poll_queries(
