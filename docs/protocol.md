@@ -102,8 +102,9 @@ Otherwise, the response is ignored (including NAME_ERROR, which signals no data)
   cap (SLIPSTREAM_STREAM_QUEUE_MAX_BYTES). On overflow, the receiver sends
   STOP_SENDING, discards data for that stream, and continues consuming to
   avoid connection-level stalls.
-- Once a connection enters multi-stream mode it stays there for the remainder
-  of the connection.
+- Once a connection enters multi-stream mode it uses consume-on-receive until
+  all active streams close. A later single stream returns to single-stream
+  TCP-style backpressure instead of inheriting a degraded multi-stream state.
 
 ## Path handling
 

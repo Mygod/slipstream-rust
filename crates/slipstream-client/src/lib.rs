@@ -30,7 +30,7 @@ static CLIENT_GENERATION: AtomicU64 = AtomicU64::new(0);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(6);
 const STOP_JOIN_POLL: Duration = Duration::from_millis(25);
 
 fn client_slot() -> &'static Mutex<Option<ClientHandle>> {

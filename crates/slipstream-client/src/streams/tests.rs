@@ -177,6 +177,77 @@ fn local_fin_does_not_remove_until_recv_fin() {
 }
 
 #[test]
+fn multi_stream_mode_resets_when_last_stream_is_removed() {
+    let (command_tx, _command_rx) = mpsc::unbounded_channel();
+    let data_notify = Arc::new(Notify::new());
+    let acceptor = acceptor::ClientAcceptor::new();
+    let mut state = ClientState::new(command_tx, data_notify, false, acceptor);
+
+    for stream_id in [4, 8] {
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        let (read_abort_tx, _read_abort_rx) = oneshot::channel();
+        state.streams.insert(
+            stream_id,
+            ClientStream {
+                write_tx,
+                read_abort_tx: Some(read_abort_tx),
+                data_rx: None,
+                tx_bytes: 0,
+                recv_state: StreamRecvState::Open,
+                send_state: StreamSendState::Open,
+                flow: FlowControlState::default(),
+            },
+        );
+    }
+    state.multi_stream_mode = true;
+
+    assert!(state.remove_stream(4).is_some());
+    assert!(
+        state.multi_stream_mode,
+        "multi-stream mode should remain while another stream is active"
+    );
+
+    assert!(state.remove_stream(8).is_some());
+    assert!(
+        !state.multi_stream_mode,
+        "multi-stream mode must reset when the connection has no active streams"
+    );
+}
+
+#[test]
+fn backlog_summaries_are_sorted_by_backlog() {
+    let (command_tx, _command_rx) = mpsc::unbounded_channel();
+    let data_notify = Arc::new(Notify::new());
+    let acceptor = acceptor::ClientAcceptor::new();
+    let mut state = ClientState::new(command_tx, data_notify, false, acceptor);
+
+    for (stream_id, queued_bytes) in [(4, 128usize), (8, 4096usize), (12, 1024usize)] {
+        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        let (read_abort_tx, _read_abort_rx) = oneshot::channel();
+        state.streams.insert(
+            stream_id,
+            ClientStream {
+                write_tx,
+                read_abort_tx: Some(read_abort_tx),
+                data_rx: None,
+                tx_bytes: 0,
+                recv_state: StreamRecvState::Open,
+                send_state: StreamSendState::Open,
+                flow: FlowControlState {
+                    queued_bytes,
+                    ..FlowControlState::default()
+                },
+            },
+        );
+    }
+
+    let summaries = state.stream_backlog_summaries(2);
+    let stream_ids: Vec<u64> = summaries.iter().map(|summary| summary.stream_id).collect();
+
+    assert_eq!(stream_ids, vec![8, 12]);
+}
+
+#[test]
 fn mark_active_stream_failure_removes_stream() {
     let _guard = ResetOnDrop::new(|| test_hooks::set_mark_active_stream_failures(0));
     let _limit_guard = ResetOnDrop::new(|| acceptor::ClientAcceptor::set_test_limit(0));

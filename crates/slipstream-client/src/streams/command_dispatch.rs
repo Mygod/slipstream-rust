@@ -213,7 +213,7 @@ pub(crate) fn handle_command(
                     data.len()
                 );
                 unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
-                state.streams.remove(&stream_id);
+                state.remove_stream(stream_id);
             } else if let Some(stream) = state.streams.get_mut(&stream_id) {
                 stream.tx_bytes = stream.tx_bytes.saturating_add(data.len() as u64);
                 let now = unsafe { picoquic_current_time() };
@@ -255,11 +255,11 @@ pub(crate) fn handle_command(
                 if !forced_failure {
                     unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
                 }
-                state.streams.remove(&stream_id);
+                state.remove_stream(stream_id);
             } else if let Some(stream) = state.streams.get_mut(&stream_id) {
                 stream.send_state = StreamSendState::FinQueued;
                 if stream.recv_state.is_closed() && stream.flow.queued_bytes == 0 {
-                    state.streams.remove(&stream_id);
+                    state.remove_stream(stream_id);
                 }
             }
             check_stream_invariants(state, stream_id, "StreamClosed");
@@ -271,7 +271,7 @@ pub(crate) fn handle_command(
             if !command_generation_matches(state, stream_id, generation, "StreamReadError") {
                 return;
             }
-            if let Some(stream) = state.streams.remove(&stream_id) {
+            if let Some(stream) = state.remove_stream(stream_id) {
                 warn!(
                     "stream {}: tcp read error rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?}",
                     stream_id,
@@ -293,7 +293,7 @@ pub(crate) fn handle_command(
             if !command_generation_matches(state, stream_id, generation, "StreamWriteError") {
                 return;
             }
-            if let Some(stream) = state.streams.remove(&stream_id) {
+            if let Some(stream) = state.remove_stream(stream_id) {
                 warn!(
                     "stream {}: tcp write error rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?}",
                     stream_id,
@@ -343,7 +343,7 @@ pub(crate) fn handle_command(
                         },
                     ) {
                         unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
-                        state.streams.remove(&stream_id);
+                        state.remove_stream(stream_id);
                         return;
                     }
                 }
@@ -355,7 +355,7 @@ pub(crate) fn handle_command(
                 }
             }
             if remove_stream {
-                state.streams.remove(&stream_id);
+                state.remove_stream(stream_id);
             }
             check_stream_invariants(state, stream_id, "StreamWriteDrained");
         }

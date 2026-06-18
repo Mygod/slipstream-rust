@@ -13,7 +13,8 @@ use tokio::time::timeout;
 use tracing::warn;
 
 const DNS_TCP_MAX_MESSAGE_SIZE: usize = u16::MAX as usize;
-const DNS_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DNS_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const DNS_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 
 enum TcpReadEvent {
     Packet(Vec<u8>),
@@ -172,14 +173,36 @@ impl TcpResolverTransport {
         if self.reconnect_needed {
             self.reconnect().await?;
         }
-        match write_tcp_dns_message(&mut self.writer, packet).await {
+        match self.write_packet(packet).await {
             Ok(()) => Ok(()),
             Err(err) => {
                 warn!("DNS-over-TCP resolver write failed: {}", err);
                 self.reconnect_needed = true;
                 self.reconnect().await?;
-                write_tcp_dns_message(&mut self.writer, packet).await
+                let retry = self.write_packet(packet).await;
+                if retry.is_err() {
+                    self.reconnect_needed = true;
+                }
+                retry
             }
+        }
+    }
+
+    async fn write_packet(&mut self, packet: &[u8]) -> Result<(), Error> {
+        match timeout(
+            DNS_TCP_WRITE_TIMEOUT,
+            write_tcp_dns_message(&mut self.writer, packet),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::new(
+                ErrorKind::TimedOut,
+                format!(
+                    "DNS-over-TCP resolver write timed out after {}ms",
+                    DNS_TCP_WRITE_TIMEOUT.as_millis()
+                ),
+            )),
         }
     }
 }

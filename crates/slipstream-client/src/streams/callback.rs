@@ -63,7 +63,7 @@ pub(crate) unsafe extern "C" fn client_callback(
                 picoquic_call_back_event_t::picoquic_callback_stop_sending => "stop_sending",
                 _ => "unknown",
             };
-            if let Some(stream) = state.streams.remove(&stream_id) {
+            if let Some(stream) = state.remove_stream(stream_id) {
                 warn!(
                     "stream {}: reset event={} rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?} recv_state={:?} send_state={:?}",
                     stream_id,
@@ -244,12 +244,12 @@ pub(super) fn handle_stream_data(
             debug!("stream {}: resetting", stream_id);
         }
         unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_FILE_CANCEL_ERROR) };
-        state.streams.remove(&stream_id);
+        state.remove_stream(stream_id);
     } else if remove_stream {
         if debug_streams {
             debug!("stream {}: finished", stream_id);
         }
-        state.streams.remove(&stream_id);
+        state.remove_stream(stream_id);
     }
 
     check_stream_invariants(state, stream_id, "handle_stream_data");

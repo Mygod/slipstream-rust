@@ -21,6 +21,27 @@ int slipstream_has_ready_stream(picoquic_cnx_t *cnx) {
     return picoquic_find_ready_stream(cnx) != NULL ? 1 : 0;
 }
 
+void slipstream_get_flow_debug(
+    picoquic_cnx_t *cnx,
+    uint64_t *maxdata_remote,
+    uint64_t *data_sent,
+    uint64_t *maxdata_local,
+    uint64_t *data_consumed
+) {
+    if (maxdata_remote != NULL) {
+        *maxdata_remote = cnx == NULL ? 0 : cnx->maxdata_remote;
+    }
+    if (data_sent != NULL) {
+        *data_sent = cnx == NULL ? 0 : cnx->data_sent;
+    }
+    if (maxdata_local != NULL) {
+        *maxdata_local = cnx == NULL ? 0 : cnx->maxdata_local;
+    }
+    if (data_consumed != NULL) {
+        *data_consumed = cnx == NULL ? 0 : cnx->data_consumed;
+    }
+}
+
 void slipstream_disable_ack_delay(picoquic_cnx_t *cnx) {
     if (cnx == NULL) {
         return;

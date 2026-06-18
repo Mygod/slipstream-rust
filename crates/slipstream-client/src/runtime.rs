@@ -26,10 +26,11 @@ use slipstream_ffi::{
         picoquic_create_client_cnx, picoquic_current_time, picoquic_disable_keep_alive,
         picoquic_enable_keep_alive, picoquic_enable_path_callbacks,
         picoquic_enable_path_callbacks_default, picoquic_get_next_wake_delay,
-        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_has_ready_stream,
-        slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm, slipstream_set_cc_override,
-        slipstream_set_default_path_mode, PICOQUIC_CONNECTION_ID_MAX_SIZE,
-        PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX, PICOQUIC_PACKET_LOOP_SEND_MAX,
+        picoquic_prepare_next_packet_ex, picoquic_set_callback, slipstream_get_flow_debug,
+        slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_mixed_cc_algorithm,
+        slipstream_set_cc_override, slipstream_set_default_path_mode,
+        PICOQUIC_CONNECTION_ID_MAX_SIZE, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
+        PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
     ResolverTransport,
@@ -56,6 +57,40 @@ const DNS_UDP_RECURSIVE_POLL_SEED: usize = 1;
 const RECONNECT_SLEEP_MIN_MS: u64 = 250;
 const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
+const NO_PROGRESS_TIMEOUT_US: u64 = 5_000_000;
+const NO_PROGRESS_MIN_ENQUEUED_BYTES: u64 = 128 * 1024;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct FlowDebugSnapshot {
+    maxdata_remote: u64,
+    data_sent: u64,
+    maxdata_local: u64,
+    data_consumed: u64,
+}
+
+impl FlowDebugSnapshot {
+    fn tx_window(self) -> u64 {
+        self.maxdata_remote.saturating_sub(self.data_sent)
+    }
+
+    fn rx_window(self) -> u64 {
+        self.maxdata_local.saturating_sub(self.data_consumed)
+    }
+}
+
+unsafe fn flow_debug_snapshot(cnx: *mut picoquic_cnx_t) -> FlowDebugSnapshot {
+    let mut snapshot = FlowDebugSnapshot::default();
+    unsafe {
+        slipstream_get_flow_debug(
+            cnx,
+            &mut snapshot.maxdata_remote,
+            &mut snapshot.data_sent,
+            &mut snapshot.maxdata_local,
+            &mut snapshot.data_consumed,
+        );
+    }
+    snapshot
+}
 
 fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
     let mut dropped = 0usize;
@@ -250,6 +285,10 @@ pub async fn run_client_with_control(
         let mut zero_send_loops = 0u64;
         let mut zero_send_with_streams = 0u64;
         let mut last_flow_block_log_at = 0u64;
+        let mut dns_send_bytes_total = 0u64;
+        let mut last_no_progress_enqueued_bytes = 0u64;
+        let mut last_no_progress_dns_send_bytes = 0u64;
+        let mut no_progress_since = 0u64;
         let mut ready_reported = false;
 
         loop {
@@ -487,9 +526,15 @@ pub async fn run_client_with_control(
                 let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
                 let dest = peer_addr_mode.canonicalize(dest);
                 local_addr_storage = addr_from;
-                if let Err(err) = dns_transport.send_to(&packet, dest).await {
-                    if !dns_transport.is_transient_recv_error(&err) {
-                        return Err(map_io(err));
+                match dns_transport.send_to(&packet, dest).await {
+                    Ok(()) => {
+                        dns_send_bytes_total =
+                            dns_send_bytes_total.saturating_add(packet.len() as u64);
+                    }
+                    Err(err) => {
+                        if !dns_transport.is_transient_recv_error(&err) {
+                            return Err(map_io(err));
+                        }
                     }
                 }
             }
@@ -497,38 +542,120 @@ pub async fn run_client_with_control(
             let has_ready_stream = unsafe { slipstream_has_ready_stream(cnx) != 0 };
             let flow_blocked = unsafe { slipstream_is_flow_blocked(cnx) != 0 };
             let streams_len = unsafe { (*state_ptr).streams_len() };
-            if streams_len > 0 && has_ready_stream && flow_blocked {
-                let now = unsafe { picoquic_current_time() };
-                if now.saturating_sub(last_flow_block_log_at) >= FLOW_BLOCKED_LOG_INTERVAL_US {
-                    let metrics = unsafe { (*state_ptr).stream_debug_metrics() };
-                    let backlog = unsafe { (*state_ptr).stream_backlog_summaries(8) };
-                    let (enqueued_bytes, last_enqueue_at) =
-                        unsafe { (*state_ptr).debug_snapshot() };
-                    let last_enqueue_ms = if last_enqueue_at == 0 {
-                        0
-                    } else {
-                        now.saturating_sub(last_enqueue_at) / 1_000
-                    };
+            let metrics = unsafe { (*state_ptr).stream_debug_metrics() };
+            let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
+            let now = unsafe { picoquic_current_time() };
+            let last_enqueue_ms = if last_enqueue_at == 0 {
+                0
+            } else {
+                now.saturating_sub(last_enqueue_at) / 1_000
+            };
+            if streams_len > 0
+                && now.saturating_sub(last_flow_block_log_at) >= FLOW_BLOCKED_LOG_INTERVAL_US
+            {
+                let backlog = unsafe { (*state_ptr).stream_backlog_summaries(8) };
+                let flow_debug = unsafe { flow_debug_snapshot(cnx) };
+                if flow_blocked {
                     error!(
-                        "connection flow blocked: streams={} streams_with_rx_queued={} queued_bytes_total={} streams_with_recv_fin={} streams_with_send_fin={} streams_discarding={} streams_with_unconsumed_rx={} enqueued_bytes={} last_enqueue_ms={} zero_send_with_streams={} zero_send_loops={} flow_blocked={} has_ready_stream={} backlog={:?}",
+                        "transfer_debug: streams={} streams_with_rx_queued={} streams_with_data_rx_queued={} data_rx_queued_chunks_total={} queued_bytes_total={} streams_with_recv_fin={} streams_with_send_fin={} streams_discarding={} streams_with_unconsumed_rx={} enqueued_bytes={} dns_send_bytes_total={} last_enqueue_ms={} zero_send_with_streams={} zero_send_loops={} flow_blocked={} has_ready_stream={} maxdata_remote={} data_sent={} tx_window={} maxdata_local={} data_consumed={} rx_window={} backlog={:?}",
                         streams_len,
                         metrics.streams_with_rx_queued,
+                        metrics.streams_with_data_rx_queued,
+                        metrics.data_rx_queued_chunks_total,
                         metrics.queued_bytes_total,
                         metrics.streams_with_recv_fin,
                         metrics.streams_with_send_fin,
                         metrics.streams_discarding,
                         metrics.streams_with_unconsumed_rx,
                         enqueued_bytes,
+                        dns_send_bytes_total,
                         last_enqueue_ms,
                         zero_send_with_streams,
                         zero_send_loops,
                         flow_blocked,
                         has_ready_stream,
+                        flow_debug.maxdata_remote,
+                        flow_debug.data_sent,
+                        flow_debug.tx_window(),
+                        flow_debug.maxdata_local,
+                        flow_debug.data_consumed,
+                        flow_debug.rx_window(),
                         backlog
                     );
-                    last_flow_block_log_at = now;
+                } else {
+                    info!(
+                        "transfer_debug: streams={} streams_with_rx_queued={} streams_with_data_rx_queued={} data_rx_queued_chunks_total={} queued_bytes_total={} streams_with_recv_fin={} streams_with_send_fin={} streams_discarding={} streams_with_unconsumed_rx={} enqueued_bytes={} dns_send_bytes_total={} last_enqueue_ms={} zero_send_with_streams={} zero_send_loops={} flow_blocked={} has_ready_stream={} maxdata_remote={} data_sent={} tx_window={} maxdata_local={} data_consumed={} rx_window={} backlog={:?}",
+                        streams_len,
+                        metrics.streams_with_rx_queued,
+                        metrics.streams_with_data_rx_queued,
+                        metrics.data_rx_queued_chunks_total,
+                        metrics.queued_bytes_total,
+                        metrics.streams_with_recv_fin,
+                        metrics.streams_with_send_fin,
+                        metrics.streams_discarding,
+                        metrics.streams_with_unconsumed_rx,
+                        enqueued_bytes,
+                        dns_send_bytes_total,
+                        last_enqueue_ms,
+                        zero_send_with_streams,
+                        zero_send_loops,
+                        flow_blocked,
+                        has_ready_stream,
+                        flow_debug.maxdata_remote,
+                        flow_debug.data_sent,
+                        flow_debug.tx_window(),
+                        flow_debug.maxdata_local,
+                        flow_debug.data_consumed,
+                        flow_debug.rx_window(),
+                        backlog
+                    );
                 }
+                last_flow_block_log_at = now;
             }
+
+            let connection_ready = unsafe { (*state_ptr).is_ready() };
+            let local_pressure = enqueued_bytes > last_no_progress_enqueued_bytes
+                || metrics.streams_with_data_rx_queued > 0
+                || metrics.data_rx_queued_chunks_total > 0;
+            let dns_send_progress = dns_send_bytes_total > last_no_progress_dns_send_bytes;
+            let stalled_signal = flow_blocked || !has_ready_stream || zero_send_with_streams > 0;
+            let stalled_no_progress = connection_ready
+                && streams_len > 0
+                && enqueued_bytes >= NO_PROGRESS_MIN_ENQUEUED_BYTES
+                && !dns_send_progress
+                && stalled_signal;
+            if stalled_no_progress && (local_pressure || no_progress_since != 0) {
+                if no_progress_since == 0 {
+                    no_progress_since = now;
+                    warn!(
+                        "no-progress detector armed: streams={} enqueued_bytes={} dns_send_bytes_total={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}",
+                        streams_len,
+                        enqueued_bytes,
+                        dns_send_bytes_total,
+                        flow_blocked,
+                        has_ready_stream,
+                        metrics.data_rx_queued_chunks_total,
+                        zero_send_with_streams
+                    );
+                } else if now.saturating_sub(no_progress_since) >= NO_PROGRESS_TIMEOUT_US {
+                    error!(
+                        "no-progress detected for {}ms: streams={} enqueued_bytes={} dns_send_bytes_total={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}; resetting connection",
+                        now.saturating_sub(no_progress_since) / 1_000,
+                        streams_len,
+                        enqueued_bytes,
+                        dns_send_bytes_total,
+                        flow_blocked,
+                        has_ready_stream,
+                        metrics.data_rx_queued_chunks_total,
+                        zero_send_with_streams
+                    );
+                    break;
+                }
+            } else {
+                no_progress_since = 0;
+            }
+            last_no_progress_enqueued_bytes = enqueued_bytes;
+            last_no_progress_dns_send_bytes = dns_send_bytes_total;
             for resolver in resolvers.iter_mut() {
                 if !refresh_resolver_path(cnx, resolver) {
                     continue;

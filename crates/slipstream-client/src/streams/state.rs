@@ -64,6 +64,8 @@ pub(crate) struct ClientStreamMetrics {
     pub(crate) streams_with_send_fin: usize,
     pub(crate) streams_discarding: usize,
     pub(crate) streams_with_unconsumed_rx: usize,
+    pub(crate) streams_with_data_rx_queued: usize,
+    pub(crate) data_rx_queued_chunks_total: u64,
 }
 
 #[allow(dead_code)]
@@ -79,6 +81,7 @@ pub(crate) struct ClientBacklogSummary {
     pub(crate) stop_sending_sent: bool,
     pub(crate) discarding: bool,
     pub(crate) has_data_rx: bool,
+    pub(crate) data_rx_len: usize,
     pub(crate) tx_bytes: u64,
 }
 
@@ -130,6 +133,17 @@ impl ClientState {
         (self.debug_enqueued_bytes, self.debug_last_enqueue_at)
     }
 
+    pub(crate) fn remove_stream(&mut self, stream_id: u64) -> Option<ClientStream> {
+        let removed = self.streams.remove(&stream_id);
+        if removed.is_some() && self.streams.is_empty() && self.multi_stream_mode {
+            self.multi_stream_mode = false;
+            if self.debug_streams {
+                debug!("stream {}: leaving multi-stream mode", stream_id);
+            }
+        }
+        removed
+    }
+
     pub(crate) fn stream_debug_metrics(&self) -> ClientStreamMetrics {
         let mut metrics = ClientStreamMetrics::default();
         for stream in self.streams.values() {
@@ -155,6 +169,16 @@ impl ClientState {
                 metrics.streams_with_unconsumed_rx =
                     metrics.streams_with_unconsumed_rx.saturating_add(1);
             }
+            if let Some(data_rx) = &stream.data_rx {
+                let data_rx_len = data_rx.len();
+                if data_rx_len > 0 {
+                    metrics.streams_with_data_rx_queued =
+                        metrics.streams_with_data_rx_queued.saturating_add(1);
+                    metrics.data_rx_queued_chunks_total = metrics
+                        .data_rx_queued_chunks_total
+                        .saturating_add(data_rx_len as u64);
+                }
+            }
         }
         metrics
     }
@@ -164,6 +188,11 @@ impl ClientState {
         for (stream_id, stream) in self.streams.iter() {
             let queued_bytes = stream.flow.queued_bytes as u64;
             let has_data_rx = stream.data_rx.is_some();
+            let data_rx_len = stream
+                .data_rx
+                .as_ref()
+                .map(|data_rx| data_rx.len())
+                .unwrap_or(0);
             let unconsumed = stream
                 .flow
                 .rx_bytes
@@ -173,6 +202,7 @@ impl ClientState {
                 || stream.send_state != StreamSendState::Open
                 || stream.flow.discarding
                 || unconsumed > 0
+                || data_rx_len > 0
             {
                 summaries.push(ClientBacklogSummary {
                     stream_id: *stream_id,
@@ -185,13 +215,17 @@ impl ClientState {
                     stop_sending_sent: stream.flow.stop_sending_sent,
                     discarding: stream.flow.discarding,
                     has_data_rx,
+                    data_rx_len,
                     tx_bytes: stream.tx_bytes,
                 });
-                if summaries.len() >= limit {
-                    break;
-                }
             }
         }
+        summaries.sort_by(|left, right| {
+            let left_backlog = left.queued_bytes.saturating_add(left.data_rx_len as u64);
+            let right_backlog = right.queued_bytes.saturating_add(right.data_rx_len as u64);
+            right_backlog.cmp(&left_backlog)
+        });
+        summaries.truncate(limit);
         summaries
     }
 

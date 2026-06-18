@@ -2,6 +2,8 @@ use super::Command;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::time::{sleep, Duration};
+use tracing::warn;
 
 pub(super) const STREAM_READ_CHUNK_BYTES: usize = 4096;
 
@@ -21,7 +23,7 @@ pub(super) fn spawn_client_reader(
 ) {
     tokio::spawn(async move {
         let mut buf = vec![0u8; STREAM_READ_CHUNK_BYTES];
-        loop {
+        'read_loop: loop {
             tokio::select! {
                 _ = &mut read_abort_rx => {
                     break;
@@ -32,11 +34,38 @@ pub(super) fn spawn_client_reader(
                             break;
                         }
                         Ok(n) => {
-                            let data = buf[..n].to_vec();
-                            if data_tx.send(data).await.is_err() {
-                                break;
+                            let mut data = Some(buf[..n].to_vec());
+                            let mut blocked_ticks = 0u64;
+                            loop {
+                                tokio::select! {
+                                    _ = &mut read_abort_rx => {
+                                        break 'read_loop;
+                                    }
+                                    permit = data_tx.reserve() => {
+                                        match permit {
+                                            Ok(permit) => {
+                                                if let Some(chunk) = data.take() {
+                                                    permit.send(chunk);
+                                                    data_notify.notify_one();
+                                                }
+                                                break;
+                                            }
+                                            Err(_) => break 'read_loop,
+                                        }
+                                    }
+                                    _ = sleep(Duration::from_secs(1)) => {
+                                        blocked_ticks = blocked_ticks.saturating_add(1);
+                                        warn!(
+                                            "stream {}: local TCP reader blocked on bounded channel blocked_ms={} channel_len={} channel_capacity={} channel_max_capacity={}",
+                                            stream_id,
+                                            blocked_ticks.saturating_mul(1000),
+                                            data_tx.max_capacity().saturating_sub(data_tx.capacity()),
+                                            data_tx.capacity(),
+                                            data_tx.max_capacity()
+                                        );
+                                    }
+                                }
                             }
-                            data_notify.notify_one();
                         }
                         Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
                             continue;

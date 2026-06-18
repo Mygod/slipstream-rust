@@ -63,7 +63,9 @@ To cover both:
 - Once multiple streams are active, we switch to consume-on-receive and enforce
   per-stream caps (SLIPSTREAM_STREAM_QUEUE_MAX_BYTES). If a stream exceeds its
   cap, we send STOP_SENDING and discard further data for that stream while
-  continuing to consume, which prevents connection-wide stalls.
+  continuing to consume, which prevents connection-wide stalls. When all
+  streams close, the next single stream starts in single-stream mode again so a
+  previous multi-stream burst does not poison later transfers.
 
 ## Rust vs C behavior notes
 
