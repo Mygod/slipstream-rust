@@ -127,7 +127,7 @@ jobs:
 
   build-binaries-macos-x86_64:
     name: Build Binaries (macos-x86_64)
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     timeout-minutes: 40
     steps:
       - name: Check out slipstream-rust
