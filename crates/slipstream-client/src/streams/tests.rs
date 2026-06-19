@@ -177,6 +177,44 @@ fn local_fin_does_not_remove_until_recv_fin() {
 }
 
 #[test]
+fn local_tcp_close_removes_stream_immediately() {
+    let (command_tx, _command_rx) = mpsc::unbounded_channel();
+    let data_notify = Arc::new(Notify::new());
+    let acceptor = acceptor::ClientAcceptor::new();
+    let mut state = ClientState::new(command_tx, data_notify, false, acceptor);
+    let stream_id = 4;
+    let (write_tx, _write_rx) = mpsc::unbounded_channel();
+    let (read_abort_tx, _read_abort_rx) = oneshot::channel();
+
+    state.streams.insert(
+        stream_id,
+        ClientStream {
+            write_tx,
+            read_abort_tx: Some(read_abort_tx),
+            data_rx: None,
+            tx_bytes: 0,
+            recv_state: StreamRecvState::Open,
+            send_state: StreamSendState::Open,
+            flow: FlowControlState::default(),
+        },
+    );
+
+    handle_command(
+        std::ptr::null_mut(),
+        &mut state as *mut _,
+        Command::StreamReadClosed {
+            stream_id,
+            generation: 0,
+        },
+    );
+
+    assert!(
+        !state.streams.contains_key(&stream_id),
+        "local TCP close should remove the stream without waiting for remote FIN"
+    );
+}
+
+#[test]
 fn multi_stream_mode_resets_when_last_stream_is_removed() {
     let (command_tx, _command_rx) = mpsc::unbounded_channel();
     let data_notify = Arc::new(Notify::new());

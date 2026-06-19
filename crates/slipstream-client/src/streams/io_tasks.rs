@@ -31,6 +31,10 @@ pub(super) fn spawn_client_reader(
                 read_result = read_half.read(&mut buf) => {
                     match read_result {
                         Ok(0) => {
+                            let _ = command_tx.send(Command::StreamReadClosed {
+                                stream_id,
+                                generation,
+                            });
                             break;
                         }
                         Ok(n) => {

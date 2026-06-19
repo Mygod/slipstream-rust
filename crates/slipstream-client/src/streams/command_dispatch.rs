@@ -286,6 +286,30 @@ pub(crate) fn handle_command(
             }
             unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
         }
+        Command::StreamReadClosed {
+            stream_id,
+            generation,
+        } => {
+            if !command_generation_matches(state, stream_id, generation, "StreamReadClosed") {
+                return;
+            }
+            if let Some(stream) = state.remove_stream(stream_id) {
+                debug!(
+                    "stream {}: local TCP closed rx_bytes={} tx_bytes={} queued={} consumed_offset={} fin_offset={:?}",
+                    stream_id,
+                    stream.flow.rx_bytes,
+                    stream.tx_bytes,
+                    stream.flow.queued_bytes,
+                    stream.flow.consumed_offset,
+                    stream.flow.fin_offset
+                );
+            } else {
+                debug!("stream {}: local TCP closed (unknown stream)", stream_id);
+            }
+            if !cnx.is_null() {
+                unsafe { abort_stream_bidi(cnx, stream_id, SLIPSTREAM_INTERNAL_ERROR) };
+            }
+        }
         Command::StreamWriteError {
             stream_id,
             generation,
