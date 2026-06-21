@@ -12,7 +12,7 @@ use crate::dns::{
     sockaddr_storage_to_socket_addr, DnsResponseContext, DnsTransport, PeerAddrMode,
 };
 use crate::error::ClientError;
-use crate::pacing::{cwnd_target_polls, inflight_packet_estimate};
+use crate::pacing::{cwnd_target_polls, inflight_packet_estimate, sanitize_pacing_gain_probe};
 use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
     acceptor::ClientAcceptor, client_callback, drain_commands, drain_stream_data, handle_command,
@@ -49,7 +49,9 @@ const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const SLIPSTREAM_SNI: &str = "test.example.com";
 const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
-const DNS_TCP_PACKET_LOOP_BURST: usize = 96;
+pub(crate) const DEFAULT_DNS_TCP_PACKET_LOOP_BURST: usize = 96;
+const DNS_TCP_PACKET_LOOP_BURST_MIN: usize = 1;
+const DNS_TCP_PACKET_LOOP_BURST_MAX: usize = 512;
 const DNS_TCP_RECURSIVE_POLL_CREDIT: usize = 4;
 const DNS_TCP_RECURSIVE_POLL_SEED: usize = 16;
 const DNS_UDP_RECURSIVE_POLL_CREDIT: usize = 1;
@@ -103,6 +105,10 @@ fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>
     dropped
 }
 
+pub(crate) fn sanitize_dns_tcp_packet_loop_burst(value: usize) -> usize {
+    value.clamp(DNS_TCP_PACKET_LOOP_BURST_MIN, DNS_TCP_PACKET_LOOP_BURST_MAX)
+}
+
 pub async fn run_client_with_control(
     config: &ClientConfig<'_>,
     mut shutdown_rx: Option<mpsc::UnboundedReceiver<()>>,
@@ -110,11 +116,14 @@ pub async fn run_client_with_control(
 ) -> Result<i32, ClientError> {
     report_ready(&ready_tx, false);
     let mtu = compute_mtu(config.domain)?;
+    let dns_tcp_packet_loop_burst =
+        sanitize_dns_tcp_packet_loop_burst(config.dns_tcp_packet_loop_burst);
+    let pacing_gain_probe = sanitize_pacing_gain_probe(config.pacing_gain_probe);
     let (packet_loop_send_base, packet_loop_recv_base, recursive_poll_credit, recursive_poll_seed) =
         match config.resolver_transport {
             ResolverTransport::Tcp => (
-                DNS_TCP_PACKET_LOOP_BURST,
-                DNS_TCP_PACKET_LOOP_BURST,
+                dns_tcp_packet_loop_burst,
+                dns_tcp_packet_loop_burst,
                 DNS_TCP_RECURSIVE_POLL_CREDIT,
                 DNS_TCP_RECURSIVE_POLL_SEED,
             ),
@@ -136,8 +145,13 @@ pub async fn run_client_with_control(
         }
         ResolverTransport::Tcp => {
             let peer_addr_mode = PeerAddrMode::Native;
-            let resolvers =
-                resolve_resolvers(config.resolvers, mtu, config.debug_poll, peer_addr_mode)?;
+            let resolvers = resolve_resolvers(
+                config.resolvers,
+                mtu,
+                config.debug_poll,
+                peer_addr_mode,
+                pacing_gain_probe,
+            )?;
             if resolvers.is_empty() {
                 return Err(ClientError::new("At least one resolver is required"));
             }
@@ -183,8 +197,13 @@ pub async fn run_client_with_control(
         if shutdown_requested(&mut shutdown_rx) {
             return Ok(0);
         }
-        let mut resolvers =
-            resolve_resolvers(config.resolvers, mtu, config.debug_poll, peer_addr_mode)?;
+        let mut resolvers = resolve_resolvers(
+            config.resolvers,
+            mtu,
+            config.debug_poll,
+            peer_addr_mode,
+            pacing_gain_probe,
+        )?;
         if resolvers.is_empty() {
             return Err(ClientError::new("At least one resolver is required"));
         }

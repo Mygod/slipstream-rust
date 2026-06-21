@@ -7,7 +7,7 @@ mod runtime;
 mod streams;
 
 use jni::objects::{JBooleanArray, JIntArray, JObject, JObjectArray, JString};
-use jni::sys::{jint, jstring, JNI_VERSION_1_6};
+use jni::sys::{jdouble, jint, jstring, JNI_VERSION_1_6};
 use jni::{JNIEnv, JavaVM};
 use slipstream_core::{normalize_domain, parse_host_port_parts, AddressKind};
 use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec, ResolverTransport};
@@ -18,6 +18,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
+
+use pacing::sanitize_pacing_gain_probe;
+use runtime::{sanitize_dns_tcp_packet_loop_burst, DEFAULT_DNS_TCP_PACKET_LOOP_BURST};
 
 struct ClientHandle {
     stop_tx: mpsc::UnboundedSender<()>,
@@ -97,6 +100,8 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
     _idle_poll_interval: jint,
     _idle_timeout_ms: jint,
     resolver_transport: JString<'_>,
+    pacing_gain_probe: jdouble,
+    dns_tcp_packet_loop_burst: jint,
 ) -> jint {
     clear_last_error();
     if RUNNING.load(Ordering::SeqCst) {
@@ -155,6 +160,12 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
         set_last_error("invalid Slipstream resolver or listen port configuration");
         return -2;
     }
+    let pacing_gain_probe = sanitize_pacing_gain_probe(pacing_gain_probe);
+    let dns_tcp_packet_loop_burst = if dns_tcp_packet_loop_burst > 0 {
+        sanitize_dns_tcp_packet_loop_burst(dns_tcp_packet_loop_burst as usize)
+    } else {
+        DEFAULT_DNS_TCP_PACKET_LOOP_BURST
+    };
 
     let (stop_tx, stop_rx) = mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = std_mpsc::channel();
@@ -188,6 +199,8 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
                 cert: None,
                 keep_alive_interval: keep_alive_interval.max(0) as usize,
                 resolver_transport,
+                pacing_gain_probe,
+                dns_tcp_packet_loop_burst,
                 debug_poll,
                 debug_streams,
             };

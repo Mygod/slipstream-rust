@@ -14,7 +14,9 @@ use slipstream_core::{
 use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec, ResolverTransport};
 use tokio::runtime::Builder;
 
+use pacing::DEFAULT_PACING_GAIN_PROBE;
 use runtime::run_client_with_control;
+use runtime::DEFAULT_DNS_TCP_PACKET_LOOP_BURST;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -61,6 +63,10 @@ struct Args {
     debug_streams: bool,
     #[arg(long = "resolver-transport", value_enum, default_value_t = ResolverTransportArg::Udp)]
     resolver_transport: ResolverTransportArg,
+    #[arg(long = "pacing-gain-probe", default_value_t = DEFAULT_PACING_GAIN_PROBE)]
+    pacing_gain_probe: f64,
+    #[arg(long = "dns-tcp-packet-loop-burst", default_value_t = DEFAULT_DNS_TCP_PACKET_LOOP_BURST)]
+    dns_tcp_packet_loop_burst: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -211,6 +217,8 @@ fn main() {
         cert: cert.as_deref(),
         keep_alive_interval: keep_alive_interval as usize,
         resolver_transport,
+        pacing_gain_probe: args.pacing_gain_probe,
+        dns_tcp_packet_loop_burst: args.dns_tcp_packet_loop_burst,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
     };

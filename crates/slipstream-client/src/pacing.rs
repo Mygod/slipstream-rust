@@ -1,9 +1,11 @@
 use slipstream_ffi::picoquic::picoquic_path_quality_t;
 
 // Pacing gain tuning for the poll-based pacing loop.
+pub(crate) const DEFAULT_PACING_GAIN_PROBE: f64 = 1.6;
 const PACING_GAIN_BASE: f64 = 1.0;
-const PACING_GAIN_PROBE: f64 = 1.6;
 const PACING_GAIN_EPSILON: f64 = 0.05;
+const PACING_GAIN_PROBE_MIN: f64 = 1.0;
+const PACING_GAIN_PROBE_MAX: f64 = 4.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PacingBudgetSnapshot {
@@ -17,15 +19,17 @@ pub(crate) struct PacingPollBudget {
     payload_bytes: f64,
     mtu: u32,
     last_pacing_rate: u64,
+    probe_gain: f64,
 }
 
 impl PacingPollBudget {
-    pub(crate) fn new(mtu: u32) -> Self {
+    pub(crate) fn new(mtu: u32, probe_gain: f64) -> Self {
         debug_assert!(mtu > 0, "PacingPollBudget::new expects MTU > 0");
         Self {
             payload_bytes: mtu.max(1) as f64,
             mtu,
             last_pacing_rate: 0,
+            probe_gain: sanitize_pacing_gain_probe(probe_gain),
         }
     }
 
@@ -69,12 +73,20 @@ impl PacingPollBudget {
     fn next_gain(&mut self, pacing_rate: u64) -> f64 {
         let gain =
             if pacing_rate as f64 > (self.last_pacing_rate as f64) * (1.0 + PACING_GAIN_EPSILON) {
-                PACING_GAIN_PROBE
+                self.probe_gain
             } else {
                 PACING_GAIN_BASE
             };
         self.last_pacing_rate = pacing_rate;
         gain
+    }
+}
+
+pub(crate) fn sanitize_pacing_gain_probe(value: f64) -> f64 {
+    if value.is_finite() && value >= PACING_GAIN_PROBE_MIN {
+        value.min(PACING_GAIN_PROBE_MAX)
+    } else {
+        DEFAULT_PACING_GAIN_PROBE
     }
 }
 

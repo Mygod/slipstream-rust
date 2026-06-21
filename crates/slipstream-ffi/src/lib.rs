@@ -37,6 +37,8 @@ pub struct ClientConfig<'a> {
     pub congestion_control: Option<&'a str>,
     pub gso: bool,
     pub resolver_transport: ResolverTransport,
+    pub pacing_gain_probe: f64,
+    pub dns_tcp_packet_loop_burst: usize,
     pub keep_alive_interval: usize,
     pub debug_poll: bool,
     pub debug_streams: bool,
