@@ -2,7 +2,7 @@ use slipstream_ffi::picoquic::picoquic_path_quality_t;
 
 // Pacing gain tuning for the poll-based pacing loop.
 const PACING_GAIN_BASE: f64 = 1.0;
-const PACING_GAIN_PROBE: f64 = 1.25;
+const PACING_GAIN_PROBE: f64 = 1.6;
 const PACING_GAIN_EPSILON: f64 = 0.05;
 
 #[derive(Clone, Copy, Debug, Default)]
