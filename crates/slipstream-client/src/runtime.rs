@@ -61,6 +61,8 @@ const RECONNECT_SLEEP_MAX_MS: u64 = 5_000;
 const FLOW_BLOCKED_LOG_INTERVAL_US: u64 = 1_000_000;
 const NO_PROGRESS_TIMEOUT_US: u64 = 5_000_000;
 const NO_PROGRESS_MIN_ENQUEUED_BYTES: u64 = 128 * 1024;
+const NO_PROGRESS_ARM_LOG_INTERVAL_US: u64 = 2_000_000;
+const DOWNSTREAM_STALE_ZERO_SEND_MIN: u64 = 10_000;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct FlowDebugSnapshot {
@@ -308,6 +310,7 @@ pub async fn run_client_with_control(
         let mut last_no_progress_enqueued_bytes = 0u64;
         let mut last_no_progress_dns_send_bytes = 0u64;
         let mut no_progress_since = 0u64;
+        let mut last_no_progress_arm_log_at = 0u64;
         let mut ready_reported = false;
 
         loop {
@@ -638,24 +641,32 @@ pub async fn run_client_with_control(
                 || metrics.data_rx_queued_chunks_total > 0;
             let dns_send_progress = dns_send_bytes_total > last_no_progress_dns_send_bytes;
             let stalled_signal = flow_blocked || !has_ready_stream || zero_send_with_streams > 0;
+            let downstream_stale = metrics.data_rx_queued_chunks_total == 0
+                && metrics.streams_with_data_rx_queued == 0
+                && zero_send_with_streams >= DOWNSTREAM_STALE_ZERO_SEND_MIN;
             let stalled_no_progress = connection_ready
                 && streams_len > 0
                 && enqueued_bytes >= NO_PROGRESS_MIN_ENQUEUED_BYTES
-                && !dns_send_progress
+                && (!dns_send_progress || downstream_stale)
                 && stalled_signal;
             if stalled_no_progress && (local_pressure || no_progress_since != 0) {
                 if no_progress_since == 0 {
                     no_progress_since = now;
-                    warn!(
-                        "no-progress detector armed: streams={} enqueued_bytes={} dns_send_bytes_total={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}",
-                        streams_len,
-                        enqueued_bytes,
-                        dns_send_bytes_total,
-                        flow_blocked,
-                        has_ready_stream,
-                        metrics.data_rx_queued_chunks_total,
-                        zero_send_with_streams
-                    );
+                    if now.saturating_sub(last_no_progress_arm_log_at)
+                        >= NO_PROGRESS_ARM_LOG_INTERVAL_US
+                    {
+                        last_no_progress_arm_log_at = now;
+                        warn!(
+                            "no-progress detector armed: streams={} enqueued_bytes={} dns_send_bytes_total={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}",
+                            streams_len,
+                            enqueued_bytes,
+                            dns_send_bytes_total,
+                            flow_blocked,
+                            has_ready_stream,
+                            metrics.data_rx_queued_chunks_total,
+                            zero_send_with_streams
+                        );
+                    }
                 } else if now.saturating_sub(no_progress_since) >= NO_PROGRESS_TIMEOUT_US {
                     error!(
                         "no-progress detected for {}ms: streams={} enqueued_bytes={} dns_send_bytes_total={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}; resetting connection",
