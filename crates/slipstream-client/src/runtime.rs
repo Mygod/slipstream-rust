@@ -137,7 +137,14 @@ pub(crate) fn sanitize_dns_tcp_packet_loop_burst(value: usize) -> usize {
 
 fn compute_transport_mtu(config: &ClientConfig<'_>) -> Result<u32, ClientError> {
     match config.upstream_encoding {
-        UpstreamEncoding::Qname => compute_mtu(config.domain),
+        UpstreamEncoding::Qname => {
+            let max_mtu = compute_mtu(config.domain)?;
+            if config.qname_mtu == 0 {
+                Ok(max_mtu)
+            } else {
+                Ok(config.qname_mtu.clamp(1, max_mtu))
+            }
+        }
         UpstreamEncoding::EdnsRaw => Ok(EDNS_UDP_PAYLOAD as u32),
     }
 }

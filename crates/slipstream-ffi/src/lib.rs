@@ -44,6 +44,7 @@ pub struct ClientConfig<'a> {
     pub gso: bool,
     pub resolver_transport: ResolverTransport,
     pub upstream_encoding: UpstreamEncoding,
+    pub qname_mtu: u32,
     pub pacing_gain_probe: f64,
     pub dns_tcp_packet_loop_burst: usize,
     pub keep_alive_interval: usize,

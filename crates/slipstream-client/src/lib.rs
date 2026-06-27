@@ -124,6 +124,7 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
     pacing_gain_probe: jdouble,
     dns_tcp_packet_loop_burst: jint,
     qname_compatibility_mode: bool,
+    qname_mtu: jint,
 ) -> jint {
     clear_last_error();
     if RUNNING.load(Ordering::SeqCst) {
@@ -226,6 +227,7 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
                 } else {
                     UpstreamEncoding::EdnsRaw
                 },
+                qname_mtu: qname_mtu.max(0) as u32,
                 pacing_gain_probe,
                 dns_tcp_packet_loop_burst,
                 debug_poll,

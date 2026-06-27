@@ -71,6 +71,8 @@ struct Args {
     dns_tcp_packet_loop_burst: usize,
     #[arg(long = "upstream-encoding", value_enum, default_value_t = UpstreamEncodingArg::Qname)]
     upstream_encoding: UpstreamEncodingArg,
+    #[arg(long = "qname-mtu", default_value_t = 0)]
+    qname_mtu: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -237,6 +239,7 @@ fn main() {
         keep_alive_interval: keep_alive_interval as usize,
         resolver_transport,
         upstream_encoding: UpstreamEncoding::from(args.upstream_encoding),
+        qname_mtu: args.qname_mtu,
         pacing_gain_probe: args.pacing_gain_probe,
         dns_tcp_packet_loop_burst: args.dns_tcp_packet_loop_burst,
         debug_poll: args.debug_poll,
