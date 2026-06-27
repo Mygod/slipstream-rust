@@ -1,7 +1,8 @@
 #![cfg(target_os = "android")]
 
-use jni::objects::JValue;
-use jni::JavaVM;
+use jni::objects::{GlobalRef, JClass, JValue};
+use jni::sys::jclass;
+use jni::{JNIEnv, JavaVM};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -12,11 +13,23 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::EnvFilter;
 
 static JAVA_VM: OnceLock<JavaVM> = OnceLock::new();
+static BRIDGE_CLASS: OnceLock<GlobalRef> = OnceLock::new();
 static LOG_FILE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 const MAX_NATIVE_LOG_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(crate) fn set_java_vm(vm: JavaVM) {
     let _ = JAVA_VM.set(vm);
+}
+
+pub(crate) fn set_bridge_class(env: &mut JNIEnv<'_>, class: JClass<'_>) {
+    match env.new_global_ref(class) {
+        Ok(class_ref) => {
+            let _ = BRIDGE_CLASS.set(class_ref);
+        }
+        Err(err) => {
+            warn!("Failed to store SlipstreamBridge class ref: {}", err);
+        }
+    }
 }
 
 pub(crate) fn init_android_logging() {
@@ -60,38 +73,33 @@ pub(crate) fn protect_socket_fd(fd: i32) -> bool {
             return true;
         }
     };
-    match env.call_static_method(
-        "app/slipnet/tunnel/SlipstreamBridge",
-        "protectSocket",
-        "(I)Z",
-        &[JValue::Int(fd)],
-    ) {
+    let Some(bridge_class) = BRIDGE_CLASS.get() else {
+        warn!("Android socket protection requested before bridge class ref was initialized");
+        return false;
+    };
+    let class = unsafe { JClass::from_raw(bridge_class.as_raw() as jclass) };
+    let result = env.call_static_method(class, "protectSocket", "(I)Z", &[JValue::Int(fd)]);
+    match result {
         Ok(value) => match value.z() {
             Ok(true) => true,
             Ok(false) => {
-                warn!(
-                    "Android VpnService.protect({}) returned false; continuing because SlipNet excludes itself from the VPN",
-                    fd
-                );
-                true
+                warn!("Android VpnService.protect({}) returned false", fd);
+                false
             }
             Err(err) => {
                 warn!(
-                    "Android socket protection returned a non-boolean result for fd {}: {}; continuing because SlipNet excludes itself from the VPN",
+                    "Android socket protection returned a non-boolean result for fd {}: {}",
                     fd, err
                 );
-                true
+                false
             }
         },
         Err(err) => {
-            warn!(
-                "Android socket protection failed for fd {}: {}; continuing because SlipNet excludes itself from the VPN",
-                fd, err
-            );
+            warn!("Android socket protection failed for fd {}: {}", fd, err);
             if env.exception_check().unwrap_or(false) {
                 let _ = env.exception_clear();
             }
-            true
+            false
         }
     }
 }

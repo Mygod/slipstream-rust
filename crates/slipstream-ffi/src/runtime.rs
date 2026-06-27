@@ -21,6 +21,7 @@ use winapi::shared::ws2ipdef::SOCKADDR_IN6_LH;
 
 pub const SLIPSTREAM_INTERNAL_ERROR: u64 = 0x101;
 pub const SLIPSTREAM_FILE_CANCEL_ERROR: u64 = 0x105;
+pub const SLIPSTREAM_MAX_DATA_CONTROL_BYTES: u64 = 64 * 1024 * 1024;
 
 extern "C" {
     fn ERR_error_string_n(e: c_ulong, buf: *mut c_char, len: size_t);
@@ -66,9 +67,9 @@ pub unsafe fn configure_quic_with_custom(
 }
 
 /// Configure shared QUIC defaults.
-/// Connection-level `max_data` is still configured. Stream handlers apply a small reserve in
-/// single-stream mode, then switch to per-stream caps with STOP_SENDING + discard when multiple
-/// streams are active to avoid connection-wide stalls.
+/// Connection-level `max_data` is intentionally larger than the per-stream write buffer.
+/// Upload aborts can leave reset streams draining in the QUIC connection window; keeping a wider
+/// connection window lets fresh small streams keep moving instead of waiting behind that tail.
 ///
 /// # Safety
 /// `quic` must be a valid picoquic context and `mtu` must be non-zero.
@@ -79,7 +80,8 @@ unsafe fn configure_quic_common(quic: *mut picoquic_quic_t, mtu: u32) {
     picoquic_set_preemptive_repeat_policy(quic, 1);
     picoquic_disable_port_blocking(quic, 1);
     picoquic_set_stream_data_consumption_mode(quic, 1);
-    picoquic_set_max_data_control(quic, stream_write_buffer_bytes() as u64);
+    let max_data = (stream_write_buffer_bytes() as u64).max(SLIPSTREAM_MAX_DATA_CONTROL_BYTES);
+    picoquic_set_max_data_control(quic, max_data);
     picoquic_set_mtu_max(quic, mtu);
     picoquic_set_initial_send_mtu(quic, mtu, mtu);
     picoquic_set_key_log_file_from_env(quic);

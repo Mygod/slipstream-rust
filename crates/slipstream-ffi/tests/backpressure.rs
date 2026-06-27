@@ -7,7 +7,7 @@ use slipstream_ffi::picoquic::{
     picoquic_create, picoquic_current_time, slipstream_test_get_defer_stream_data_consumption,
     slipstream_test_get_max_data_limit,
 };
-use slipstream_ffi::{configure_quic, QuicGuard};
+use slipstream_ffi::{configure_quic, QuicGuard, SLIPSTREAM_MAX_DATA_CONTROL_BYTES};
 
 struct EnvVarGuard {
     key: &'static str,
@@ -34,9 +34,10 @@ impl Drop for EnvVarGuard {
 #[test]
 fn configures_connection_level_backpressure() {
     let _env_guard = EnvVarGuard::set("SLIPSTREAM_STREAM_WRITE_BUFFER_BYTES", "16384");
-    let expected = stream_write_buffer_bytes() as u64;
+    let stream_buffer = stream_write_buffer_bytes() as u64;
+    let expected = stream_buffer.max(SLIPSTREAM_MAX_DATA_CONTROL_BYTES);
     assert_eq!(
-        expected,
+        stream_buffer,
         16 * 1024,
         "stream buffer override should be applied before QUIC config"
     );
@@ -78,7 +79,7 @@ fn configures_connection_level_backpressure() {
     let defer = unsafe { slipstream_test_get_defer_stream_data_consumption(quic) };
     assert_eq!(
         max_data, expected,
-        "connection-level max_data should track stream_write_buffer_bytes"
+        "connection-level max_data should keep a wider window than stream_write_buffer_bytes"
     );
     assert_eq!(
         defer, 1,

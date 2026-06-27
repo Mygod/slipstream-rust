@@ -56,4 +56,5 @@ pub use runtime::{
     abort_stream_bidi, configure_quic, configure_quic_with_custom, sockaddr_storage_to_socket_addr,
     socket_addr_to_storage, take_crypto_errors, take_stateless_packet_for_cid,
     write_stream_or_reset, QuicGuard, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR,
+    SLIPSTREAM_MAX_DATA_CONTROL_BYTES,
 };

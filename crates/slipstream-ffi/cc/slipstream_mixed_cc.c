@@ -10,6 +10,7 @@ typedef enum {
 
 static slipstream_path_mode_t slipstream_default_path_mode = slipstream_path_mode_recursive;
 static picoquic_congestion_algorithm_t const* slipstream_cc_override = NULL;
+extern picoquic_congestion_algorithm_t* slipstream_server_cc_algorithm;
 
 static slipstream_path_mode_t slipstream_normalize_mode(int mode)
 {
@@ -35,6 +36,9 @@ static picoquic_congestion_algorithm_t const* slipstream_select_cc(picoquic_path
     }
     slipstream_path_mode_t mode = slipstream_resolve_mode(path_x->slipstream_path_mode);
     if (mode == slipstream_path_mode_authoritative) {
+        if (slipstream_server_cc_algorithm != NULL) {
+            return slipstream_server_cc_algorithm;
+        }
         return picoquic_bbr_algorithm;
     }
     return picoquic_dcubic_algorithm;

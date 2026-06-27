@@ -78,6 +78,11 @@ fn store_ready(generation: u64, value: bool) {
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
     #[cfg(target_os = "android")]
     {
+        if let Ok(mut env) = vm.get_env() {
+            if let Ok(class) = env.find_class("app/slipnet/tunnel/SlipstreamBridge") {
+                platform::set_bridge_class(&mut env, class);
+            }
+        }
         platform::set_java_vm(vm);
         platform::init_android_logging();
     }
