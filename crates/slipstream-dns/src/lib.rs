@@ -8,7 +8,7 @@ mod wire;
 pub use base32::{decode as base32_decode, encode as base32_encode, Base32Error};
 pub use codec::{
     build_edns_raw_qname, decode_query, decode_query_with_domains, decode_response, encode_query,
-    encode_query_edns_raw, encode_response, is_response,
+    encode_query_compact, encode_query_edns_raw, encode_response, is_response,
 };
 pub use dots::{dotify, undotify};
 pub use types::{

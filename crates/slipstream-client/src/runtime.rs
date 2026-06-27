@@ -19,8 +19,8 @@ use crate::streams::{
     ClientState, Command,
 };
 use slipstream_dns::{
-    build_edns_raw_qname, build_qname, encode_query, encode_query_edns_raw, QueryParams, CLASS_IN,
-    EDNS_UDP_PAYLOAD, RR_TXT,
+    build_edns_raw_qname, build_qname, encode_query_compact, encode_query_edns_raw, QueryParams,
+    CLASS_IN, EDNS_UDP_PAYLOAD, RR_TXT,
 };
 use slipstream_ffi::{
     configure_quic_with_custom,
@@ -149,6 +149,10 @@ pub async fn run_client_with_control(
 ) -> Result<i32, ClientError> {
     report_ready(&ready_tx, false);
     let mtu = compute_transport_mtu(config)?;
+    info!(
+        "QNAME transport mtu={} domain={} upstream={:?}",
+        mtu, config.domain, config.upstream_encoding
+    );
     let dns_tcp_packet_loop_burst =
         sanitize_dns_tcp_packet_loop_burst(config.dns_tcp_packet_loop_burst);
     let pacing_gain_probe = sanitize_pacing_gain_probe(config.pacing_gain_probe);
@@ -601,7 +605,8 @@ pub async fn run_client_with_control(
                             qdcount: 1,
                             is_query: true,
                         };
-                        encode_query(&params).map_err(|err| ClientError::new(err.to_string()))?
+                        encode_query_compact(&params)
+                            .map_err(|err| ClientError::new(err.to_string()))?
                     }
                     UpstreamEncoding::EdnsRaw => {
                         let qname = build_edns_raw_qname(config.domain)

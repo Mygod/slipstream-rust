@@ -141,6 +141,14 @@ pub fn build_edns_raw_qname(domain: &str) -> Result<String, DnsError> {
 }
 
 pub fn encode_query(params: &QueryParams<'_>) -> Result<Vec<u8>, DnsError> {
+    encode_query_inner(params, true)
+}
+
+pub fn encode_query_compact(params: &QueryParams<'_>) -> Result<Vec<u8>, DnsError> {
+    encode_query_inner(params, false)
+}
+
+fn encode_query_inner(params: &QueryParams<'_>, include_opt: bool) -> Result<Vec<u8>, DnsError> {
     let mut out = Vec::with_capacity(256);
     let mut flags = 0u16;
     if !params.is_query {
@@ -158,7 +166,7 @@ pub fn encode_query(params: &QueryParams<'_>) -> Result<Vec<u8>, DnsError> {
     write_u16(&mut out, params.qdcount);
     write_u16(&mut out, 0);
     write_u16(&mut out, 0);
-    write_u16(&mut out, 1);
+    write_u16(&mut out, if include_opt { 1 } else { 0 });
 
     if params.qdcount > 0 {
         encode_name(params.qname, &mut out)?;
@@ -166,7 +174,9 @@ pub fn encode_query(params: &QueryParams<'_>) -> Result<Vec<u8>, DnsError> {
         write_u16(&mut out, params.qclass);
     }
 
-    encode_opt_record(&mut out)?;
+    if include_opt {
+        encode_opt_record(&mut out)?;
+    }
 
     Ok(out)
 }
