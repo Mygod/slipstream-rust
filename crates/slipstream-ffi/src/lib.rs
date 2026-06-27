@@ -27,6 +27,12 @@ pub enum ResolverTransport {
     Tcp,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamEncoding {
+    Qname,
+    EdnsRaw,
+}
+
 #[derive(Debug)]
 pub struct ClientConfig<'a> {
     pub tcp_listen_host: &'a str,
@@ -37,6 +43,7 @@ pub struct ClientConfig<'a> {
     pub congestion_control: Option<&'a str>,
     pub gso: bool,
     pub resolver_transport: ResolverTransport,
+    pub upstream_encoding: UpstreamEncoding,
     pub pacing_gain_probe: f64,
     pub dns_tcp_packet_loop_burst: usize,
     pub keep_alive_interval: usize,

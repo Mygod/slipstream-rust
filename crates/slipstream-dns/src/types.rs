@@ -5,6 +5,7 @@ pub const RR_TXT: u16 = 16;
 pub const RR_OPT: u16 = 41;
 pub const CLASS_IN: u16 = 1;
 pub const EDNS_UDP_PAYLOAD: u16 = 1232;
+pub const EDNS_SLIPSTREAM_PAYLOAD_OPTION: u16 = 65001;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rcode {

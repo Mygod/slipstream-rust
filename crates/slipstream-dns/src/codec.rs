@@ -3,8 +3,8 @@ use crate::dots;
 
 use crate::name::{encode_name, extract_subdomain_multi, parse_name};
 use crate::types::{
-    DecodeQueryError, DecodedQuery, DnsError, QueryParams, Rcode, ResponseParams, EDNS_UDP_PAYLOAD,
-    RR_OPT, RR_TXT,
+    DecodeQueryError, DecodedQuery, DnsError, QueryParams, Rcode, ResponseParams,
+    EDNS_SLIPSTREAM_PAYLOAD_OPTION, EDNS_UDP_PAYLOAD, RR_OPT, RR_TXT,
 };
 use crate::wire::{
     parse_header, parse_question, parse_question_for_reply, read_u16, read_u32, write_u16,
@@ -49,8 +49,8 @@ pub fn decode_query_with_domains(
         });
     }
 
-    let question = match parse_question(packet, header.offset) {
-        Ok((question, _)) => question,
+    let (question, after_question) = match parse_question(packet, header.offset) {
+        Ok((question, offset)) => (question, offset),
         Err(_) => return Err(DecodeQueryError::Drop),
     };
 
@@ -76,6 +76,28 @@ pub fn decode_query_with_domains(
             })
         }
     };
+
+    if subdomain_raw.eq_ignore_ascii_case("_s") {
+        let payload = match parse_edns_raw_payload(packet, after_question, header.arcount) {
+            Some(payload) if !payload.is_empty() => payload,
+            _ => {
+                return Err(DecodeQueryError::Reply {
+                    id: header.id,
+                    rd,
+                    cd,
+                    question: Some(question),
+                    rcode: Rcode::ServerFailure,
+                })
+            }
+        };
+        return Ok(DecodedQuery {
+            id: header.id,
+            rd,
+            cd,
+            question,
+            payload,
+        });
+    }
 
     let undotted = dots::undotify(&subdomain_raw);
     if undotted.is_empty() {
@@ -110,6 +132,14 @@ pub fn decode_query_with_domains(
     })
 }
 
+pub fn build_edns_raw_qname(domain: &str) -> Result<String, DnsError> {
+    let domain = domain.trim_end_matches('.');
+    if domain.is_empty() {
+        return Err(DnsError::new("domain must not be empty"));
+    }
+    Ok(format!("_s.{}.", domain))
+}
+
 pub fn encode_query(params: &QueryParams<'_>) -> Result<Vec<u8>, DnsError> {
     let mut out = Vec::with_capacity(256);
     let mut flags = 0u16;
@@ -138,6 +168,37 @@ pub fn encode_query(params: &QueryParams<'_>) -> Result<Vec<u8>, DnsError> {
 
     encode_opt_record(&mut out)?;
 
+    Ok(out)
+}
+
+pub fn encode_query_edns_raw(
+    id: u16,
+    qname: &str,
+    payload: &[u8],
+    rd: bool,
+    cd: bool,
+) -> Result<Vec<u8>, DnsError> {
+    let mut out = Vec::with_capacity(64 + payload.len());
+    let mut flags = 0u16;
+    if rd {
+        flags |= 0x0100;
+    }
+    if cd {
+        flags |= 0x0010;
+    }
+
+    write_u16(&mut out, id);
+    write_u16(&mut out, flags);
+    write_u16(&mut out, 1);
+    write_u16(&mut out, 0);
+    write_u16(&mut out, 0);
+    write_u16(&mut out, 1);
+
+    encode_name(qname, &mut out)?;
+    write_u16(&mut out, RR_TXT);
+    write_u16(&mut out, crate::types::CLASS_IN);
+
+    encode_opt_record_with_payload(&mut out, Some(payload))?;
     Ok(out)
 }
 
@@ -277,12 +338,68 @@ pub fn is_response(packet: &[u8]) -> bool {
 }
 
 fn encode_opt_record(out: &mut Vec<u8>) -> Result<(), DnsError> {
+    encode_opt_record_with_payload(out, None)
+}
+
+fn encode_opt_record_with_payload(
+    out: &mut Vec<u8>,
+    payload: Option<&[u8]>,
+) -> Result<(), DnsError> {
     out.push(0);
     write_u16(out, RR_OPT);
     write_u16(out, EDNS_UDP_PAYLOAD);
     write_u32(out, 0);
-    write_u16(out, 0);
+    let rdlen = payload.map(|payload| payload.len() + 4).unwrap_or(0);
+    if rdlen > u16::MAX as usize {
+        return Err(DnsError::new("EDNS payload too long"));
+    }
+    write_u16(out, rdlen as u16);
+    if let Some(payload) = payload {
+        write_u16(out, EDNS_SLIPSTREAM_PAYLOAD_OPTION);
+        write_u16(out, payload.len() as u16);
+        out.extend_from_slice(payload);
+    }
     Ok(())
+}
+
+fn parse_edns_raw_payload(packet: &[u8], mut offset: usize, arcount: u16) -> Option<Vec<u8>> {
+    for _ in 0..arcount {
+        let (_, new_offset) = parse_name(packet, offset).ok()?;
+        offset = new_offset;
+        if offset + 10 > packet.len() {
+            return None;
+        }
+        let rr_type = read_u16(packet, offset)?;
+        offset += 2;
+        let _rr_class = read_u16(packet, offset)?;
+        offset += 2;
+        let _ttl = read_u32(packet, offset)?;
+        offset += 4;
+        let rdlen = read_u16(packet, offset)? as usize;
+        offset += 2;
+        if offset + rdlen > packet.len() {
+            return None;
+        }
+        if rr_type == RR_OPT {
+            let end = offset + rdlen;
+            let mut cursor = offset;
+            while cursor + 4 <= end {
+                let code = read_u16(packet, cursor)?;
+                cursor += 2;
+                let len = read_u16(packet, cursor)? as usize;
+                cursor += 2;
+                if cursor + len > end {
+                    return None;
+                }
+                if code == EDNS_SLIPSTREAM_PAYLOAD_OPTION {
+                    return Some(packet[cursor..cursor + len].to_vec());
+                }
+                cursor += len;
+            }
+        }
+        offset += rdlen;
+    }
+    None
 }
 
 #[cfg(test)]

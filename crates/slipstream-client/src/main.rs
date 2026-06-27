@@ -11,7 +11,9 @@ use slipstream_core::{
     cli::{exit_with_error, exit_with_message, init_logging, unwrap_or_exit},
     normalize_domain, parse_host_port, parse_host_port_parts, sip003, AddressKind, HostPort,
 };
-use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec, ResolverTransport};
+use slipstream_ffi::{
+    ClientConfig, ResolverMode, ResolverSpec, ResolverTransport, UpstreamEncoding,
+};
 use tokio::runtime::Builder;
 
 use pacing::DEFAULT_PACING_GAIN_PROBE;
@@ -67,6 +69,8 @@ struct Args {
     pacing_gain_probe: f64,
     #[arg(long = "dns-tcp-packet-loop-burst", default_value_t = DEFAULT_DNS_TCP_PACKET_LOOP_BURST)]
     dns_tcp_packet_loop_burst: usize,
+    #[arg(long = "upstream-encoding", value_enum, default_value_t = UpstreamEncodingArg::Qname)]
+    upstream_encoding: UpstreamEncodingArg,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -80,6 +84,21 @@ impl From<ResolverTransportArg> for ResolverTransport {
         match value {
             ResolverTransportArg::Udp => ResolverTransport::Udp,
             ResolverTransportArg::Tcp => ResolverTransport::Tcp,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum UpstreamEncodingArg {
+    Qname,
+    EdnsRaw,
+}
+
+impl From<UpstreamEncodingArg> for UpstreamEncoding {
+    fn from(value: UpstreamEncodingArg) -> Self {
+        match value {
+            UpstreamEncodingArg::Qname => UpstreamEncoding::Qname,
+            UpstreamEncodingArg::EdnsRaw => UpstreamEncoding::EdnsRaw,
         }
     }
 }
@@ -217,6 +236,7 @@ fn main() {
         cert: cert.as_deref(),
         keep_alive_interval: keep_alive_interval as usize,
         resolver_transport,
+        upstream_encoding: UpstreamEncoding::from(args.upstream_encoding),
         pacing_gain_probe: args.pacing_gain_probe,
         dns_tcp_packet_loop_burst: args.dns_tcp_packet_loop_burst,
         debug_poll: args.debug_poll,

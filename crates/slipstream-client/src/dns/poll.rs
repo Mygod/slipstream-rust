@@ -1,9 +1,12 @@
 use crate::error::ClientError;
-use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
+use slipstream_dns::{
+    build_edns_raw_qname, build_qname, encode_query, encode_query_edns_raw, QueryParams, CLASS_IN,
+    RR_TXT,
+};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_current_time, picoquic_prepare_packet_ex, slipstream_request_poll,
 };
-use slipstream_ffi::{ClientConfig, ResolverMode};
+use slipstream_ffi::{ClientConfig, ResolverMode, UpstreamEncoding};
 use std::collections::HashMap;
 
 use super::path::refresh_resolver_path;
@@ -86,20 +89,30 @@ pub(crate) async fn send_poll_queries(
         resolver.debug.polls_sent = resolver.debug.polls_sent.saturating_add(1);
 
         let poll_id = *dns_id;
-        let qname = build_qname(&send_buf[..send_length], config.domain)
-            .map_err(|err| ClientError::new(err.to_string()))?;
-        let params = QueryParams {
-            id: poll_id,
-            qname: &qname,
-            qtype: RR_TXT,
-            qclass: CLASS_IN,
-            rd: true,
-            cd: false,
-            qdcount: 1,
-            is_query: true,
+        let packet = match config.upstream_encoding {
+            UpstreamEncoding::Qname => {
+                let qname = build_qname(&send_buf[..send_length], config.domain)
+                    .map_err(|err| ClientError::new(err.to_string()))?;
+                let params = QueryParams {
+                    id: poll_id,
+                    qname: &qname,
+                    qtype: RR_TXT,
+                    qclass: CLASS_IN,
+                    rd: true,
+                    cd: false,
+                    qdcount: 1,
+                    is_query: true,
+                };
+                encode_query(&params).map_err(|err| ClientError::new(err.to_string()))?
+            }
+            UpstreamEncoding::EdnsRaw => {
+                let qname = build_edns_raw_qname(config.domain)
+                    .map_err(|err| ClientError::new(err.to_string()))?;
+                encode_query_edns_raw(poll_id, &qname, &send_buf[..send_length], true, false)
+                    .map_err(|err| ClientError::new(err.to_string()))?
+            }
         };
         *dns_id = dns_id.wrapping_add(1);
-        let packet = encode_query(&params).map_err(|err| ClientError::new(err.to_string()))?;
 
         let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
         let dest = peer_addr_mode.canonicalize(dest);

@@ -9,6 +9,7 @@ pub(crate) struct Header {
     pub(crate) cd: bool,
     pub(crate) qdcount: u16,
     pub(crate) ancount: u16,
+    pub(crate) arcount: u16,
     pub(crate) rcode: Option<Rcode>,
     pub(crate) offset: usize,
 }
@@ -22,7 +23,7 @@ pub(crate) fn parse_header(packet: &[u8]) -> Option<Header> {
     let qdcount = read_u16(packet, 4)?;
     let ancount = read_u16(packet, 6)?;
     let _nscount = read_u16(packet, 8)?;
-    let _arcount = read_u16(packet, 10)?;
+    let arcount = read_u16(packet, 10)?;
 
     let is_response = flags & 0x8000 != 0;
     let rd = flags & 0x0100 != 0;
@@ -36,6 +37,7 @@ pub(crate) fn parse_header(packet: &[u8]) -> Option<Header> {
         cd,
         qdcount,
         ancount,
+        arcount,
         rcode,
         offset: 12,
     })

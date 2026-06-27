@@ -10,7 +10,9 @@ use jni::objects::{JBooleanArray, JIntArray, JObject, JObjectArray, JString};
 use jni::sys::{jdouble, jint, jstring, JNI_VERSION_1_6};
 use jni::{JNIEnv, JavaVM};
 use slipstream_core::{normalize_domain, parse_host_port_parts, AddressKind};
-use slipstream_ffi::{ClientConfig, ResolverMode, ResolverSpec, ResolverTransport};
+use slipstream_ffi::{
+    ClientConfig, ResolverMode, ResolverSpec, ResolverTransport, UpstreamEncoding,
+};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Mutex, OnceLock};
@@ -75,10 +77,29 @@ fn store_ready(generation: u64, value: bool) {
 #[no_mangle]
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
     #[cfg(target_os = "android")]
-    platform::set_java_vm(vm);
+    {
+        platform::set_java_vm(vm);
+        platform::init_android_logging();
+    }
     #[cfg(not(target_os = "android"))]
     let _ = vm;
     JNI_VERSION_1_6
+}
+
+#[no_mangle]
+#[allow(unused_mut)]
+pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeSetLogFilePath(
+    mut env: JNIEnv<'_>,
+    _this: JObject<'_>,
+    path: JString<'_>,
+) {
+    #[cfg(target_os = "android")]
+    {
+        let path = java_string(&mut env, &path).ok();
+        platform::set_log_file_path(path);
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (env, path);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -102,6 +123,7 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
     resolver_transport: JString<'_>,
     pacing_gain_probe: jdouble,
     dns_tcp_packet_loop_burst: jint,
+    qname_compatibility_mode: bool,
 ) -> jint {
     clear_last_error();
     if RUNNING.load(Ordering::SeqCst) {
@@ -199,6 +221,11 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
                 cert: None,
                 keep_alive_interval: keep_alive_interval.max(0) as usize,
                 resolver_transport,
+                upstream_encoding: if qname_compatibility_mode {
+                    UpstreamEncoding::Qname
+                } else {
+                    UpstreamEncoding::EdnsRaw
+                },
                 pacing_gain_probe,
                 dns_tcp_packet_loop_burst,
                 debug_poll,

@@ -18,7 +18,10 @@ use crate::streams::{
     acceptor::ClientAcceptor, client_callback, drain_commands, drain_stream_data, handle_command,
     ClientState, Command,
 };
-use slipstream_dns::{build_qname, encode_query, QueryParams, CLASS_IN, RR_TXT};
+use slipstream_dns::{
+    build_edns_raw_qname, build_qname, encode_query, encode_query_edns_raw, QueryParams, CLASS_IN,
+    EDNS_UDP_PAYLOAD, RR_TXT,
+};
 use slipstream_ffi::{
     configure_quic_with_custom,
     picoquic::{
@@ -33,7 +36,7 @@ use slipstream_ffi::{
         PICOQUIC_PACKET_LOOP_SEND_MAX,
     },
     socket_addr_to_storage, take_crypto_errors, ClientConfig, QuicGuard, ResolverMode,
-    ResolverTransport,
+    ResolverTransport, UpstreamEncoding,
 };
 use std::ffi::CString;
 use std::future::pending;
@@ -49,7 +52,7 @@ const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const SLIPSTREAM_SNI: &str = "test.example.com";
 const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
-pub(crate) const DEFAULT_DNS_TCP_PACKET_LOOP_BURST: usize = 96;
+pub(crate) const DEFAULT_DNS_TCP_PACKET_LOOP_BURST: usize = 64;
 const DNS_TCP_PACKET_LOOP_BURST_MIN: usize = 1;
 const DNS_TCP_PACKET_LOOP_BURST_MAX: usize = 512;
 const DNS_TCP_RECURSIVE_POLL_CREDIT: usize = 4;
@@ -63,6 +66,10 @@ const NO_PROGRESS_TIMEOUT_US: u64 = 5_000_000;
 const NO_PROGRESS_MIN_ENQUEUED_BYTES: u64 = 128 * 1024;
 const NO_PROGRESS_ARM_LOG_INTERVAL_US: u64 = 2_000_000;
 const DOWNSTREAM_STALE_ZERO_SEND_MIN: u64 = 10_000;
+const STALE_STREAM_MIN_ENQUEUED_BYTES: u64 = 1;
+const STALE_STREAM_MIN_IDLE_US: u64 = 4_000_000;
+const MAX_UPSTREAM_BUFFERED_BYTES: u64 = 16 * 1024 * 1024;
+const UPSTREAM_BACKPRESSURE_RECENT_US: u64 = 2_000_000;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct FlowDebugSnapshot {
@@ -96,6 +103,23 @@ unsafe fn flow_debug_snapshot(cnx: *mut picoquic_cnx_t) -> FlowDebugSnapshot {
     snapshot
 }
 
+unsafe fn upstream_backpressure_bytes(
+    state_ptr: *mut ClientState,
+    cnx: *mut picoquic_cnx_t,
+    now: u64,
+) -> Option<u64> {
+    let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
+    let sent_bytes = unsafe { flow_debug_snapshot(cnx) }.data_sent;
+    let buffered = enqueued_bytes.saturating_sub(sent_bytes);
+    let recent_enqueue = last_enqueue_at != 0
+        && now.saturating_sub(last_enqueue_at) < UPSTREAM_BACKPRESSURE_RECENT_US;
+    if recent_enqueue && buffered >= MAX_UPSTREAM_BUFFERED_BYTES {
+        Some(buffered)
+    } else {
+        None
+    }
+}
+
 fn drain_disconnected_commands(command_rx: &mut mpsc::UnboundedReceiver<Command>) -> usize {
     let mut dropped = 0usize;
     while let Ok(command) = command_rx.try_recv() {
@@ -111,13 +135,20 @@ pub(crate) fn sanitize_dns_tcp_packet_loop_burst(value: usize) -> usize {
     value.clamp(DNS_TCP_PACKET_LOOP_BURST_MIN, DNS_TCP_PACKET_LOOP_BURST_MAX)
 }
 
+fn compute_transport_mtu(config: &ClientConfig<'_>) -> Result<u32, ClientError> {
+    match config.upstream_encoding {
+        UpstreamEncoding::Qname => compute_mtu(config.domain),
+        UpstreamEncoding::EdnsRaw => Ok(EDNS_UDP_PAYLOAD as u32),
+    }
+}
+
 pub async fn run_client_with_control(
     config: &ClientConfig<'_>,
     mut shutdown_rx: Option<mpsc::UnboundedReceiver<()>>,
     ready_tx: Option<std_mpsc::Sender<bool>>,
 ) -> Result<i32, ClientError> {
     report_ready(&ready_tx, false);
-    let mtu = compute_mtu(config.domain)?;
+    let mtu = compute_transport_mtu(config)?;
     let dns_tcp_packet_loop_burst =
         sanitize_dns_tcp_packet_loop_burst(config.dns_tcp_packet_loop_burst);
     let pacing_gain_probe = sanitize_pacing_gain_probe(config.pacing_gain_probe);
@@ -312,6 +343,7 @@ pub async fn run_client_with_control(
         let mut no_progress_since = 0u64;
         let mut last_no_progress_arm_log_at = 0u64;
         let mut ready_reported = false;
+        let mut fatal_no_progress: Option<String> = None;
 
         loop {
             if shutdown_requested(&mut shutdown_rx) {
@@ -319,7 +351,16 @@ pub async fn run_client_with_control(
             }
             let current_time = unsafe { picoquic_current_time() };
             drain_commands(cnx, state_ptr, &mut command_rx);
-            drain_stream_data(cnx, state_ptr);
+            if let Some(upstream_buffered) =
+                unsafe { upstream_backpressure_bytes(state_ptr, cnx, current_time) }
+            {
+                debug!(
+                    "upstream backpressure: buffered={} limit={}; pausing local TCP drain",
+                    upstream_buffered, MAX_UPSTREAM_BUFFERED_BYTES
+                );
+            } else {
+                drain_stream_data(cnx, state_ptr);
+            }
             let closing = unsafe { (*state_ptr).is_closing() };
             if closing {
                 break;
@@ -363,18 +404,25 @@ pub async fn run_client_with_control(
                 }
                 let pending_for_sleep = match resolver.mode {
                     ResolverMode::Authoritative => {
-                        let quality = fetch_path_quality(cnx, resolver);
-                        let snapshot = resolver
-                            .pacing_budget
-                            .as_mut()
-                            .map(|budget| budget.target_inflight(&quality, delay_us.max(1)));
-                        resolver.last_pacing_snapshot = snapshot;
-                        let target = snapshot
-                            .map(|snapshot| snapshot.target_inflight)
-                            .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
-                        let inflight_packets =
-                            inflight_packet_estimate(quality.bytes_in_transit, mtu);
-                        target.saturating_sub(inflight_packets)
+                        if ready && streams_len_for_sleep > 0 {
+                            let quality = fetch_path_quality(cnx, resolver);
+                            let snapshot = resolver
+                                .pacing_budget
+                                .as_mut()
+                                .map(|budget| budget.target_inflight(&quality, delay_us.max(1)));
+                            resolver.last_pacing_snapshot = snapshot;
+                            let target = snapshot
+                                .map(|snapshot| snapshot.target_inflight)
+                                .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
+                            let inflight_packets =
+                                inflight_packet_estimate(quality.bytes_in_transit, mtu);
+                            target.saturating_sub(
+                                inflight_packets.saturating_add(resolver.inflight_poll_ids.len()),
+                            )
+                        } else {
+                            resolver.last_pacing_snapshot = None;
+                            0
+                        }
                     }
                     ResolverMode::Recursive => resolver.pending_polls,
                 };
@@ -461,7 +509,17 @@ pub async fn run_client_with_control(
             }
 
             drain_commands(cnx, state_ptr, &mut command_rx);
-            drain_stream_data(cnx, state_ptr);
+            let current_time = unsafe { picoquic_current_time() };
+            if let Some(upstream_buffered) =
+                unsafe { upstream_backpressure_bytes(state_ptr, cnx, current_time) }
+            {
+                debug!(
+                    "upstream backpressure: buffered={} limit={}; pausing local TCP drain",
+                    upstream_buffered, MAX_UPSTREAM_BUFFERED_BYTES
+                );
+            } else {
+                drain_stream_data(cnx, state_ptr);
+            }
             drain_path_events(cnx, &mut resolvers, state_ptr, peer_addr_mode);
 
             for _ in 0..packet_loop_send_max {
@@ -529,21 +587,30 @@ pub async fn run_client_with_control(
                     }
                 }
 
-                let qname = build_qname(&send_buf[..send_length], config.domain)
-                    .map_err(|err| ClientError::new(err.to_string()))?;
-                let params = QueryParams {
-                    id: dns_id,
-                    qname: &qname,
-                    qtype: RR_TXT,
-                    qclass: CLASS_IN,
-                    rd: true,
-                    cd: false,
-                    qdcount: 1,
-                    is_query: true,
+                let packet = match config.upstream_encoding {
+                    UpstreamEncoding::Qname => {
+                        let qname = build_qname(&send_buf[..send_length], config.domain)
+                            .map_err(|err| ClientError::new(err.to_string()))?;
+                        let params = QueryParams {
+                            id: dns_id,
+                            qname: &qname,
+                            qtype: RR_TXT,
+                            qclass: CLASS_IN,
+                            rd: true,
+                            cd: false,
+                            qdcount: 1,
+                            is_query: true,
+                        };
+                        encode_query(&params).map_err(|err| ClientError::new(err.to_string()))?
+                    }
+                    UpstreamEncoding::EdnsRaw => {
+                        let qname = build_edns_raw_qname(config.domain)
+                            .map_err(|err| ClientError::new(err.to_string()))?;
+                        encode_query_edns_raw(dns_id, &qname, &send_buf[..send_length], true, false)
+                            .map_err(|err| ClientError::new(err.to_string()))?
+                    }
                 };
                 dns_id = dns_id.wrapping_add(1);
-                let packet =
-                    encode_query(&params).map_err(|err| ClientError::new(err.to_string()))?;
 
                 let dest = sockaddr_storage_to_socket_addr(&addr_to)?;
                 let dest = peer_addr_mode.canonicalize(dest);
@@ -644,10 +711,20 @@ pub async fn run_client_with_control(
             let downstream_stale = metrics.data_rx_queued_chunks_total == 0
                 && metrics.streams_with_data_rx_queued == 0
                 && zero_send_with_streams >= DOWNSTREAM_STALE_ZERO_SEND_MIN;
+            let stale_stream = enqueued_bytes >= STALE_STREAM_MIN_ENQUEUED_BYTES
+                && last_enqueue_at != 0
+                && now.saturating_sub(last_enqueue_at) >= STALE_STREAM_MIN_IDLE_US
+                && downstream_stale
+                && !has_ready_stream;
+            let no_recent_enqueue = last_enqueue_at != 0
+                && now.saturating_sub(last_enqueue_at) >= NO_PROGRESS_TIMEOUT_US;
+            let large_no_progress = enqueued_bytes >= NO_PROGRESS_MIN_ENQUEUED_BYTES
+                && no_recent_enqueue
+                && !has_ready_stream
+                && (!dns_send_progress || downstream_stale);
             let stalled_no_progress = connection_ready
                 && streams_len > 0
-                && enqueued_bytes >= NO_PROGRESS_MIN_ENQUEUED_BYTES
-                && (!dns_send_progress || downstream_stale)
+                && (large_no_progress || stale_stream)
                 && stalled_signal;
             if stalled_no_progress && (local_pressure || no_progress_since != 0) {
                 if no_progress_since == 0 {
@@ -657,10 +734,12 @@ pub async fn run_client_with_control(
                     {
                         last_no_progress_arm_log_at = now;
                         warn!(
-                            "no-progress detector armed: streams={} enqueued_bytes={} dns_send_bytes_total={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}",
+                            "no-progress detector armed: reason={} streams={} enqueued_bytes={} dns_send_bytes_total={} last_enqueue_ms={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}",
+                            if stale_stream { "stale_stream" } else { "large_no_progress" },
                             streams_len,
                             enqueued_bytes,
                             dns_send_bytes_total,
+                            last_enqueue_ms,
                             flow_blocked,
                             has_ready_stream,
                             metrics.data_rx_queued_chunks_total,
@@ -669,16 +748,26 @@ pub async fn run_client_with_control(
                     }
                 } else if now.saturating_sub(no_progress_since) >= NO_PROGRESS_TIMEOUT_US {
                     error!(
-                        "no-progress detected for {}ms: streams={} enqueued_bytes={} dns_send_bytes_total={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}; resetting connection",
+                        "no-progress detected for {}ms reason={}: streams={} enqueued_bytes={} dns_send_bytes_total={} last_enqueue_ms={} flow_blocked={} has_ready_stream={} data_rx_queued_chunks_total={} zero_send_with_streams={}; resetting connection",
                         now.saturating_sub(no_progress_since) / 1_000,
+                        if stale_stream { "stale_stream" } else { "large_no_progress" },
                         streams_len,
                         enqueued_bytes,
                         dns_send_bytes_total,
+                        last_enqueue_ms,
                         flow_blocked,
                         has_ready_stream,
                         metrics.data_rx_queued_chunks_total,
                         zero_send_with_streams
                     );
+                    fatal_no_progress = Some(format!(
+                        "native no-progress reason={} streams={} enqueued_bytes={} last_enqueue_ms={} zero_send_with_streams={}",
+                        if stale_stream { "stale_stream" } else { "large_no_progress" },
+                        streams_len,
+                        enqueued_bytes,
+                        last_enqueue_ms,
+                        zero_send_with_streams
+                    ));
                     break;
                 }
             } else {
@@ -692,18 +781,28 @@ pub async fn run_client_with_control(
                 }
                 match resolver.mode {
                     ResolverMode::Authoritative => {
-                        let quality = fetch_path_quality(cnx, resolver);
-                        let snapshot = resolver.last_pacing_snapshot;
-                        let pacing_target = snapshot
-                            .map(|snapshot| snapshot.target_inflight)
-                            .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
-                        let inflight_packets =
-                            inflight_packet_estimate(quality.bytes_in_transit, mtu);
-                        let mut poll_deficit = pacing_target.saturating_sub(inflight_packets);
+                        let mut quality_for_log = None;
+                        let mut poll_deficit = if streams_len > 0 {
+                            let quality = fetch_path_quality(cnx, resolver);
+                            let snapshot = resolver.last_pacing_snapshot;
+                            let pacing_target = snapshot
+                                .map(|snapshot| snapshot.target_inflight)
+                                .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
+                            let inflight_packets =
+                                inflight_packet_estimate(quality.bytes_in_transit, mtu);
+                            quality_for_log = Some(quality);
+                            pacing_target.saturating_sub(
+                                inflight_packets.saturating_add(resolver.inflight_poll_ids.len()),
+                            )
+                        } else {
+                            resolver.last_pacing_snapshot = None;
+                            0
+                        };
                         if has_ready_stream && !flow_blocked {
                             poll_deficit = 0;
                         }
                         if poll_deficit > 0 && resolver.debug.enabled {
+                            let quality = quality_for_log.unwrap_or_default();
                             debug!(
                                 "cc_state: {} cwnd={} in_transit={} rtt_us={} flow_blocked={} deficit={}",
                                 resolver.label(),
@@ -822,6 +921,10 @@ pub async fn run_client_with_control(
         let dropped = drain_disconnected_commands(&mut command_rx);
         if dropped > 0 {
             warn!("Dropped {} queued commands while reconnecting", dropped);
+        }
+        if let Some(reason) = fatal_no_progress {
+            error!("{}; leaving native reconnect to Android service", reason);
+            return Err(ClientError::new(reason));
         }
         warn!(
             "Connection closed; reconnecting in {}ms",

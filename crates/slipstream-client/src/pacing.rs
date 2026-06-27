@@ -1,11 +1,13 @@
 use slipstream_ffi::picoquic::picoquic_path_quality_t;
 
 // Pacing gain tuning for the poll-based pacing loop.
-pub(crate) const DEFAULT_PACING_GAIN_PROBE: f64 = 1.6;
+pub(crate) const DEFAULT_PACING_GAIN_PROBE: f64 = 1.4;
 const PACING_GAIN_BASE: f64 = 1.0;
 const PACING_GAIN_EPSILON: f64 = 0.05;
 const PACING_GAIN_PROBE_MIN: f64 = 1.0;
 const PACING_GAIN_PROBE_MAX: f64 = 4.0;
+const MIN_AUTHORITATIVE_TARGET_INFLIGHT: usize = 32;
+const MAX_AUTHORITATIVE_TARGET_INFLIGHT: usize = 96;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PacingBudgetSnapshot {
@@ -41,7 +43,8 @@ impl PacingPollBudget {
         let pacing_rate = quality.pacing_rate;
         let rtt_seconds = (self.derive_rtt_us(quality.rtt, rtt_proxy_us) as f64) / 1_000_000.0;
         if pacing_rate == 0 {
-            let target_inflight = cwnd_target_polls(quality.cwin, self.mtu);
+            let target_inflight =
+                clamp_authoritative_target(cwnd_target_polls(quality.cwin, self.mtu));
             let qps = target_inflight as f64 / rtt_seconds;
             self.last_pacing_rate = 0;
             return PacingBudgetSnapshot {
@@ -54,7 +57,8 @@ impl PacingPollBudget {
 
         let gain = self.next_gain(pacing_rate);
         let qps = (pacing_rate as f64 / self.payload_bytes) * gain;
-        let target_inflight = (qps * rtt_seconds).ceil().min(usize::MAX as f64) as usize;
+        let target_inflight =
+            clamp_authoritative_target((qps * rtt_seconds).ceil().min(usize::MAX as f64) as usize);
 
         PacingBudgetSnapshot {
             pacing_rate,
@@ -80,6 +84,12 @@ impl PacingPollBudget {
         self.last_pacing_rate = pacing_rate;
         gain
     }
+}
+
+fn clamp_authoritative_target(target: usize) -> usize {
+    target
+        .max(MIN_AUTHORITATIVE_TARGET_INFLIGHT)
+        .min(MAX_AUTHORITATIVE_TARGET_INFLIGHT)
 }
 
 pub(crate) fn sanitize_pacing_gain_probe(value: f64) -> f64 {
