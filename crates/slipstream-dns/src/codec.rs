@@ -60,7 +60,7 @@ pub fn decode_query_with_domains(
             rd,
             cd,
             question: Some(question),
-            rcode: Rcode::NameError,
+            rcode: Rcode::Ok,
         });
     }
 

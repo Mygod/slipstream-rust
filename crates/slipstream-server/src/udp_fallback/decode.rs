@@ -94,6 +94,7 @@ fn decode_slot(
                     if !payload.is_empty() {
                         return Ok(DecodeSlotOutcome::Slot(Slot {
                             peer,
+                            tcp_response: None,
                             id: query.id,
                             rd: query.rd,
                             cd: query.cd,
@@ -112,6 +113,7 @@ fn decode_slot(
             }
             Ok(DecodeSlotOutcome::Slot(Slot {
                 peer,
+                tcp_response: None,
                 id: query.id,
                 rd: query.rd,
                 cd: query.cd,
@@ -136,6 +138,7 @@ fn decode_slot(
             };
             Ok(DecodeSlotOutcome::Slot(Slot {
                 peer,
+                tcp_response: None,
                 id,
                 rd,
                 cd,

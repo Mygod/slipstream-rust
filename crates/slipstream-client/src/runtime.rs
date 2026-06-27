@@ -12,7 +12,10 @@ use crate::dns::{
     sockaddr_storage_to_socket_addr, DnsResponseContext, DnsTransport, PeerAddrMode,
 };
 use crate::error::ClientError;
-use crate::pacing::{cwnd_target_polls, inflight_packet_estimate, sanitize_pacing_gain_probe};
+use crate::pacing::{
+    clamp_authoritative_target, cwnd_target_polls, inflight_packet_estimate,
+    sanitize_pacing_gain_probe,
+};
 use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
     acceptor::ClientAcceptor, client_callback, drain_commands, drain_stream_data, handle_command,
@@ -424,7 +427,12 @@ pub async fn run_client_with_control(
                             resolver.last_pacing_snapshot = snapshot;
                             let target = snapshot
                                 .map(|snapshot| snapshot.target_inflight)
-                                .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
+                                .unwrap_or_else(|| {
+                                    clamp_authoritative_target(
+                                        cwnd_target_polls(quality.cwin, mtu),
+                                        mtu,
+                                    )
+                                });
                             let inflight_packets =
                                 inflight_packet_estimate(quality.bytes_in_transit, mtu);
                             target.saturating_sub(
@@ -799,7 +807,12 @@ pub async fn run_client_with_control(
                             let snapshot = resolver.last_pacing_snapshot;
                             let pacing_target = snapshot
                                 .map(|snapshot| snapshot.target_inflight)
-                                .unwrap_or_else(|| cwnd_target_polls(quality.cwin, mtu));
+                                .unwrap_or_else(|| {
+                                    clamp_authoritative_target(
+                                        cwnd_target_polls(quality.cwin, mtu),
+                                        mtu,
+                                    )
+                                });
                             let inflight_packets =
                                 inflight_packet_estimate(quality.bytes_in_transit, mtu);
                             quality_for_log = Some(quality);

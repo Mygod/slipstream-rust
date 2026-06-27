@@ -1,7 +1,10 @@
 use crate::config::{ensure_cert_key, load_or_create_reset_seed, ResetSeed};
 use crate::udp_fallback::{handle_packet, FallbackManager, PacketContext, MAX_UDP_PACKET_SIZE};
 use slipstream_core::{
-    net::{bind_first_resolved_with_ipv4_fallback, bind_udp_socket_addr, is_transient_udp_error},
+    net::{
+        bind_first_resolved_with_ipv4_fallback, bind_tcp_listener_addr, bind_udp_socket_addr,
+        is_transient_udp_error,
+    },
     normalize_dual_stack_addr, resolve_host_port, HostPort,
 };
 use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
@@ -22,9 +25,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::UdpSocket as TokioUdpSocket;
-use tokio::sync::mpsc;
-use tokio::time::sleep;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener as TokioTcpListener, TcpStream, UdpSocket as TokioUdpSocket};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::{sleep, timeout};
 
 use crate::streams::{
     drain_commands, handle_command, handle_shutdown, maybe_report_command_stats,
@@ -34,6 +38,8 @@ use crate::streams::{
 // Protocol defaults; see docs/config.md for details.
 const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const DNS_MAX_QUERY_SIZE: usize = 512;
+const DNS_TCP_MAX_QUERY_SIZE: usize = 4096;
+const DNS_TCP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_SLEEP_MS: u64 = 10;
 const IDLE_GC_INTERVAL: Duration = Duration::from_secs(1);
 // Default QUIC MTU for server packets; see docs/config.md for details.
@@ -134,6 +140,7 @@ pub(crate) enum Command {
 
 pub(crate) struct Slot {
     pub(crate) peer: SocketAddr,
+    pub(crate) tcp_response: Option<oneshot::Sender<Vec<u8>>>,
     pub(crate) id: u16,
     pub(crate) rd: bool,
     pub(crate) cd: bool,
@@ -142,6 +149,12 @@ pub(crate) struct Slot {
     pub(crate) cnx: *mut picoquic_cnx_t,
     pub(crate) path_id: libc::c_int,
     pub(crate) payload_override: Option<Vec<u8>>,
+}
+
+struct TcpDnsRequest {
+    packet: Vec<u8>,
+    peer: SocketAddr,
+    response_tx: oneshot::Sender<Vec<u8>>,
 }
 
 pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
@@ -247,7 +260,14 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     }
 
     let udp = Arc::new(bind_udp_socket(&config.dns_listen_host, config.dns_listen_port).await?);
+    let tcp = bind_tcp_listener(&config.dns_listen_host, config.dns_listen_port).await?;
     let udp_local_addr = udp.local_addr().map_err(map_io)?;
+    let tcp_local_addr = tcp.local_addr().map_err(map_io)?;
+    tracing::info!(
+        "DNS listeners ready udp={} tcp={}",
+        udp_local_addr,
+        tcp_local_addr
+    );
     let map_ipv4_peers = matches!(udp_local_addr, SocketAddr::V6(_));
     let local_addr_storage = socket_addr_to_storage(udp_local_addr);
     if let Some(addr) = fallback_addr {
@@ -271,6 +291,9 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         let handler = handle_sigterm as *const () as libc::sighandler_t;
         libc::signal(libc::SIGTERM, handler);
     }
+
+    let (tcp_dns_tx, mut tcp_dns_rx) = mpsc::unbounded_channel();
+    tokio::spawn(accept_tcp_dns(tcp, tcp_dns_tx));
 
     let recv_buf_len = if fallback_mgr.is_some() {
         MAX_UDP_PACKET_SIZE
@@ -349,6 +372,29 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                         if !is_transient_udp_error(&err) {
                             return Err(map_io(err));
                         }
+                    }
+                }
+            }
+            tcp_request = tcp_dns_rx.recv() => {
+                if let Some(request) = tcp_request {
+                    let loop_time = unsafe { picoquic_current_time() };
+                    let context = PacketContext {
+                        domains: &domains,
+                        quic,
+                        current_time: loop_time,
+                        local_addr_storage: &local_addr_storage,
+                    };
+                    let slot_start = slots.len();
+                    handle_packet(
+                        &mut slots,
+                        &request.packet,
+                        request.peer,
+                        &context,
+                        &mut fallback_mgr,
+                    )
+                    .await?;
+                    if let Some(slot) = slots.get_mut(slot_start) {
+                        slot.tcp_response = Some(request.response_tx);
                     }
                 }
             }
@@ -463,20 +509,36 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
                 rcode,
             })
             .map_err(|err| ServerError::new(err.to_string()))?;
-            let peer = if map_ipv4_peers {
-                normalize_dual_stack_addr(slot.peer)
+            if let Some(response_tx) = slot.tcp_response.take() {
+                let _ = response_tx.send(response);
             } else {
-                slot.peer
-            };
-            if let Err(err) = udp.send_to(&response, peer).await {
-                if !is_transient_udp_error(&err) {
-                    return Err(map_io(err));
+                let peer = if map_ipv4_peers {
+                    normalize_dual_stack_addr(slot.peer)
+                } else {
+                    slot.peer
+                };
+                if let Err(err) = udp.send_to(&response, peer).await {
+                    if !is_transient_udp_error(&err) {
+                        return Err(map_io(err));
+                    }
                 }
             }
         }
     }
 
     Ok(0)
+}
+
+async fn bind_tcp_listener(host: &str, port: u16) -> Result<TokioTcpListener, ServerError> {
+    bind_first_resolved_with_ipv4_fallback(
+        host,
+        port,
+        |addr| bind_tcp_listener_addr(addr),
+        "TCP listener",
+    )
+    .await
+    .map(|(listener, _)| listener)
+    .map_err(map_io)
 }
 
 async fn bind_udp_socket(host: &str, port: u16) -> Result<TokioUdpSocket, ServerError> {
@@ -489,6 +551,88 @@ async fn bind_udp_socket(host: &str, port: u16) -> Result<TokioUdpSocket, Server
     .await
     .map(|(socket, _)| socket)
     .map_err(map_io)
+}
+
+async fn accept_tcp_dns(listener: TokioTcpListener, tx: mpsc::UnboundedSender<TcpDnsRequest>) {
+    loop {
+        match listener.accept().await {
+            Ok((stream, peer)) => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = handle_tcp_dns_connection(stream, peer, tx).await {
+                        tracing::debug!("DNS TCP connection {} closed: {}", peer, err);
+                    }
+                });
+            }
+            Err(err) => {
+                tracing::warn!("DNS TCP accept failed: {}", err);
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+async fn handle_tcp_dns_connection(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    tx: mpsc::UnboundedSender<TcpDnsRequest>,
+) -> Result<(), std::io::Error> {
+    loop {
+        let mut len_buf = [0u8; 2];
+        match stream.read_exact(&mut len_buf).await {
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        }
+        let len = u16::from_be_bytes(len_buf) as usize;
+        if len == 0 || len > DNS_TCP_MAX_QUERY_SIZE {
+            tracing::warn!("Rejecting DNS TCP query from {} with length {}", peer, len);
+            return Ok(());
+        }
+
+        let mut packet = vec![0u8; len];
+        stream.read_exact(&mut packet).await?;
+        let (response_tx, response_rx) = oneshot::channel();
+        if tx
+            .send(TcpDnsRequest {
+                packet,
+                peer,
+                response_tx,
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+        let response = match timeout(DNS_TCP_RESPONSE_TIMEOUT, response_rx).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => return Ok(()),
+            Err(_) => {
+                tracing::warn!("DNS TCP response timed out for {}", peer);
+                return Ok(());
+            }
+        };
+        if response.len() > u16::MAX as usize {
+            tracing::warn!(
+                "DNS TCP response too large for {}: {} bytes",
+                peer,
+                response.len()
+            );
+            return Ok(());
+        }
+        stream
+            .write_all(&(response.len() as u16).to_be_bytes())
+            .await?;
+        stream.write_all(&response).await?;
+    }
 }
 
 pub(crate) fn map_io(err: std::io::Error) -> ServerError {
