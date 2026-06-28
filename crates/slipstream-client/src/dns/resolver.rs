@@ -45,6 +45,7 @@ pub(crate) struct ResolverState {
     pub(crate) inflight_poll_ids: HashMap<u16, u64>,
     pub(crate) pacing_budget: Option<PacingPollBudget>,
     pub(crate) last_pacing_snapshot: Option<PacingBudgetSnapshot>,
+    pub(crate) high_throughput_until: u64,
     pub(crate) debug: DebugMetrics,
 }
 
@@ -95,6 +96,7 @@ pub(crate) fn resolve_resolvers(
                 ResolverMode::Recursive => None,
             },
             last_pacing_snapshot: None,
+            high_throughput_until: 0,
             debug: DebugMetrics::new(debug_poll),
         });
     }
@@ -113,6 +115,7 @@ pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
     resolver.pending_polls = 0;
     resolver.inflight_poll_ids.clear();
     resolver.last_pacing_snapshot = None;
+    resolver.high_throughput_until = 0;
     resolver.probe_attempts = 0;
     resolver.next_probe_at = 0;
 }

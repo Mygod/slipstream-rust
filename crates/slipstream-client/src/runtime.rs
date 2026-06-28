@@ -13,8 +13,8 @@ use crate::dns::{
 };
 use crate::error::ClientError;
 use crate::pacing::{
-    clamp_authoritative_target, cwnd_target_polls, inflight_packet_estimate,
-    sanitize_pacing_gain_probe,
+    clamp_authoritative_target, clamp_authoritative_target_with_max, cwnd_target_polls,
+    inflight_packet_estimate, sanitize_pacing_gain_probe, MAX_ACTIVE_AUTHORITATIVE_TARGET_INFLIGHT,
 };
 use crate::pinning::configure_pinned_certificate;
 use crate::streams::{
@@ -420,10 +420,18 @@ pub async fn run_client_with_control(
                     ResolverMode::Authoritative => {
                         if ready && streams_len_for_sleep > 0 {
                             let quality = fetch_path_quality(cnx, resolver);
-                            let snapshot = resolver
-                                .pacing_budget
-                                .as_mut()
-                                .map(|budget| budget.target_inflight(&quality, delay_us.max(1)));
+                            let max_target = if current_time < resolver.high_throughput_until {
+                                MAX_ACTIVE_AUTHORITATIVE_TARGET_INFLIGHT
+                            } else {
+                                0
+                            };
+                            let snapshot = resolver.pacing_budget.as_mut().map(|budget| {
+                                if max_target > 0 {
+                                    budget.target_inflight(&quality, delay_us.max(1), max_target)
+                                } else {
+                                    budget.target_inflight(&quality, delay_us.max(1), 64)
+                                }
+                            });
                             resolver.last_pacing_snapshot = snapshot;
                             let target = snapshot
                                 .map(|snapshot| snapshot.target_inflight)
@@ -805,13 +813,26 @@ pub async fn run_client_with_control(
                         let mut poll_deficit = if streams_len > 0 {
                             let quality = fetch_path_quality(cnx, resolver);
                             let snapshot = resolver.last_pacing_snapshot;
+                            let max_target = if current_time < resolver.high_throughput_until {
+                                MAX_ACTIVE_AUTHORITATIVE_TARGET_INFLIGHT
+                            } else {
+                                0
+                            };
                             let pacing_target = snapshot
                                 .map(|snapshot| snapshot.target_inflight)
                                 .unwrap_or_else(|| {
-                                    clamp_authoritative_target(
-                                        cwnd_target_polls(quality.cwin, mtu),
-                                        mtu,
-                                    )
+                                    if max_target > 0 {
+                                        clamp_authoritative_target_with_max(
+                                            cwnd_target_polls(quality.cwin, mtu),
+                                            mtu,
+                                            max_target,
+                                        )
+                                    } else {
+                                        clamp_authoritative_target(
+                                            cwnd_target_polls(quality.cwin, mtu),
+                                            mtu,
+                                        )
+                                    }
                                 });
                             let inflight_packets =
                                 inflight_packet_estimate(quality.bytes_in_transit, mtu);

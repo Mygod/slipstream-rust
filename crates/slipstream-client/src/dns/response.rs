@@ -8,6 +8,9 @@ use std::net::SocketAddr;
 
 use super::resolver::{PeerAddrMode, ResolverState};
 
+const AUTHORITATIVE_HIGH_THROUGHPUT_WINDOW_US: u64 = 2_000_000;
+const AUTHORITATIVE_HIGH_THROUGHPUT_PAYLOAD_MIN: usize = 512;
+
 pub(crate) struct DnsResponseContext<'a> {
     pub(crate) quic: *mut picoquic_quic_t,
     pub(crate) local_addr_storage: &'a slipstream_ffi::SockaddrStorage,
@@ -74,6 +77,12 @@ pub(crate) fn handle_dns_response(
                 if resolver.mode == ResolverMode::Authoritative {
                     resolver.inflight_poll_ids.remove(&response_id);
                 }
+            }
+            if resolver.mode == ResolverMode::Authoritative
+                && payload.len() >= AUTHORITATIVE_HIGH_THROUGHPUT_PAYLOAD_MIN
+            {
+                resolver.high_throughput_until =
+                    current_time.saturating_add(AUTHORITATIVE_HIGH_THROUGHPUT_WINDOW_US);
             }
             if resolver.mode == ResolverMode::Recursive {
                 let credit = ctx.recursive_poll_credit.max(1);

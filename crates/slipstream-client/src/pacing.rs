@@ -8,6 +8,7 @@ const PACING_GAIN_PROBE_MIN: f64 = 1.0;
 const PACING_GAIN_PROBE_MAX: f64 = 4.0;
 const MIN_AUTHORITATIVE_TARGET_INFLIGHT: usize = 16;
 const MAX_AUTHORITATIVE_TARGET_INFLIGHT: usize = 64;
+pub(crate) const MAX_ACTIVE_AUTHORITATIVE_TARGET_INFLIGHT: usize = 384;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PacingBudgetSnapshot {
@@ -39,12 +40,16 @@ impl PacingPollBudget {
         &mut self,
         quality: &picoquic_path_quality_t,
         rtt_proxy_us: u64,
+        max_target_inflight: usize,
     ) -> PacingBudgetSnapshot {
         let pacing_rate = quality.pacing_rate;
         let rtt_seconds = (self.derive_rtt_us(quality.rtt, rtt_proxy_us) as f64) / 1_000_000.0;
         if pacing_rate == 0 {
-            let target_inflight =
-                clamp_authoritative_target(cwnd_target_polls(quality.cwin, self.mtu), self.mtu);
+            let target_inflight = clamp_authoritative_target_with_max(
+                cwnd_target_polls(quality.cwin, self.mtu),
+                self.mtu,
+                max_target_inflight,
+            );
             let qps = target_inflight as f64 / rtt_seconds;
             self.last_pacing_rate = 0;
             return PacingBudgetSnapshot {
@@ -57,9 +62,10 @@ impl PacingPollBudget {
 
         let gain = self.next_gain(pacing_rate);
         let qps = (pacing_rate as f64 / self.payload_bytes) * gain;
-        let target_inflight = clamp_authoritative_target(
+        let target_inflight = clamp_authoritative_target_with_max(
             (qps * rtt_seconds).ceil().min(usize::MAX as f64) as usize,
             self.mtu,
+            max_target_inflight,
         );
 
         PacingBudgetSnapshot {
@@ -89,9 +95,17 @@ impl PacingPollBudget {
 }
 
 pub(crate) fn clamp_authoritative_target(target: usize, _mtu: u32) -> usize {
+    clamp_authoritative_target_with_max(target, _mtu, MAX_AUTHORITATIVE_TARGET_INFLIGHT)
+}
+
+pub(crate) fn clamp_authoritative_target_with_max(
+    target: usize,
+    _mtu: u32,
+    max_target_inflight: usize,
+) -> usize {
     target
         .max(MIN_AUTHORITATIVE_TARGET_INFLIGHT)
-        .min(MAX_AUTHORITATIVE_TARGET_INFLIGHT)
+        .min(max_target_inflight.max(MIN_AUTHORITATIVE_TARGET_INFLIGHT))
 }
 
 pub(crate) fn sanitize_pacing_gain_probe(value: f64) -> f64 {
