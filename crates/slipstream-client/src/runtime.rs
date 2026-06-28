@@ -55,6 +55,7 @@ const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const SLIPSTREAM_SNI: &str = "test.example.com";
 const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;
 const DNS_POLL_SLICE_US: u64 = 50_000;
+const DNS_IDLE_SLEEP_MIN_US: u64 = 50_000;
 pub(crate) const DEFAULT_DNS_TCP_PACKET_LOOP_BURST: usize = 64;
 const DNS_TCP_PACKET_LOOP_BURST_MIN: usize = 1;
 const DNS_TCP_PACKET_LOOP_BURST_MAX: usize = 512;
@@ -465,6 +466,8 @@ pub async fn run_client_with_control(
             // Avoid a tight poll loop when idle, but keep the short slice during active transfers.
             let timeout_us = if has_work {
                 delay_us.clamp(1, DNS_POLL_SLICE_US)
+            } else if ready {
+                delay_us.max(DNS_IDLE_SLEEP_MIN_US)
             } else {
                 delay_us.max(1)
             };
