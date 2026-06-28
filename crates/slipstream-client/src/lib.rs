@@ -13,9 +13,10 @@ use slipstream_core::{normalize_domain, parse_host_port_parts, AddressKind};
 use slipstream_ffi::{
     ClientConfig, ResolverMode, ResolverSpec, ResolverTransport, UpstreamEncoding,
 };
+use std::collections::HashMap;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc as std_mpsc, Mutex, OnceLock};
+use std::sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
@@ -30,7 +31,15 @@ struct ClientHandle {
     generation: u64,
 }
 
+struct ProbeClientHandle {
+    stop_tx: mpsc::UnboundedSender<()>,
+    thread: JoinHandle<()>,
+    running: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+}
+
 static CLIENT: OnceLock<Mutex<Option<ClientHandle>>> = OnceLock::new();
+static PROBE_CLIENTS: OnceLock<Mutex<HashMap<u16, ProbeClientHandle>>> = OnceLock::new();
 static CLIENT_GENERATION: AtomicU64 = AtomicU64::new(0);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
@@ -40,6 +49,10 @@ const STOP_JOIN_POLL: Duration = Duration::from_millis(25);
 
 fn client_slot() -> &'static Mutex<Option<ClientHandle>> {
     CLIENT.get_or_init(|| Mutex::new(None))
+}
+
+fn probe_clients_slot() -> &'static Mutex<HashMap<u16, ProbeClientHandle>> {
+    PROBE_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn last_error_slot() -> &'static Mutex<Option<String>> {
@@ -285,12 +298,201 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartSlips
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStartProbeClient(
+    mut env: JNIEnv<'_>,
+    _this: JObject<'_>,
+    domain: JString<'_>,
+    resolver_hosts: JObjectArray<'_>,
+    resolver_ports: JIntArray<'_>,
+    resolver_authoritative: JBooleanArray<'_>,
+    listen_port: jint,
+    listen_host: JString<'_>,
+    congestion_control: JString<'_>,
+    keep_alive_interval: jint,
+    gso_enabled: bool,
+    debug_poll: bool,
+    debug_streams: bool,
+    _idle_poll_interval: jint,
+    _idle_timeout_ms: jint,
+    resolver_transport: JString<'_>,
+    pacing_gain_probe: jdouble,
+    dns_tcp_packet_loop_burst: jint,
+    qname_compatibility_mode: bool,
+    qname_mtu: jint,
+) -> jint {
+    clear_last_error();
+
+    let domain = match java_string(&mut env, &domain)
+        .and_then(|value| normalize_domain(&value).map_err(|err| err.to_string()))
+    {
+        Ok(domain) => domain,
+        Err(err) => {
+            set_last_error(err);
+            return -1;
+        }
+    };
+    let listen_host = match java_string(&mut env, &listen_host) {
+        Ok(host) => host,
+        Err(err) => {
+            set_last_error(err);
+            return -2;
+        }
+    };
+    let congestion_control = match java_string(&mut env, &congestion_control) {
+        Ok(value) if value.trim().is_empty() => None,
+        Ok(value) => Some(value),
+        Err(err) => {
+            set_last_error(err);
+            return -2;
+        }
+    };
+    let resolver_transport = match java_string(&mut env, &resolver_transport) {
+        Ok(value) => parse_resolver_transport(&value),
+        Err(err) => {
+            set_last_error(err);
+            return -2;
+        }
+    };
+    let mut resolvers = match read_resolvers(
+        &mut env,
+        resolver_hosts,
+        resolver_ports,
+        resolver_authoritative,
+    ) {
+        Ok(resolvers) => resolvers,
+        Err(err) => {
+            set_last_error(err);
+            return -2;
+        }
+    };
+    if resolver_transport == ResolverTransport::Tcp && resolvers.len() > 1 {
+        resolvers.truncate(1);
+    }
+    if resolvers.is_empty() || !(1..=u16::MAX as jint).contains(&listen_port) {
+        set_last_error("invalid Slipstream probe resolver or listen port configuration");
+        return -2;
+    }
+    let listen_port_u16 = listen_port as u16;
+    let _ = stop_probe_client_by_port(listen_port_u16);
+    let pacing_gain_probe = sanitize_pacing_gain_probe(pacing_gain_probe);
+    let dns_tcp_packet_loop_burst = if dns_tcp_packet_loop_burst > 0 {
+        sanitize_dns_tcp_packet_loop_burst(dns_tcp_packet_loop_burst as usize)
+    } else {
+        DEFAULT_DNS_TCP_PACKET_LOOP_BURST
+    };
+
+    let (stop_tx, stop_rx) = mpsc::unbounded_channel();
+    let (ready_tx, ready_rx) = std_mpsc::channel();
+    let (started_tx, started_rx) = std_mpsc::channel();
+    let running_flag = Arc::new(AtomicBool::new(false));
+    let ready_flag = Arc::new(AtomicBool::new(false));
+    let thread_running = Arc::clone(&running_flag);
+    let thread_ready = Arc::clone(&ready_flag);
+    let thread = match thread::Builder::new()
+        .name(format!("slipstream-probe-client-{}", listen_port_u16))
+        .spawn(move || {
+            thread_running.store(true, Ordering::SeqCst);
+            thread_ready.store(false, Ordering::SeqCst);
+            let _ = started_tx.send(());
+            let runtime = match Builder::new_current_thread()
+                .enable_io()
+                .enable_time()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    set_last_error(format!("failed to build probe Tokio runtime: {}", err));
+                    thread_running.store(false, Ordering::SeqCst);
+                    return;
+                }
+            };
+            let config = ClientConfig {
+                tcp_listen_host: &listen_host,
+                tcp_listen_port: listen_port as u16,
+                resolvers: &resolvers,
+                congestion_control: congestion_control.as_deref(),
+                gso: gso_enabled,
+                domain: &domain,
+                cert: None,
+                keep_alive_interval: keep_alive_interval.max(0) as usize,
+                resolver_transport,
+                upstream_encoding: if qname_compatibility_mode {
+                    UpstreamEncoding::Qname
+                } else {
+                    UpstreamEncoding::EdnsRaw
+                },
+                qname_mtu: qname_mtu.max(0) as u32,
+                pacing_gain_probe,
+                dns_tcp_packet_loop_burst,
+                debug_poll,
+                debug_streams,
+            };
+            if let Err(err) = runtime.block_on(runtime::run_client_with_control(
+                &config,
+                Some(stop_rx),
+                Some(ready_tx),
+            )) {
+                set_last_error(err.to_string());
+            }
+            thread_ready.store(false, Ordering::SeqCst);
+            thread_running.store(false, Ordering::SeqCst);
+        }) {
+        Ok(thread) => thread,
+        Err(err) => {
+            set_last_error(format!("failed to spawn Slipstream probe thread: {}", err));
+            return -10;
+        }
+    };
+    let _ = started_rx.recv_timeout(Duration::from_secs(1));
+    thread::sleep(Duration::from_millis(150));
+    if !running_flag.load(Ordering::SeqCst) {
+        let _ = thread.join();
+        return -11;
+    }
+
+    let ready_watcher = Arc::clone(&ready_flag);
+    thread::spawn(move || {
+        while let Ok(ready) = ready_rx.recv() {
+            ready_watcher.store(ready, Ordering::SeqCst);
+        }
+        ready_watcher.store(false, Ordering::SeqCst);
+    });
+
+    if let Ok(mut clients) = probe_clients_slot().lock() {
+        clients.insert(listen_port_u16, ProbeClientHandle {
+            stop_tx,
+            thread,
+            running: running_flag,
+            ready: ready_flag,
+        });
+        0
+    } else {
+        set_last_error("failed to lock Slipstream probe client state");
+        -10
+    }
+}
+
 #[no_mangle]
 pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStopSlipstreamClient(
     _env: JNIEnv<'_>,
     _this: JObject<'_>,
 ) {
     let _ = stop_running_client();
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeStopProbeClient(
+    _env: JNIEnv<'_>,
+    _this: JObject<'_>,
+    listen_port: jint,
+) {
+    if (1..=u16::MAX as jint).contains(&listen_port) {
+        let _ = stop_probe_client_by_port(listen_port as u16);
+    } else {
+        let _ = stop_all_probe_clients();
+    }
 }
 
 #[no_mangle]
@@ -302,11 +504,55 @@ pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeIsClientRu
 }
 
 #[no_mangle]
+pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeIsProbeRunning(
+    _env: JNIEnv<'_>,
+    _this: JObject<'_>,
+    listen_port: jint,
+) -> bool {
+    if let Ok(clients) = probe_clients_slot().lock() {
+        if (1..=u16::MAX as jint).contains(&listen_port) {
+            clients
+                .get(&(listen_port as u16))
+                .map(|client| client.running.load(Ordering::SeqCst))
+                .unwrap_or(false)
+        } else {
+            clients
+                .values()
+                .any(|client| client.running.load(Ordering::SeqCst))
+        }
+    } else {
+        false
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeIsQuicReady(
     _env: JNIEnv<'_>,
     _this: JObject<'_>,
 ) -> bool {
     READY.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_slipnet_tunnel_SlipstreamBridge_nativeIsProbeReady(
+    _env: JNIEnv<'_>,
+    _this: JObject<'_>,
+    listen_port: jint,
+) -> bool {
+    if let Ok(clients) = probe_clients_slot().lock() {
+        if (1..=u16::MAX as jint).contains(&listen_port) {
+            clients
+                .get(&(listen_port as u16))
+                .map(|client| client.ready.load(Ordering::SeqCst))
+                .unwrap_or(false)
+        } else {
+            clients
+                .values()
+                .any(|client| client.ready.load(Ordering::SeqCst))
+        }
+    } else {
+        false
+    }
 }
 
 #[no_mangle]
@@ -348,6 +594,46 @@ fn stop_running_client() -> Result<(), String> {
     if generation.map_or(true, is_current_generation) {
         RUNNING.store(false, Ordering::SeqCst);
         READY.store(false, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+fn stop_probe_handle(handle: ProbeClientHandle, timeout: Duration) {
+    let _ = handle.stop_tx.send(());
+    let deadline = Instant::now() + timeout;
+    while !handle.thread.is_finished() && Instant::now() < deadline {
+        thread::sleep(STOP_JOIN_POLL);
+    }
+    if handle.thread.is_finished() {
+        let _ = handle.thread.join();
+    } else {
+        set_last_error("Slipstream probe client stop timed out; detached native thread");
+    }
+    handle.running.store(false, Ordering::SeqCst);
+    handle.ready.store(false, Ordering::SeqCst);
+}
+
+fn stop_probe_client_by_port(port: u16) -> Result<(), String> {
+    let handle = probe_clients_slot()
+        .lock()
+        .map_err(|_| "failed to lock Slipstream probe client state".to_string())?
+        .remove(&port);
+    if let Some(handle) = handle {
+        stop_probe_handle(handle, STOP_JOIN_TIMEOUT);
+    }
+    Ok(())
+}
+
+fn stop_all_probe_clients() -> Result<(), String> {
+    let handles: Vec<ProbeClientHandle> = probe_clients_slot()
+        .lock()
+        .map_err(|_| "failed to lock Slipstream probe client state".to_string())?
+        .drain()
+        .map(|(_, handle)| handle)
+        .collect();
+    let per_client_timeout = Duration::from_secs(2);
+    for handle in handles {
+        stop_probe_handle(handle, per_client_timeout);
     }
     Ok(())
 }
