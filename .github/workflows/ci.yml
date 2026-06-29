@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  rust-tests:
-    name: Rust Tests
+  rust-checks:
+    name: Rust Checks
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -35,40 +35,7 @@ jobs:
       - name: Rust tests
         env:
           RUST_BACKTRACE: "1"
-        run: |
-          cargo test -p slipstream-dns
-          cargo test
-
-      - name: IPv4 listener check
-        run: ./scripts/verify_ipv4_listener.sh
-
-  rust-tests-ignored:
-    name: Rust Tests (Ignored)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libssl-dev python3
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run ignored tests
-        env:
-          RUST_BACKTRACE: "1"
-        run: |
-          cargo test -p slipstream-dns -- --ignored
-          cargo test --workspace --exclude slipstream-dns -- --ignored
+        run: cargo test
 
   cargo-audit:
     name: Cargo Audit
@@ -86,293 +53,30 @@ jobs:
       - name: Run cargo audit
         run: cargo audit
 
-  rust-clippy-features:
-    name: Rust Clippy (features)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libssl-dev python3
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust clippy (features)
-        env:
-          PICOQUIC_BUILD_DIR: .picoquic-build/minimal
-        run: cargo clippy -p slipstream-client -p slipstream-server --features openssl-vendored,picoquic-minimal-build -- -D warnings
-
-  build-binaries-macos-arm64:
-    name: Build Binaries (macos-arm64)
-    runs-on: macos-26
-    timeout-minutes: 40
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Build binary artifact
-        uses: ./.github/actions/build-binary
-        with:
-          target: aarch64-apple-darwin
-          artifact-name: slipstream-macos-arm64
-
-  build-binaries-macos-x86_64:
-    name: Build Binaries (macos-x86_64)
-    runs-on: macos-15-intel
-    timeout-minutes: 40
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Build binary artifact
-        uses: ./.github/actions/build-binary
-        with:
-          target: x86_64-apple-darwin
-          artifact-name: slipstream-macos-x86_64
-
-  build-binaries-linux-x86_64:
-    name: Build Binaries (linux-x86_64)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Build binary artifact
-        uses: ./.github/actions/build-binary
-        with:
-          target: x86_64-unknown-linux-gnu
-          artifact-name: slipstream-linux-x86_64
-
-  build-binaries-linux-arm64:
-    name: Build Binaries (linux-arm64)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 40
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Build binary artifact
-        uses: ./.github/actions/build-binary
-        with:
-          target: aarch64-unknown-linux-gnu
-          artifact-name: slipstream-linux-arm64
-
-  build-binaries-windows-x86_64:
-    name: Build Binaries (windows-x86_64)
-    runs-on: windows-2025
-    timeout-minutes: 40
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Build binary artifact
-        uses: ./.github/actions/build-binary
-        with:
-          target: x86_64-pc-windows-msvc
-          artifact-name: slipstream-windows-x86_64
-          windows-platform: x64
-          vcpkg-triplet: x64-windows-static-md
-
-  build-binaries-windows-arm64:
-    name: Build Binaries (windows-arm64)
-    runs-on: windows-11-arm
-    timeout-minutes: 40
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Build binary artifact
-        uses: ./.github/actions/build-binary
-        with:
-          target: aarch64-pc-windows-msvc
-          artifact-name: slipstream-windows-arm64
-          windows-platform: ARM64
-          vcpkg-triplet: arm64-windows-static-md
-
-  interop:
-    name: Interop (${{ matrix.name }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # C repo interop disabled (C repo currently broken).
-          # - name: run_local
-          #   script: run_local.sh
-          # - name: run_rust_client
-          #   script: run_rust_client.sh
-          # - name: run_rust_server
-          #   script: run_rust_server.sh
-          - name: rust-rust
-            script: run_rust_rust.sh
-            domains: ""
-            client_domain: ""
-          - name: rust-rust-multi-domain
-            script: run_rust_rust.sh
-            domains: "example.com,tunnel.example.com"
-            client_domain: "tunnel.example.com"
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      # C repo interop disabled (C repo currently broken).
-      # - name: Check out C slipstream
-      #   uses: actions/checkout@v4
-      #   with:
-      #     repository: EndPositive/slipstream
-      #     path: slipstream-c
-      #     submodules: recursive
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y meson ninja-build cmake pkg-config libssl-dev python3
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run interop script
-        env:
-          SLIPSTREAM_DIR: slipstream-c
-          RUST_BACKTRACE: "1"
-          DOMAINS: ${{ matrix.domains }}
-          CLIENT_DOMAIN: ${{ matrix.client_domain }}
-        run: ./scripts/interop/${{ matrix.script }}
-
-  benchmarks:
-    name: Bench (${{ matrix.name }})
-    runs-on: ubuntu-24.04
+  build-binaries:
+    name: Build Binaries (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: rust-rust
-            script: run_rust_rust_10mb.sh
-            needs_c: false
-            client_args: ""
-            resolver_mode: resolver
-            min_exfil: "5"
-            min_download: "10"
-            artifact_glob: bench-rust-rust-*
-          - name: rust-rust-auth
-            script: run_rust_rust_10mb.sh
-            needs_c: false
-            client_args: ""
-            resolver_mode: authoritative
-            min_exfil: "5"
-            min_download: "15"
-            artifact_glob: bench-rust-rust-*
-          - name: rust-rust-mixed
-            script: run_rust_rust_10mb.sh
-            needs_c: false
-            client_args: ""
-            resolver_mode: mixed
-            min_exfil: "5"
-            min_download: "25"
-            artifact_glob: bench-rust-rust-mixed-*
-          # C repo benchmark disabled (C repo currently broken).
-          # - name: c-c
-          #   script: run_c_c_10mb.sh
-          #   needs_c: true
+          - name: mipsel-musl
+            runner: ubuntu-24.04
+            artifact: slipstream-linux-mipsel-musl
+            build_script: ./scripts/build-mipsel-musl.sh
+            client_binary: build/slipstream-client-linux-mipsel-musl
+            server_binary: build/slipstream-server-linux-mipsel-musl
     steps:
       - name: Check out slipstream-rust
         uses: actions/checkout@v6
         with:
           submodules: recursive
 
-      # C repo benchmark disabled (C repo currently broken).
-      # - name: Check out C slipstream
-      #   if: matrix.needs_c
-      #   uses: actions/checkout@v4
-      #   with:
-      #     repository: EndPositive/slipstream
-      #     path: slipstream-c
-      #     submodules: recursive
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y meson ninja-build cmake pkg-config libssl-dev python3
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run benchmark
-        env:
-          SLIPSTREAM_DIR: slipstream-c
-          RUNS: "5"
-          TRANSFER_BYTES: "10485760"
-          CLIENT_ARGS: ${{ matrix.client_args }}
-          RESOLVER_MODE: ${{ matrix.resolver_mode }}
-          MIN_AVG_MIB_S_EXFIL: ${{ matrix.min_exfil }}
-          MIN_AVG_MIB_S_DOWNLOAD: ${{ matrix.min_download }}
-        run: ./scripts/bench/${{ matrix.script }}
-
-      - name: Upload benchmark logs
-        if: always()
-        uses: actions/upload-artifact@v7
+      - name: Build binary artifact
+        uses: ./.github/actions/build-binary
         with:
-          name: bench-${{ matrix.name }}-logs
-          path: .interop/${{ matrix.artifact_glob }}
-          include-hidden-files: true
-
-  bench-memory:
-    name: Bench Memory (rust-rust)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    steps:
-      - name: Check out slipstream-rust
-        uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake pkg-config libssl-dev python3 procps
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run memory benchmark
-        env:
-          TRANSFER_BYTES: "104857600"
-          RUNS: "1"
-          RUN_EXFIL: "1"
-          RUN_DOWNLOAD: "1"
-          SOCKET_TIMEOUT: "60"
-          MAX_RSS_MB: "80"
-          MIN_AVG_MIB_S: "0"
-        run: ./scripts/bench/run_rust_rust_mem.sh
-
-      - name: Upload memory logs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: bench-rust-rust-mem-logs
-          path: .interop/mem-rust-rust-*.csv
-          include-hidden-files: true
+          build-script: ${{ matrix.build_script }}
+          artifact-name: ${{ matrix.artifact }}
+          client-binary: ${{ matrix.client_binary }}
+          server-binary: ${{ matrix.server_binary }}

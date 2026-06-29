@@ -2,176 +2,52 @@ name: Build slipstream binary artifact
 description: Build, package, and upload slipstream client/server binaries.
 
 inputs:
-  target:
-    description: Rust target triple.
+  build-script:
+    description: Repository script that builds the target binaries.
     required: true
   artifact-name:
     description: Uploaded artifact name and checksum basename.
     required: true
-  windows-platform:
-    description: MSVC platform to use for Windows picoquic builds.
-    required: false
-    default: x64
-  vcpkg-triplet:
-    description: vcpkg triplet used for Windows OpenSSL.
-    required: false
-    default: ""
+  client-binary:
+    description: Path to the built client binary.
+    required: true
+  server-binary:
+    description: Path to the built server binary.
+    required: true
 
 runs:
   using: composite
   steps:
-    - name: Install build dependencies (Linux)
-      if: runner.os == 'Linux'
+    - name: Build binaries
       shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake pkg-config libssl-dev python3
-
-    - name: Install build dependencies (macOS)
-      if: runner.os == 'macOS'
-      shell: bash
-      run: |
-        brew install cmake pkg-config openssl@3
-        echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
-        echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
-
-    - name: Install OpenSSL with vcpkg (Windows)
-      if: ${{ runner.os == 'Windows' && inputs.vcpkg-triplet != '' }}
-      shell: pwsh
-      run: |
-        $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
-        if ([string]::IsNullOrWhiteSpace($vcpkgRoot)) {
-          $vcpkgRoot = $env:VCPKG_ROOT
-        }
-        if ([string]::IsNullOrWhiteSpace($vcpkgRoot)) {
-          $vcpkgRoot = "C:\vcpkg"
-        }
-        $vcpkg = Join-Path $vcpkgRoot "vcpkg.exe"
-        if (!(Test-Path $vcpkg)) {
-          throw "Could not locate vcpkg.exe at $vcpkg"
-        }
-        $triplet = "${{ inputs.vcpkg-triplet }}"
-        $hostTriplet = if ("${{ inputs.windows-platform }}" -ieq "ARM64") {
-          "arm64-windows"
-        } else {
-          "x64-windows"
-        }
-        & $vcpkg install "pkgconf:$hostTriplet" "openssl:$triplet"
-        if ($LASTEXITCODE -ne 0) {
-          throw "vcpkg failed to install pkgconf:$hostTriplet or openssl:$triplet"
-        }
-        $opensslRoot = Join-Path $vcpkgRoot "installed\$triplet"
-        if (!(Test-Path $opensslRoot)) {
-          throw "vcpkg OpenSSL root does not exist: $opensslRoot"
-        }
-        $pkgConfigCandidates = @(
-          (Join-Path $vcpkgRoot "installed\$hostTriplet\tools\pkgconf\pkgconf.exe"),
-          (Join-Path $vcpkgRoot "installed\$hostTriplet\tools\pkgconf\pkg-config.exe")
-        )
-        $pkgConfig = $pkgConfigCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-        if (!$pkgConfig) {
-          throw "vcpkg pkgconf executable was not found for $hostTriplet"
-        }
-        "PKG_CONFIG=$pkgConfig" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-        "PKG_CONFIG_EXECUTABLE=$pkgConfig" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-        "PKG_CONFIG_PATH=$(Join-Path $opensslRoot 'lib\pkgconfig')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-        "OPENSSL_ROOT_DIR=$opensslRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-        "OPENSSL_INCLUDE_DIR=$(Join-Path $opensslRoot 'include')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-        "OPENSSL_LIB_DIR=$(Join-Path $opensslRoot 'lib')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-    - name: Build picoquic with CMake (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        .\scripts\build_picoquic_windows.ps1 -Platform "${{ inputs.windows-platform }}"
-
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ inputs.target }}
-
-    - name: Test slipstream-ffi (Windows)
-      if: runner.os == 'Windows'
-      shell: bash
-      run: |
-        cargo test -p slipstream-ffi --target ${{ inputs.target }}
-
-    - name: Build slipstream-client
-      shell: bash
-      run: |
-        cargo build -p slipstream-client --release --target ${{ inputs.target }}
-
-    - name: Build slipstream-server
-      shell: bash
-      run: |
-        cargo build -p slipstream-server --release --target ${{ inputs.target }}
+      run: ${{ inputs.build-script }}
 
     - name: Package binaries
       shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        CLIENT_BINARY: ${{ inputs.client-binary }}
+        SERVER_BINARY: ${{ inputs.server-binary }}
       run: |
         set -euo pipefail
+
         dist_dir="dist"
-        base_name="${{ inputs.artifact-name }}"
-        package_dir="${dist_dir}/${base_name}"
-        bin_dir="target/${{ inputs.target }}/release"
-        bin_suffix=""
-        if [[ "${RUNNER_OS}" == "Windows" ]]; then
-          bin_suffix=".exe"
-        fi
+        package_dir="${dist_dir}/${ARTIFACT_NAME}"
         rm -rf "${package_dir}"
         mkdir -p "${package_dir}"
-        cp "${bin_dir}/slipstream-client${bin_suffix}" "${package_dir}/"
-        cp "${bin_dir}/slipstream-server${bin_suffix}" "${package_dir}/"
 
-    - name: Verify Windows artifact dependencies
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: ./scripts/verify_windows_artifact_deps.ps1 -DistDir "dist/${{ inputs.artifact-name }}" -TargetPlatform "${{ inputs.windows-platform }}"
+        cp "${CLIENT_BINARY}" "${package_dir}/"
+        cp "${SERVER_BINARY}" "${package_dir}/"
 
-    - name: Create binary archive (Unix)
-      if: runner.os != 'Windows'
-      shell: bash
-      run: |
-        set -euo pipefail
-        tar -C dist -czf "dist/${{ inputs.artifact-name }}.tar.gz" "${{ inputs.artifact-name }}"
-
-    - name: Create binary archive (Windows)
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        $baseName = "${{ inputs.artifact-name }}"
-        $packageDir = Join-Path "dist" $baseName
-        $archivePath = Join-Path "dist" "$baseName.zip"
-        Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $archivePath -Force
-
-    - name: Checksum binary archive
-      shell: bash
-      run: |
-        set -euo pipefail
-        dist_dir="dist"
-        base_name="${{ inputs.artifact-name }}"
-        found=()
-        for archive in "${dist_dir}/${base_name}.tar.gz" "${dist_dir}/${base_name}.zip"; do
-          if [[ -f "${archive}" ]]; then
-            found+=("${archive}")
-          fi
-        done
-        if [[ "${#found[@]}" -ne 1 ]]; then
-          echo "Expected exactly one archive for ${base_name}; found ${#found[@]}" >&2
-          exit 1
-        fi
-        archive_name="$(basename "${found[0]}")"
-        if command -v sha256sum >/dev/null 2>&1; then
-          (cd "${dist_dir}" && sha256sum "${archive_name}" > "${base_name}.sha256")
-        else
-          (cd "${dist_dir}" && shasum -a 256 "${archive_name}" > "${base_name}.sha256")
-        fi
-        rm -rf "${dist_dir}/${base_name}"
+        tar -C "${dist_dir}" -czf "${dist_dir}/${ARTIFACT_NAME}.tar.gz" "${ARTIFACT_NAME}"
+        (cd "${dist_dir}" && sha256sum "${ARTIFACT_NAME}.tar.gz" > "${ARTIFACT_NAME}.sha256")
+        rm -rf "${package_dir}"
 
     - name: Upload binaries
       uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
         path: |
-          dist/${{ inputs.artifact-name }}.*
+          dist/${{ inputs.artifact-name }}.tar.gz
+          dist/${{ inputs.artifact-name }}.sha256
         if-no-files-found: error

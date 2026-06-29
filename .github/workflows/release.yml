@@ -83,42 +83,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macos-arm64
-            runner: macos-26
-            target: aarch64-apple-darwin
-            artifact: slipstream-macos-arm64
-            windows_platform: x64
-            vcpkg_triplet: ""
-          - name: macos-x86_64
-            runner: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: slipstream-macos-x86_64
-            windows_platform: x64
-            vcpkg_triplet: ""
-          - name: linux-x86_64
+          - name: mipsel-musl
             runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            artifact: slipstream-linux-x86_64
-            windows_platform: x64
-            vcpkg_triplet: ""
-          - name: linux-arm64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            artifact: slipstream-linux-arm64
-            windows_platform: x64
-            vcpkg_triplet: ""
-          - name: windows-x86_64
-            runner: windows-2025
-            target: x86_64-pc-windows-msvc
-            artifact: slipstream-windows-x86_64
-            windows_platform: x64
-            vcpkg_triplet: x64-windows-static-md
-          - name: windows-arm64
-            runner: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            artifact: slipstream-windows-arm64
-            windows_platform: ARM64
-            vcpkg_triplet: arm64-windows-static-md
+            artifact: slipstream-linux-mipsel-musl
+            build_script: ./scripts/build-mipsel-musl.sh
+            client_binary: build/slipstream-client-linux-mipsel-musl
+            server_binary: build/slipstream-server-linux-mipsel-musl
     steps:
       - name: Check out release target
         uses: actions/checkout@v6
@@ -129,10 +99,10 @@ jobs:
       - name: Build binary artifact
         uses: ./.github/actions/build-binary
         with:
-          target: ${{ matrix.target }}
+          build-script: ${{ matrix.build_script }}
           artifact-name: ${{ matrix.artifact }}
-          windows-platform: ${{ matrix.windows_platform }}
-          vcpkg-triplet: ${{ matrix.vcpkg_triplet }}
+          client-binary: ${{ matrix.client_binary }}
+          server-binary: ${{ matrix.server_binary }}
 
   publish:
     name: Create release
@@ -160,22 +130,13 @@ jobs:
           target="${{ needs.validate.outputs.target }}"
           publish="${{ inputs.publish }}"
           artifacts=(
-            slipstream-macos-arm64
-            slipstream-macos-x86_64
-            slipstream-linux-x86_64
-            slipstream-linux-arm64
-            slipstream-windows-x86_64
-            slipstream-windows-arm64
+            slipstream-linux-mipsel-musl
           )
           asset_paths=()
           expected_assets=()
 
           for artifact in "${artifacts[@]}"; do
-            extension="tar.gz"
-            if [[ "${artifact}" == slipstream-windows-* ]]; then
-              extension="zip"
-            fi
-            archive="${artifact}.${extension}"
+            archive="${artifact}.tar.gz"
             checksum="${artifact}.sha256"
             for asset in "${archive}" "${checksum}"; do
               path="release-assets/${artifact}/${asset}"
@@ -196,7 +157,7 @@ jobs:
             --draft
           gh release upload "${version}" "${asset_paths[@]}" --repo "${GITHUB_REPOSITORY}"
 
-          remote_assets="$(gh release view "${version}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          remote_assets="$(gh release view "${version}" --repo "${GITHUB_REPOSITORY}" --json assets --jq ".assets[].name")"
           for asset in "${expected_assets[@]}"; do
             if ! grep -qxF "${asset}" <<< "${remote_assets}"; then
               echo "Draft release is missing uploaded asset: ${asset}" >&2
@@ -211,7 +172,7 @@ jobs:
 
           gh release edit "${version}" --repo "${GITHUB_REPOSITORY}" --draft=false
 
-          immutable="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${version}" -H X-GitHub-Api-Version:2026-03-10 --jq '.immutable')"
+          immutable="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${version}" -H X-GitHub-Api-Version:2026-03-10 --jq ".immutable")"
           if [[ "${immutable}" != "true" ]]; then
             echo "Published release is not immutable." >&2
             exit 1

@@ -41,7 +41,8 @@ use tokio::sync::{mpsc, Notify};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-// Protocol defaults; see docs/config.md for details.
+// Protocol defaults; see upstream docs for details:
+// https://github.com/Mygod/slipstream-rust/blob/main/docs/config.md
 const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const SLIPSTREAM_SNI: &str = "test.example.com";
 const DNS_WAKE_DELAY_MAX_US: i64 = 10_000_000;

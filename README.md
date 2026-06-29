@@ -1,140 +1,120 @@
-# Slipstream (Rust)
+# slipstream-rust mipsel-musl fork
 
-Slipstream is a high-performance DNS tunnel that carries QUIC packets over DNS queries and responses.
-This repository hosts the Rust rewrite of the [original C implementation](https://github.com/EndPositive/slipstream).
+This fork provides a build of
+[slipstream-rust](https://github.com/Mygod/slipstream-rust) for older
+MIPS-based routers running old Linux kernels, down to Linux 2.6.22.
 
-## What is here
+The upstream project contains the protocol description, usage documentation,
+architecture notes, and general development information. Refer to
+https://github.com/Mygod/slipstream-rust for everything outside the scope of
+this mipsel-musl fork.
 
-- slipstream-client and slipstream-server CLI binaries.
-- A DNS codec crate with vector-based tests.
-- picoquic FFI integration for multipath QUIC support.
-- Fully async with tokio.
-- And more! For a more up-to-date list of extra features, see the [merged PRs](https://github.com/Mygod/slipstream-rust/pulls?q=is%3Apr+is%3Amerged+label%3Aenhancement).
+## Target
 
-## Quick start (local dev)
+The supported binary target in this fork is:
 
-Prereqs:
-
-- Rust toolchain (stable)
-- cmake, pkg-config
-- OpenSSL headers and libs
-- python3 (for interop and benchmark scripts)
-
-Initialize the picoquic submodule:
-
+```text
+mipsel-unknown-linux-musl
 ```
+
+The local and GitHub Actions builds produce statically linked musl binaries:
+
+```text
+build/slipstream-client-linux-mipsel-musl
+build/slipstream-server-linux-mipsel-musl
+```
+
+The intended deployment target is little-endian MIPS routers where modern
+glibc-based binaries are not usable and where the kernel may lack newer Linux
+syscalls used by current Rust async runtimes.
+
+## Old Kernel Compatibility
+
+Linux 2.6.22 does not provide `epoll_create1` or flagged `eventfd` support.
+The mipsel-musl build links compatibility wrappers that fall back to older
+syscalls so Tokio can initialize on these routers.
+
+The build also uses a no-64-bit-atomic fallback in the Rust code path required
+by the MIPS target.
+
+## Local Build
+
+Requirements:
+
+- Docker
+- Git submodules initialized
+
+Initialize submodules first:
+
+```sh
 git submodule update --init --recursive
 ```
 
-On non-Windows hosts, `cargo build` will auto-build picoquic via
-`./scripts/build_picoquic.sh` when libs are missing (outputs to
-`.picoquic-build/`). For Windows MSVC targets, dot-source the helper in the
-same PowerShell session before building with Cargo. Use
-`. ./scripts/build_picoquic_windows.ps1` for x86_64, or pass `-Platform ARM64`
-for ARM64. See `docs/build.md` for details.
+Build the static mipsel-musl client and server:
 
-Build the Rust binaries:
-
-```
-cargo build -p slipstream-client -p slipstream-server
+```sh
+./scripts/build-mipsel-musl.sh
 ```
 
-Generate a test TLS cert (optional example):
+For an unstripped debug build:
 
-```
-openssl req -x509 -newkey rsa:2048 -nodes \
-  -keyout key.pem -out cert.pem -days 365 \
-  -subj "/CN=slipstream"
+```sh
+SLIPSTREAM_MIPSEL_PROFILE=debug ./scripts/build-mipsel-musl.sh
 ```
 
-Run the server:
+Debug outputs are written as:
 
-```
-cargo run -p slipstream-server -- \
-  --dns-listen-port 8853 \
-  --target-address 127.0.0.1:5201 \
-  --domain example.com \
-  --cert ./cert.pem \
-  --key ./key.pem \
-  --reset-seed ./reset-seed
+```text
+build/slipstream-client-linux-mipsel-musl-debug
+build/slipstream-server-linux-mipsel-musl-debug
 ```
 
-If the configured cert/key paths do not exist, the server auto-generates a
-self-signed ECDSA P-256 certificate (1000-year validity). If `--reset-seed`
-is omitted, the server will warn and stateless reset tokens will not persist
-across restarts.
+Set `SLIPSTREAM_MIPSEL_STRIP=0` to keep release binaries unstripped.
 
-Run the client:
+## Build Pins
 
+The default reproducibility pins live in
+`scripts/mipsel-musl/versions.env`:
+
+- Docker image: `ghcr.io/cross-rs/mipsel-unknown-linux-musl` pinned by digest
+- Rust toolchain: pinned nightly with `-Z build-std`
+- OpenSSL: pinned source version and SHA-256
+- Rust crates: `Cargo.lock` via `cargo build --locked`
+- picoquic: checked-out `vendor/picoquic` submodule commit
+
+The build script allows overrides through `SLIPSTREAM_MIPSEL_*` environment
+variables, but release builds should use the pinned defaults.
+
+## Build Helper Files
+
+- `scripts/build-mipsel-musl.sh` - local Docker build entry point
+- `scripts/mipsel-musl/versions.env` - pinned toolchain and OpenSSL versions
+- `scripts/mipsel-musl/mipsel-rust-linker.sh` - Rust linker wrapper
+- `scripts/mipsel-musl/picoquic-toolchain.cmake` - picoquic CMake toolchain
+- `scripts/mipsel-musl/old-linux-syscall-compat.c` - old kernel syscall wrappers
+- `scripts/mipsel-musl/unwind-stubs.c` - panic-abort unwind link stubs
+
+## CI And Releases
+
+GitHub Actions builds only the active mipsel-musl artifact:
+
+```text
+slipstream-linux-mipsel-musl.tar.gz
+slipstream-linux-mipsel-musl.sha256
 ```
-cargo run -p slipstream-client -- \
-  --tcp-listen-port 7000 \
-  --resolver 127.0.0.1:8853 \
-  --domain example.com
+
+The workflow remains matrix-based so additional targets, such as big-endian
+MIPS, can be added later without redesigning the release pipeline.
+
+Before releasing, validate:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p slipstream-core -p slipstream-dns
+./scripts/build-mipsel-musl.sh
 ```
-
-Note: You can also run the client against a resolver that forwards to the server. For local testing, see the interop docs.
-
-## Production note: conntrack for UDP/53
-
-For a public `slipstream-server` on port 53, tune conntrack above many distro defaults.
-
-Recommended baseline:
-
-```conf
-net.netfilter.nf_conntrack_max = 262144
-net.netfilter.nf_conntrack_udp_timeout = 15
-net.netfilter.nf_conntrack_udp_timeout_stream = 60
-```
-
-Sizing tiers:
-
-- 1 GB RAM: `131072`
-- 2-4 GB RAM: `262144`
-- 8 GB+ RAM: `524288`
-
-Keep steady-state `conntrack -C` below about 60% of `nf_conntrack_max`.
-
-## Benchmarks (local snapshot)
-
-All results below are end-to-end completion times in seconds (lower is better),
-averaged over 5 runs on local loopback. Payload: 10 MiB in each direction.
-Variants are dnstt, C-C slipstream, Rust-Rust (non-auth), and Rust-Rust (auth
-via `--authoritative <resolver>`).
-
-See `scripts/bench` for scripts used for obtaining these results.
-
-| Variant                              | Exfil avg (s) | Download avg (s) |
-|--------------------------------------| ---: | ---: |
-| dnstt                                | 16.207 | 2.492 |
-| slipstream (C)                       | 5.332 | 1.096 |
-| slipstream-rust                      | 3.249 | 0.978 |
-| slipstream-rust (Authoritative mode) | 1.602 | 0.407 |
-
-![Throughput bar chart](.github/throughput.png)
-
-## Documentation
-
-- docs/README.md for the doc index
-- docs/build.md for build prerequisites and picoquic setup
-- docs/usage.md for CLI usage
-- docs/protocol.md for DNS encapsulation notes
-- docs/dns-codec.md for codec behavior and vectors
-- docs/interop.md for local harnesses and interop
-- docs/benchmarks.md for benchmarking harnesses
-- docs/benchmarks-results.md for benchmark results
-- docs/profiling.md for profiling notes
-- docs/design.md for architecture notes
-
-## Repo layout
-
-- crates/      Rust workspace crates
-- docs/        Public docs and internal design notes
-- fixtures/    Golden DNS vectors
-- scripts/     Interop and benchmark harnesses
-- tools/       Vector generator and helpers
-- vendor/      picoquic submodule
 
 ## License
 
-Apache-2.0. See LICENSE.
+Apache-2.0. See `LICENSE`.

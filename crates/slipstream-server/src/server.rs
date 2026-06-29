@@ -31,12 +31,14 @@ use crate::streams::{
     remove_connection_streams, server_callback, ServerState,
 };
 
-// Protocol defaults; see docs/config.md for details.
+// Protocol defaults; see upstream docs for details:
+// https://github.com/Mygod/slipstream-rust/blob/main/docs/config.md
 const SLIPSTREAM_ALPN: &str = "picoquic_sample";
 const DNS_MAX_QUERY_SIZE: usize = 512;
 const IDLE_SLEEP_MS: u64 = 10;
 const IDLE_GC_INTERVAL: Duration = Duration::from_secs(1);
-// Default QUIC MTU for server packets; see docs/config.md for details.
+// Default QUIC MTU for server packets; see upstream docs for details:
+// https://github.com/Mygod/slipstream-rust/blob/main/docs/config.md
 const QUIC_MTU: u32 = 900;
 pub(crate) const STREAM_READ_CHUNK_BYTES: usize = 4096;
 pub(crate) const DEFAULT_TCP_RCVBUF_BYTES: usize = 256 * 1024;

@@ -1,5 +1,7 @@
 # Build/run artifacts
 /.interop/
+/build/
+/.cache/
 /tools/vector_gen/build/
 /.picoquic-build/
 /vendor/picotls/
