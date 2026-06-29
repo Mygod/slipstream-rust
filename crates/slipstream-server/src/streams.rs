@@ -2,7 +2,7 @@ mod command_dispatch;
 mod metrics;
 
 use crate::server::{Command, StreamKey, StreamWrite};
-use crate::target::spawn_target_connector;
+use crate::target::{spawn_target_connector, TargetMode};
 use slipstream_core::flow_control::{
     conn_reserve_bytes, consume_error_log_message, handle_stream_receive, overflow_log_message,
     promote_error_log_message, promote_streams, FlowControlState, HasFlowControlState,
@@ -19,7 +19,6 @@ use slipstream_ffi::picoquic::{
 };
 use slipstream_ffi::{abort_stream_bidi, SLIPSTREAM_FILE_CANCEL_ERROR, SLIPSTREAM_INTERNAL_ERROR};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,7 +34,7 @@ pub(crate) use self::metrics::{BacklogStreamSummary, ServerStreamMetrics};
 static INVARIANT_REPORTER: InvariantReporter = InvariantReporter::new(1_000_000);
 
 pub(crate) struct ServerState {
-    target_addr: SocketAddr,
+    target_mode: TargetMode,
     streams: HashMap<StreamKey, ServerStream>,
     multi_streams: HashSet<usize>,
     command_tx: mpsc::UnboundedSender<Command>,
@@ -50,13 +49,13 @@ pub(crate) struct ServerState {
 
 impl ServerState {
     pub(crate) fn new(
-        target_addr: SocketAddr,
+        target_mode: TargetMode,
         command_tx: mpsc::UnboundedSender<Command>,
         debug_streams: bool,
         debug_commands: bool,
     ) -> Self {
         Self {
-            target_addr,
+            target_mode,
             streams: HashMap::new(),
             multi_streams: HashSet::new(),
             command_tx,
@@ -385,7 +384,7 @@ fn handle_stream_data(
         }
         spawn_target_connector(
             key,
-            state.target_addr,
+            state.target_mode,
             state.command_tx.clone(),
             debug_streams,
             shutdown_rx,
@@ -595,7 +594,7 @@ mod tests {
     fn mark_active_stream_failure_should_remove_stream() {
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let target_addr = SocketAddr::from(([127, 0, 0, 1], 0));
-        let mut state = ServerState::new(target_addr, command_tx, false, false);
+        let mut state = ServerState::new(TargetMode::Tcp(target_addr), command_tx, false, false);
         let key = StreamKey {
             cnx: 0x1,
             stream_id: 4,
@@ -640,7 +639,7 @@ mod tests {
     fn mark_active_stream_readable_failure_should_not_leave_send_pending_stuck() {
         let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let target_addr = SocketAddr::from(([127, 0, 0, 1], 0));
-        let mut state = ServerState::new(target_addr, command_tx, false, false);
+        let mut state = ServerState::new(TargetMode::Tcp(target_addr), command_tx, false, false);
         let key = StreamKey {
             cnx: 0x1,
             stream_id: 4,

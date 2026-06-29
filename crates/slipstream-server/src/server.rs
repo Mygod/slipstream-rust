@@ -34,6 +34,7 @@ use crate::streams::{
     drain_commands, handle_command, handle_shutdown, maybe_report_command_stats,
     remove_connection_streams, server_callback, ServerState,
 };
+use crate::target::TargetMode;
 
 // Protocol defaults; see docs/config.md for details.
 const SLIPSTREAM_ALPN: &str = "picoquic_sample";
@@ -89,6 +90,7 @@ pub struct ServerConfig {
     pub idle_timeout_seconds: u64,
     pub debug_streams: bool,
     pub debug_commands: bool,
+    pub direct_socks_target: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -187,8 +189,14 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         None
     };
 
-    let target_addr = resolve_host_port(&config.target_address)
-        .map_err(|err| ServerError::new(err.to_string()))?;
+    let target_mode = if config.direct_socks_target {
+        TargetMode::DirectSocks
+    } else {
+        TargetMode::Tcp(
+            resolve_host_port(&config.target_address)
+                .map_err(|err| ServerError::new(err.to_string()))?,
+        )
+    };
     let fallback_addr = match &config.fallback_address {
         Some(address) => {
             Some(resolve_host_port(address).map_err(|err| ServerError::new(err.to_string()))?)
@@ -207,7 +215,7 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
     let debug_commands = config.debug_commands;
     let idle_timeout = Duration::from_secs(config.idle_timeout_seconds);
     let mut state = Box::new(ServerState::new(
-        target_addr,
+        target_mode,
         command_tx,
         debug_streams,
         debug_commands,

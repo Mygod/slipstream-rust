@@ -1,5 +1,6 @@
 mod config;
 mod server;
+mod socks_target;
 mod streams;
 mod target;
 mod udp_fallback;
@@ -47,6 +48,8 @@ struct Args {
     debug_streams: bool,
     #[arg(long = "debug-commands")]
     debug_commands: bool,
+    #[arg(long = "direct-socks-target")]
+    direct_socks_target: bool,
 }
 
 fn main() {
@@ -160,6 +163,7 @@ fn main() {
         idle_timeout_seconds: args.idle_timeout_seconds,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
+        direct_socks_target: args.direct_socks_target,
     };
 
     let runtime = Builder::new_current_thread()
