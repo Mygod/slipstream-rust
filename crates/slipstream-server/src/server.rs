@@ -642,10 +642,10 @@ async fn handle_tcp_dns_connection(
             );
             return Ok(());
         }
-        stream
-            .write_all(&(response.len() as u16).to_be_bytes())
-            .await?;
-        stream.write_all(&response).await?;
+        let mut frame = Vec::with_capacity(response.len() + 2);
+        frame.extend_from_slice(&(response.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&response);
+        stream.write_all(&frame).await?;
     }
 }
 

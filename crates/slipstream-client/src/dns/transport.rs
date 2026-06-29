@@ -220,9 +220,6 @@ async fn connect_tcp_resolver(
         .await
         .map_err(|_| ClientError::new("DNS-over-TCP resolver connect timed out"))?
         .map_err(|err| ClientError::new(err.to_string()))?;
-    stream
-        .set_nodelay(true)
-        .map_err(|err| ClientError::new(err.to_string()))?;
     let local_addr = stream
         .local_addr()
         .map_err(|err| ClientError::new(err.to_string()))?;
@@ -287,11 +284,10 @@ async fn write_tcp_dns_message(writer: &mut OwnedWriteHalf, packet: &[u8]) -> Re
             format!("DNS message too large for TCP transport: {}", packet.len()),
         ));
     }
-    writer
-        .write_all(&(packet.len() as u16).to_be_bytes())
-        .await?;
-    writer.write_all(packet).await?;
-    writer.flush().await
+    let mut frame = Vec::with_capacity(packet.len() + 2);
+    frame.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+    frame.extend_from_slice(packet);
+    writer.write_all(&frame).await
 }
 
 fn copy_packet(buf: &mut [u8], packet: &[u8]) -> Result<usize, Error> {

@@ -155,6 +155,7 @@ pub(crate) fn handle_command(
                     flow: FlowControlState::default(),
                 },
             );
+            state.debug_last_enqueue_at = unsafe { picoquic_current_time() };
             spawn_client_reader(
                 stream_id,
                 read_half,
@@ -247,6 +248,7 @@ pub(crate) fn handle_command(
             };
             #[cfg(not(test))]
             let ret = unsafe { picoquic_add_to_stream(cnx, stream_id, std::ptr::null(), 0, 1) };
+            state.debug_last_enqueue_at = unsafe { picoquic_current_time() };
             if ret < 0 {
                 warn!(
                     "stream {}: add_to_stream(fin) failed ret={}",

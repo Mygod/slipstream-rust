@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::time::{sleep, Duration};
 use tracing::warn;
 
-pub(super) const STREAM_READ_CHUNK_BYTES: usize = 4096;
+pub(super) const STREAM_READ_CHUNK_BYTES: usize = 32 * 1024;
 
 pub(super) enum StreamWrite {
     Data(Vec<u8>),

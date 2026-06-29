@@ -74,6 +74,8 @@ const STALE_STREAM_MIN_ENQUEUED_BYTES: u64 = 1;
 const STALE_STREAM_MIN_IDLE_US: u64 = 4_000_000;
 const MAX_UPSTREAM_BUFFERED_BYTES: u64 = 16 * 1024 * 1024;
 const UPSTREAM_BACKPRESSURE_RECENT_US: u64 = 2_000_000;
+const STREAM_ACTIVE_POLL_GRACE_US: u64 = 2_000_000;
+const IDLE_STREAM_POLL_INTERVAL_US: u64 = 250_000;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct FlowDebugSnapshot {
@@ -357,6 +359,7 @@ pub async fn run_client_with_control(
         let mut last_no_progress_dns_send_bytes = 0u64;
         let mut no_progress_since = 0u64;
         let mut last_no_progress_arm_log_at = 0u64;
+        let mut last_idle_stream_poll_at = 0u64;
         let mut ready_reported = false;
         let mut fatal_no_progress: Option<String> = None;
 
@@ -412,14 +415,27 @@ pub async fn run_client_with_control(
                 unsafe { picoquic_get_next_wake_delay(quic, current_time, DNS_WAKE_DELAY_MAX_US) };
             let delay_us = if delay_us < 0 { 0 } else { delay_us as u64 };
             let streams_len_for_sleep = unsafe { (*state_ptr).streams_len() };
-            let mut has_work = streams_len_for_sleep > 0;
+            let (_, last_enqueue_at_for_sleep) = unsafe { (*state_ptr).debug_snapshot() };
+            let has_recent_stream_activity_for_sleep = streams_len_for_sleep > 0
+                && (last_enqueue_at_for_sleep == 0
+                    || current_time.saturating_sub(last_enqueue_at_for_sleep)
+                        < STREAM_ACTIVE_POLL_GRACE_US);
+            let idle_stream_poll_due_for_sleep = streams_len_for_sleep > 0
+                && !has_recent_stream_activity_for_sleep
+                && current_time.saturating_sub(last_idle_stream_poll_at)
+                    >= IDLE_STREAM_POLL_INTERVAL_US;
+            let mut has_work = false;
             for resolver in resolvers.iter_mut() {
                 if !refresh_resolver_path(cnx, resolver) {
                     continue;
                 }
                 let pending_for_sleep = match resolver.mode {
                     ResolverMode::Authoritative => {
-                        if ready && streams_len_for_sleep > 0 {
+                        if ready
+                            && streams_len_for_sleep > 0
+                            && (has_recent_stream_activity_for_sleep
+                                || idle_stream_poll_due_for_sleep)
+                        {
                             let quality = fetch_path_quality(cnx, resolver);
                             let max_target = if current_time < resolver.high_throughput_until {
                                 MAX_ACTIVE_AUTHORITATIVE_TARGET_INFLIGHT
@@ -444,9 +460,14 @@ pub async fn run_client_with_control(
                                 });
                             let inflight_packets =
                                 inflight_packet_estimate(quality.bytes_in_transit, mtu);
-                            target.saturating_sub(
+                            let deficit = target.saturating_sub(
                                 inflight_packets.saturating_add(resolver.inflight_poll_ids.len()),
-                            )
+                            );
+                            if has_recent_stream_activity_for_sleep {
+                                deficit
+                            } else {
+                                deficit.min(1)
+                            }
                         } else {
                             resolver.last_pacing_snapshot = None;
                             0
@@ -665,6 +686,12 @@ pub async fn run_client_with_control(
             let metrics = unsafe { (*state_ptr).stream_debug_metrics() };
             let (enqueued_bytes, last_enqueue_at) = unsafe { (*state_ptr).debug_snapshot() };
             let now = unsafe { picoquic_current_time() };
+            let has_recent_stream_activity = streams_len > 0
+                && (last_enqueue_at == 0
+                    || now.saturating_sub(last_enqueue_at) < STREAM_ACTIVE_POLL_GRACE_US);
+            let idle_stream_poll_due = streams_len > 0
+                && !has_recent_stream_activity
+                && now.saturating_sub(last_idle_stream_poll_at) >= IDLE_STREAM_POLL_INTERVAL_US;
             let last_enqueue_ms = if last_enqueue_at == 0 {
                 0
             } else {
@@ -813,7 +840,9 @@ pub async fn run_client_with_control(
                 match resolver.mode {
                     ResolverMode::Authoritative => {
                         let mut quality_for_log = None;
-                        let mut poll_deficit = if streams_len > 0 {
+                        let allow_poll =
+                            has_recent_stream_activity || flow_blocked || idle_stream_poll_due;
+                        let mut poll_deficit = if streams_len > 0 && allow_poll {
                             let quality = fetch_path_quality(cnx, resolver);
                             let snapshot = resolver.last_pacing_snapshot;
                             let max_target = if current_time < resolver.high_throughput_until {
@@ -847,6 +876,9 @@ pub async fn run_client_with_control(
                             resolver.last_pacing_snapshot = None;
                             0
                         };
+                        if idle_stream_poll_due && !has_recent_stream_activity && !flow_blocked {
+                            poll_deficit = poll_deficit.min(1);
+                        }
                         if has_ready_stream && !flow_blocked {
                             poll_deficit = 0;
                         }
@@ -877,6 +909,13 @@ pub async fn run_client_with_control(
                                 &mut send_buf,
                             )
                             .await?;
+                            if idle_stream_poll_due
+                                && !has_recent_stream_activity
+                                && !flow_blocked
+                                && to_send == 0
+                            {
+                                last_idle_stream_poll_at = current_time;
+                            }
                         }
                     }
                     ResolverMode::Recursive => {
