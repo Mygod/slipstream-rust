@@ -50,6 +50,8 @@ struct Args {
     debug_commands: bool,
     #[arg(long = "direct-socks-target")]
     direct_socks_target: bool,
+    #[arg(long = "socks-proxy-target")]
+    socks_proxy_target: bool,
 }
 
 fn main() {
@@ -164,6 +166,7 @@ fn main() {
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
         direct_socks_target: args.direct_socks_target,
+        socks_proxy_target: args.socks_proxy_target,
     };
 
     let runtime = Builder::new_current_thread()

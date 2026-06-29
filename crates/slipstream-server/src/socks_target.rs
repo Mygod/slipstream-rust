@@ -19,6 +19,7 @@ const UDP_MAX_FRAME: usize = 65_535;
 
 pub(crate) fn spawn_direct_socks_target(
     key: StreamKey,
+    proxy_addr: Option<SocketAddr>,
     command_tx: mpsc::UnboundedSender<Command>,
     debug_streams: bool,
     shutdown_rx: watch::Receiver<bool>,
@@ -36,6 +37,7 @@ pub(crate) fn spawn_direct_socks_target(
         });
         run_direct_socks(
             key,
+            proxy_addr,
             write_rx,
             data_tx,
             command_tx,
@@ -49,6 +51,7 @@ pub(crate) fn spawn_direct_socks_target(
 
 async fn run_direct_socks(
     key: StreamKey,
+    proxy_addr: Option<SocketAddr>,
     mut write_rx: mpsc::UnboundedReceiver<StreamWrite>,
     data_tx: mpsc::Sender<Vec<u8>>,
     command_tx: mpsc::UnboundedSender<Command>,
@@ -81,6 +84,7 @@ async fn run_direct_socks(
                 handle_connect(
                     key,
                     request.addr,
+                    proxy_addr,
                     write_rx,
                     input,
                     data_tx,
@@ -96,6 +100,7 @@ async fn run_direct_socks(
                 }
                 handle_fwd_udp(
                     key,
+                    proxy_addr,
                     write_rx,
                     input,
                     data_tx,
@@ -132,6 +137,7 @@ async fn run_direct_socks(
 async fn handle_connect(
     key: StreamKey,
     addr: SocketAddr,
+    proxy_addr: Option<SocketAddr>,
     mut write_rx: mpsc::UnboundedReceiver<StreamWrite>,
     mut input: ChunkReader,
     data_tx: mpsc::Sender<Vec<u8>>,
@@ -139,9 +145,13 @@ async fn handle_connect(
     send_pending: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let mut target = TcpStream::connect(addr)
-        .await
-        .map_err(|err| format!("tcp connect {} failed: {}", addr, err))?;
+    let mut target = if let Some(proxy) = proxy_addr {
+        connect_via_socks_proxy(proxy, addr).await?
+    } else {
+        TcpStream::connect(addr)
+            .await
+            .map_err(|err| format!("tcp connect {} failed: {}", addr, err))?
+    };
     let _ = target.set_nodelay(true);
     send_stream_data(&data_tx, &command_tx, &send_pending, key, socks_reply(0x00)).await?;
     let coalesce_max = tcp_send_buffer_bytes(&target)
@@ -181,6 +191,7 @@ async fn handle_connect(
 
 async fn handle_fwd_udp(
     key: StreamKey,
+    proxy_addr: Option<SocketAddr>,
     mut write_rx: mpsc::UnboundedReceiver<StreamWrite>,
     mut input: ChunkReader,
     data_tx: mpsc::Sender<Vec<u8>>,
@@ -188,11 +199,22 @@ async fn handle_fwd_udp(
     send_pending: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let socket = match UdpSocket::bind("[::]:0").await {
-        Ok(socket) => socket,
-        Err(_) => UdpSocket::bind("0.0.0.0:0")
+    let relay = if let Some(proxy) = proxy_addr {
+        Some(open_socks_udp_associate(proxy).await?)
+    } else {
+        None
+    };
+    let socket = if relay.is_some() {
+        UdpSocket::bind("127.0.0.1:0")
             .await
-            .map_err(|err| format!("udp bind failed: {}", err))?,
+            .map_err(|err| format!("udp bind failed: {}", err))?
+    } else {
+        match UdpSocket::bind("[::]:0").await {
+            Ok(socket) => socket,
+            Err(_) => UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|err| format!("udp bind failed: {}", err))?,
+        }
     };
     send_stream_data(&data_tx, &command_tx, &send_pending, key, socks_reply(0x00)).await?;
     let mut recv_buf = vec![0u8; UDP_MAX_FRAME];
@@ -207,10 +229,18 @@ async fn handle_fwd_udp(
                 let Some(frame) = frame? else {
                     return Ok(());
                 };
-                socket
-                    .send_to(&frame.payload, frame.addr)
-                    .await
-                    .map_err(|err| format!("udp send {} failed: {}", frame.addr, err))?;
+                if let Some(relay) = relay.as_ref() {
+                    let packet = socks_udp_packet(frame.addr, &frame.payload)?;
+                    socket
+                        .send_to(&packet, relay.udp_addr)
+                        .await
+                        .map_err(|err| format!("udp proxy send {} failed: {}", frame.addr, err))?;
+                } else {
+                    socket
+                        .send_to(&frame.payload, frame.addr)
+                        .await
+                        .map_err(|err| format!("udp send {} failed: {}", frame.addr, err))?;
+                }
                 let _ = command_tx.send(Command::StreamWriteDrained {
                     cnx_id: key.cnx,
                     stream_id: key.stream_id,
@@ -219,8 +249,11 @@ async fn handle_fwd_udp(
             }
             recv = socket.recv_from(&mut recv_buf) => {
                 let (n, peer) = recv.map_err(|err| format!("udp recv failed: {}", err))?;
-                let addr = socks_addr_from_socket(peer)?;
-                let payload = &recv_buf[..n];
+                let (addr, payload) = if relay.is_some() {
+                    parse_socks_udp_packet(&recv_buf[..n])?
+                } else {
+                    (socks_addr_from_socket(peer)?, &recv_buf[..n])
+                };
                 let mut frame = Vec::with_capacity(3 + addr.len() + payload.len());
                 frame.push(((payload.len() >> 8) & 0xFF) as u8);
                 frame.push((payload.len() & 0xFF) as u8);
@@ -378,6 +411,114 @@ async fn parse_socks_addr_bytes(raw: &[u8]) -> Result<SocketAddr, String> {
     }
 }
 
+async fn connect_via_socks_proxy(
+    proxy: SocketAddr,
+    target: SocketAddr,
+) -> Result<TcpStream, String> {
+    let mut stream = TcpStream::connect(proxy)
+        .await
+        .map_err(|err| format!("socks proxy connect {} failed: {}", proxy, err))?;
+    socks_client_greeting(&mut stream).await?;
+    let addr = socks_addr_from_socket(target)?;
+    stream
+        .write_all(&[SOCKS_VERSION, SOCKS_CMD_CONNECT, 0x00])
+        .await
+        .map_err(|err| format!("socks connect header write failed: {}", err))?;
+    stream
+        .write_all(&addr)
+        .await
+        .map_err(|err| format!("socks connect address write failed: {}", err))?;
+    read_socks_client_reply(&mut stream).await?;
+    Ok(stream)
+}
+
+async fn open_socks_udp_associate(proxy: SocketAddr) -> Result<SocksUdpRelay, String> {
+    let mut stream = TcpStream::connect(proxy)
+        .await
+        .map_err(|err| format!("socks udp proxy connect {} failed: {}", proxy, err))?;
+    socks_client_greeting(&mut stream).await?;
+    let bind_addr = socks_addr_from_socket(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))?;
+    stream
+        .write_all(&[SOCKS_VERSION, 0x03, 0x00])
+        .await
+        .map_err(|err| format!("socks udp associate header write failed: {}", err))?;
+    stream
+        .write_all(&bind_addr)
+        .await
+        .map_err(|err| format!("socks udp associate address write failed: {}", err))?;
+    let udp_addr = read_socks_client_reply(&mut stream).await?;
+    Ok(SocksUdpRelay {
+        udp_addr,
+        _control: stream,
+    })
+}
+
+async fn socks_client_greeting(stream: &mut TcpStream) -> Result<(), String> {
+    stream
+        .write_all(&[SOCKS_VERSION, 0x01, 0x00])
+        .await
+        .map_err(|err| format!("socks greeting write failed: {}", err))?;
+    let mut reply = [0u8; 2];
+    stream
+        .read_exact(&mut reply)
+        .await
+        .map_err(|err| format!("socks greeting read failed: {}", err))?;
+    if reply != [SOCKS_VERSION, 0x00] {
+        return Err(format!("socks greeting rejected method={}", reply[1]));
+    }
+    Ok(())
+}
+
+async fn read_socks_client_reply(stream: &mut TcpStream) -> Result<SocketAddr, String> {
+    let mut header = [0u8; 4];
+    stream
+        .read_exact(&mut header)
+        .await
+        .map_err(|err| format!("socks reply read failed: {}", err))?;
+    if header[0] != SOCKS_VERSION || header[1] != 0x00 {
+        return Err(format!("socks reply rejected rep={}", header[1]));
+    }
+    read_socks_reply_addr(stream, header[3]).await
+}
+
+async fn read_socks_reply_addr(stream: &mut TcpStream, atyp: u8) -> Result<SocketAddr, String> {
+    let mut raw = vec![atyp];
+    match atyp {
+        ATYP_IPV4 => {
+            let mut rest = [0u8; 6];
+            stream
+                .read_exact(&mut rest)
+                .await
+                .map_err(|err| format!("socks ipv4 reply read failed: {}", err))?;
+            raw.extend_from_slice(&rest);
+        }
+        ATYP_IPV6 => {
+            let mut rest = [0u8; 18];
+            stream
+                .read_exact(&mut rest)
+                .await
+                .map_err(|err| format!("socks ipv6 reply read failed: {}", err))?;
+            raw.extend_from_slice(&rest);
+        }
+        ATYP_DOMAIN => {
+            let mut len = [0u8; 1];
+            stream
+                .read_exact(&mut len)
+                .await
+                .map_err(|err| format!("socks domain length reply read failed: {}", err))?;
+            raw.push(len[0]);
+            let mut rest = vec![0u8; len[0] as usize + 2];
+            stream
+                .read_exact(&mut rest)
+                .await
+                .map_err(|err| format!("socks domain reply read failed: {}", err))?;
+            raw.extend_from_slice(&rest);
+        }
+        _ => return Err("unsupported socks reply address type".to_string()),
+    }
+    parse_socks_addr_bytes(&raw).await
+}
+
 fn socks_addr_from_socket(addr: SocketAddr) -> Result<Vec<u8>, String> {
     let port = addr.port().to_be_bytes();
     let mut out = Vec::with_capacity(19);
@@ -393,6 +534,41 @@ fn socks_addr_from_socket(addr: SocketAddr) -> Result<Vec<u8>, String> {
     }
     out.extend_from_slice(&port);
     Ok(out)
+}
+
+fn socks_udp_packet(addr: SocketAddr, payload: &[u8]) -> Result<Vec<u8>, String> {
+    let socks_addr = socks_addr_from_socket(addr)?;
+    let mut out = Vec::with_capacity(3 + socks_addr.len() + payload.len());
+    out.extend_from_slice(&[0x00, 0x00, 0x00]);
+    out.extend_from_slice(&socks_addr);
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
+fn parse_socks_udp_packet(packet: &[u8]) -> Result<(Vec<u8>, &[u8]), String> {
+    if packet.len() < 10 {
+        return Err("short socks udp packet".to_string());
+    }
+    if packet[0] != 0 || packet[1] != 0 || packet[2] != 0 {
+        return Err("fragmented socks udp packet is unsupported".to_string());
+    }
+    let addr_len = match packet[3] {
+        ATYP_IPV4 => 1 + 4 + 2,
+        ATYP_IPV6 => 1 + 16 + 2,
+        ATYP_DOMAIN => {
+            if packet.len() < 5 {
+                return Err("short socks udp domain packet".to_string());
+            }
+            1 + 1 + packet[4] as usize + 2
+        }
+        _ => return Err("unsupported socks udp address type".to_string()),
+    };
+    let start = 3;
+    let end = start + addr_len;
+    if packet.len() < end {
+        return Err("truncated socks udp address".to_string());
+    }
+    Ok((packet[start..end].to_vec(), &packet[end..]))
 }
 
 fn socks_reply(rep: u8) -> Vec<u8> {
@@ -484,4 +660,9 @@ struct UdpFrame {
     addr: SocketAddr,
     payload: Vec<u8>,
     wire_len: usize,
+}
+
+struct SocksUdpRelay {
+    udp_addr: SocketAddr,
+    _control: TcpStream,
 }

@@ -91,6 +91,7 @@ pub struct ServerConfig {
     pub debug_streams: bool,
     pub debug_commands: bool,
     pub direct_socks_target: bool,
+    pub socks_proxy_target: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -189,7 +190,12 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
         None
     };
 
-    let target_mode = if config.direct_socks_target {
+    let target_mode = if config.socks_proxy_target {
+        TargetMode::SocksProxy(
+            resolve_host_port(&config.target_address)
+                .map_err(|err| ServerError::new(err.to_string()))?,
+        )
+    } else if config.direct_socks_target {
         TargetMode::DirectSocks
     } else {
         TargetMode::Tcp(

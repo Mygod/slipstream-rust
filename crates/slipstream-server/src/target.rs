@@ -15,6 +15,7 @@ use tracing::{debug, warn};
 pub(crate) enum TargetMode {
     Tcp(SocketAddr),
     DirectSocks,
+    SocksProxy(SocketAddr),
 }
 
 pub(crate) fn spawn_target_connector(
@@ -25,7 +26,23 @@ pub(crate) fn spawn_target_connector(
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     if matches!(target_mode, TargetMode::DirectSocks) {
-        crate::socks_target::spawn_direct_socks_target(key, command_tx, debug_streams, shutdown_rx);
+        crate::socks_target::spawn_direct_socks_target(
+            key,
+            None,
+            command_tx,
+            debug_streams,
+            shutdown_rx,
+        );
+        return;
+    }
+    if let TargetMode::SocksProxy(proxy_addr) = target_mode {
+        crate::socks_target::spawn_direct_socks_target(
+            key,
+            Some(proxy_addr),
+            command_tx,
+            debug_streams,
+            shutdown_rx,
+        );
         return;
     }
     let TargetMode::Tcp(target_addr) = target_mode else {
