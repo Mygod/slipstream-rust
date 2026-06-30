@@ -75,7 +75,8 @@ const STALE_STREAM_MIN_IDLE_US: u64 = 4_000_000;
 const MAX_UPSTREAM_BUFFERED_BYTES: u64 = 16 * 1024 * 1024;
 const UPSTREAM_BACKPRESSURE_RECENT_US: u64 = 2_000_000;
 const STREAM_ACTIVE_POLL_GRACE_US: u64 = 2_000_000;
-const IDLE_STREAM_POLL_INTERVAL_US: u64 = 250_000;
+// Only applies after streams go quiet. Active transfers still use the normal burst/pacing path.
+const IDLE_STREAM_POLL_INTERVAL_US: u64 = 2_000_000;
 
 #[derive(Debug, Default, Clone, Copy)]
 struct FlowDebugSnapshot {
