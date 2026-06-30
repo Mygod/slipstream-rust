@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpStream, UdpSocket};
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
@@ -17,7 +16,6 @@ const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
 const UDP_MAX_FRAME: usize = 65_535;
-const UDP_RX_DRAIN_BUDGET: usize = 32;
 
 pub(crate) fn spawn_direct_socks_target(
     key: StreamKey,
@@ -219,72 +217,94 @@ async fn handle_fwd_udp(
         }
     };
     send_stream_data(&data_tx, &command_tx, &send_pending, key, socks_reply(0x00)).await?;
-    let mut recv_buf = vec![0u8; UDP_MAX_FRAME];
-    loop {
-        tokio::select! {
-            changed = shutdown_rx.changed() => {
-                if changed.is_err() || *shutdown_rx.borrow() {
-                    return Ok(());
-                }
-            }
-            frame = read_udp_frame(&mut write_rx, &mut input) => {
-                let Some(frame) = frame? else {
-                    return Ok(());
-                };
-                if let Some(relay) = relay.as_ref() {
-                    let packet = socks_udp_packet(frame.addr, &frame.payload)?;
-                    socket
-                        .send_to(&packet, relay.udp_addr)
-                        .await
-                        .map_err(|err| format!("udp proxy send {} failed: {}", frame.addr, err))?;
-                } else {
-                    socket
-                        .send_to(&frame.payload, frame.addr)
-                        .await
-                        .map_err(|err| format!("udp send {} failed: {}", frame.addr, err))?;
-                }
-                let _ = command_tx.send(Command::StreamWriteDrained {
-                    cnx_id: key.cnx,
-                    stream_id: key.stream_id,
-                    bytes: frame.wire_len,
-                });
-            }
-            recv = socket.recv_from(&mut recv_buf) => {
-                let (n, peer) = recv.map_err(|err| format!("udp recv failed: {}", err))?;
-                forward_udp_datagram_to_stream(
-                    &data_tx,
-                    &command_tx,
-                    &send_pending,
-                    key,
-                    relay.is_some(),
-                    peer,
-                    &recv_buf[..n],
-                )?;
 
-                for _ in 1..UDP_RX_DRAIN_BUDGET {
-                    match socket.try_recv_from(&mut recv_buf) {
-                        Ok((n, peer)) => {
-                            forward_udp_datagram_to_stream(
-                                &data_tx,
-                                &command_tx,
-                                &send_pending,
-                                key,
-                                relay.is_some(),
-                                peer,
-                                &recv_buf[..n],
-                            )?;
-                        }
-                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
-                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(err) => return Err(format!("udp recv failed: {}", err)),
+    // Two independent directions, like the TCP CONNECT path:
+    //  - downstream (internet/relay -> client stream) uses send_stream_data().await
+    //    so it gets real QUIC backpressure instead of dropping datagrams. This is
+    //    what makes UDP-heavy apps (Steam Link / Parsec) reach full carrier speed
+    //    instead of collapsing to a few kbit/s due to silent drops.
+    //  - upstream (client stream -> internet/relay) runs in this task.
+    // Splitting them prevents head-of-line blocking between the two directions.
+    let socket = Arc::new(socket);
+    let from_relay = relay.is_some();
+
+    let down_socket = socket.clone();
+    let down_data_tx = data_tx.clone();
+    let down_command_tx = command_tx.clone();
+    let down_send_pending = send_pending.clone();
+    let mut down_shutdown_rx = shutdown_rx.clone();
+    let mut downstream = tokio::spawn(async move {
+        let mut recv_buf = vec![0u8; UDP_MAX_FRAME];
+        loop {
+            tokio::select! {
+                changed = down_shutdown_rx.changed() => {
+                    if changed.is_err() || *down_shutdown_rx.borrow() {
+                        return Ok::<(), String>(());
                     }
+                }
+                recv = down_socket.recv_from(&mut recv_buf) => {
+                    let (n, peer) = recv.map_err(|err| format!("udp recv failed: {}", err))?;
+                    send_udp_datagram_to_stream(
+                        &down_data_tx,
+                        &down_command_tx,
+                        &down_send_pending,
+                        key,
+                        from_relay,
+                        peer,
+                        &recv_buf[..n],
+                    )
+                    .await?;
                 }
             }
         }
-    }
+    });
+
+    let upstream = async {
+        loop {
+            tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        return Ok(());
+                    }
+                }
+                frame = read_udp_frame(&mut write_rx, &mut input) => {
+                    let Some(frame) = frame? else {
+                        return Ok(());
+                    };
+                    if let Some(relay) = relay.as_ref() {
+                        let packet = socks_udp_packet(frame.addr, &frame.payload)?;
+                        socket
+                            .send_to(&packet, relay.udp_addr)
+                            .await
+                            .map_err(|err| format!("udp proxy send {} failed: {}", frame.addr, err))?;
+                    } else {
+                        socket
+                            .send_to(&frame.payload, frame.addr)
+                            .await
+                            .map_err(|err| format!("udp send {} failed: {}", frame.addr, err))?;
+                    }
+                    let _ = command_tx.send(Command::StreamWriteDrained {
+                        cnx_id: key.cnx,
+                        stream_id: key.stream_id,
+                        bytes: frame.wire_len,
+                    });
+                }
+            }
+        }
+    };
+
+    let result = tokio::select! {
+        down_res = &mut downstream => match down_res {
+            Ok(inner) => inner,
+            Err(_) => Ok(()),
+        },
+        up_res = upstream => up_res,
+    };
+    downstream.abort();
+    result
 }
 
-fn forward_udp_datagram_to_stream(
+async fn send_udp_datagram_to_stream(
     data_tx: &mpsc::Sender<Vec<u8>>,
     command_tx: &mpsc::UnboundedSender<Command>,
     send_pending: &Arc<AtomicBool>,
@@ -304,8 +324,7 @@ fn forward_udp_datagram_to_stream(
     frame.push((3 + addr.len()) as u8);
     frame.extend_from_slice(&addr);
     frame.extend_from_slice(payload);
-    try_send_udp_stream_data(data_tx, command_tx, send_pending, key, frame)?;
-    Ok(())
+    send_stream_data(data_tx, command_tx, send_pending, key, frame).await
 }
 
 async fn read_greeting(
@@ -648,28 +667,6 @@ async fn send_stream_data(
     Ok(())
 }
 
-fn try_send_udp_stream_data(
-    data_tx: &mpsc::Sender<Vec<u8>>,
-    command_tx: &mpsc::UnboundedSender<Command>,
-    send_pending: &Arc<AtomicBool>,
-    key: StreamKey,
-    data: Vec<u8>,
-) -> Result<bool, String> {
-    match data_tx.try_send(data) {
-        Ok(()) => {
-            if !send_pending.swap(true, Ordering::SeqCst) {
-                let _ = command_tx.send(Command::StreamReadable {
-                    cnx_id: key.cnx,
-                    stream_id: key.stream_id,
-                });
-            }
-            Ok(true)
-        }
-        Err(TrySendError::Full(_)) => Ok(false),
-        Err(TrySendError::Closed(_)) => Err("stream data channel closed".to_string()),
-    }
-}
-
 #[derive(Default)]
 struct ChunkReader {
     pending: VecDeque<u8>,
@@ -735,8 +732,10 @@ struct SocksUdpRelay {
 mod tests {
     use super::*;
 
-    #[test]
-    fn udp_stream_send_drops_when_output_channel_is_full() {
+    #[tokio::test]
+    async fn udp_datagram_to_stream_uses_backpressure_without_dropping() {
+        // With a full output channel the downstream sender must wait (backpressure)
+        // and deliver every datagram in order, never silently dropping like before.
         let (data_tx, mut data_rx) = mpsc::channel(1);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         let send_pending = Arc::new(AtomicBool::new(false));
@@ -744,24 +743,46 @@ mod tests {
             cnx: 7,
             stream_id: 11,
         };
+        let peer: SocketAddr = "203.0.113.7:4321".parse().unwrap();
 
-        assert_eq!(
-            try_send_udp_stream_data(&data_tx, &command_tx, &send_pending, key, b"first".to_vec(),),
-            Ok(true)
+        send_udp_datagram_to_stream(
+            &data_tx,
+            &command_tx,
+            &send_pending,
+            key,
+            false,
+            peer,
+            b"first",
+        )
+        .await
+        .unwrap();
+
+        // Channel (cap 1) is now full; a second send must block until we drain.
+        let blocked = send_udp_datagram_to_stream(
+            &data_tx,
+            &command_tx,
+            &send_pending,
+            key,
+            false,
+            peer,
+            b"second",
         );
-        assert_eq!(
-            try_send_udp_stream_data(
-                &data_tx,
-                &command_tx,
-                &send_pending,
-                key,
-                b"dropped".to_vec(),
-            ),
-            Ok(false)
+        tokio::pin!(blocked);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut blocked)
+                .await
+                .is_err(),
+            "second datagram should be held by backpressure, not dropped"
         );
 
-        assert_eq!(data_rx.try_recv().unwrap(), b"first".to_vec());
-        assert!(data_rx.try_recv().is_err());
+        let first = data_rx.recv().await.unwrap();
+        assert!(first.ends_with(b"first"));
+
+        // After draining, the blocked send completes (no loss).
+        blocked.await.unwrap();
+        let second = data_rx.recv().await.unwrap();
+        assert!(second.ends_with(b"second"));
+
         assert!(send_pending.load(Ordering::SeqCst));
         assert!(matches!(
             command_rx.try_recv().unwrap(),
@@ -770,6 +791,6 @@ mod tests {
                 stream_id: 11
             }
         ));
-        assert!(command_rx.try_recv().is_err());
     }
 }
+
