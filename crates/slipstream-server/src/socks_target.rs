@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpStream, UdpSocket};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
@@ -16,6 +17,7 @@ const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
 const UDP_MAX_FRAME: usize = 65_535;
+const UDP_RX_DRAIN_BUDGET: usize = 32;
 
 pub(crate) fn spawn_direct_socks_target(
     key: StreamKey,
@@ -249,21 +251,61 @@ async fn handle_fwd_udp(
             }
             recv = socket.recv_from(&mut recv_buf) => {
                 let (n, peer) = recv.map_err(|err| format!("udp recv failed: {}", err))?;
-                let (addr, payload) = if relay.is_some() {
-                    parse_socks_udp_packet(&recv_buf[..n])?
-                } else {
-                    (socks_addr_from_socket(peer)?, &recv_buf[..n])
-                };
-                let mut frame = Vec::with_capacity(3 + addr.len() + payload.len());
-                frame.push(((payload.len() >> 8) & 0xFF) as u8);
-                frame.push((payload.len() & 0xFF) as u8);
-                frame.push((3 + addr.len()) as u8);
-                frame.extend_from_slice(&addr);
-                frame.extend_from_slice(payload);
-                send_stream_data(&data_tx, &command_tx, &send_pending, key, frame).await?;
+                forward_udp_datagram_to_stream(
+                    &data_tx,
+                    &command_tx,
+                    &send_pending,
+                    key,
+                    relay.is_some(),
+                    peer,
+                    &recv_buf[..n],
+                )?;
+
+                for _ in 1..UDP_RX_DRAIN_BUDGET {
+                    match socket.try_recv_from(&mut recv_buf) {
+                        Ok((n, peer)) => {
+                            forward_udp_datagram_to_stream(
+                                &data_tx,
+                                &command_tx,
+                                &send_pending,
+                                key,
+                                relay.is_some(),
+                                peer,
+                                &recv_buf[..n],
+                            )?;
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(err) => return Err(format!("udp recv failed: {}", err)),
+                    }
+                }
             }
         }
     }
+}
+
+fn forward_udp_datagram_to_stream(
+    data_tx: &mpsc::Sender<Vec<u8>>,
+    command_tx: &mpsc::UnboundedSender<Command>,
+    send_pending: &Arc<AtomicBool>,
+    key: StreamKey,
+    from_socks_relay: bool,
+    peer: SocketAddr,
+    packet: &[u8],
+) -> Result<(), String> {
+    let (addr, payload) = if from_socks_relay {
+        parse_socks_udp_packet(packet)?
+    } else {
+        (socks_addr_from_socket(peer)?, packet)
+    };
+    let mut frame = Vec::with_capacity(3 + addr.len() + payload.len());
+    frame.push(((payload.len() >> 8) & 0xFF) as u8);
+    frame.push((payload.len() & 0xFF) as u8);
+    frame.push((3 + addr.len()) as u8);
+    frame.extend_from_slice(&addr);
+    frame.extend_from_slice(payload);
+    try_send_udp_stream_data(data_tx, command_tx, send_pending, key, frame)?;
+    Ok(())
 }
 
 async fn read_greeting(
@@ -606,6 +648,28 @@ async fn send_stream_data(
     Ok(())
 }
 
+fn try_send_udp_stream_data(
+    data_tx: &mpsc::Sender<Vec<u8>>,
+    command_tx: &mpsc::UnboundedSender<Command>,
+    send_pending: &Arc<AtomicBool>,
+    key: StreamKey,
+    data: Vec<u8>,
+) -> Result<bool, String> {
+    match data_tx.try_send(data) {
+        Ok(()) => {
+            if !send_pending.swap(true, Ordering::SeqCst) {
+                let _ = command_tx.send(Command::StreamReadable {
+                    cnx_id: key.cnx,
+                    stream_id: key.stream_id,
+                });
+            }
+            Ok(true)
+        }
+        Err(TrySendError::Full(_)) => Ok(false),
+        Err(TrySendError::Closed(_)) => Err("stream data channel closed".to_string()),
+    }
+}
+
 #[derive(Default)]
 struct ChunkReader {
     pending: VecDeque<u8>,
@@ -665,4 +729,47 @@ struct UdpFrame {
 struct SocksUdpRelay {
     udp_addr: SocketAddr,
     _control: TcpStream,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn udp_stream_send_drops_when_output_channel_is_full() {
+        let (data_tx, mut data_rx) = mpsc::channel(1);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let send_pending = Arc::new(AtomicBool::new(false));
+        let key = StreamKey {
+            cnx: 7,
+            stream_id: 11,
+        };
+
+        assert_eq!(
+            try_send_udp_stream_data(&data_tx, &command_tx, &send_pending, key, b"first".to_vec(),),
+            Ok(true)
+        );
+        assert_eq!(
+            try_send_udp_stream_data(
+                &data_tx,
+                &command_tx,
+                &send_pending,
+                key,
+                b"dropped".to_vec(),
+            ),
+            Ok(false)
+        );
+
+        assert_eq!(data_rx.try_recv().unwrap(), b"first".to_vec());
+        assert!(data_rx.try_recv().is_err());
+        assert!(send_pending.load(Ordering::SeqCst));
+        assert!(matches!(
+            command_rx.try_recv().unwrap(),
+            Command::StreamReadable {
+                cnx_id: 7,
+                stream_id: 11
+            }
+        ));
+        assert!(command_rx.try_recv().is_err());
+    }
 }
