@@ -47,8 +47,12 @@ certificates are not verified.
 - `--max-connections`
   Caps concurrent QUIC connections and sizes internal connection tables (default: 256).
 - `--idle-timeout-seconds`
-  Closes idle QUIC connections after the given number of seconds (default: 60).
-  Set to 0 to disable idle GC.
+  Sets picoquic's QUIC transport idle timeout and closes application-idle
+  connections after the given number of seconds (default: 60). Set to 0 to
+  disable both the transport idle timeout and idle GC.
+- `--keep-alive-interval`
+  Sends server-initiated QUIC PINGs at the given millisecond interval
+  (default: 400). Set to 0 to disable server keep-alive.
 - `--reset-seed`
   Path to a 32-hex-char (16-byte) stateless reset seed. If the file does not
   exist, the server generates one and writes it with 0600 permissions. If not

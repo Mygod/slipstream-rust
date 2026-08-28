@@ -68,6 +68,55 @@ int slipstream_get_path_id_from_unique(picoquic_cnx_t *cnx, uint64_t unique_path
     return path_id;
 }
 
+static int slipstream_is_path_id_usable(picoquic_cnx_t *cnx, int path_id) {
+    if (cnx == NULL || path_id < 0 || path_id >= cnx->nb_paths) {
+        return 0;
+    }
+    picoquic_path_t* path_x = cnx->path[path_id];
+    if (path_x == NULL) {
+        return 0;
+    }
+    if (path_x->path_is_demoted || path_x->path_abandon_received || path_x->path_abandon_sent) {
+        return 0;
+    }
+    if (path_x->p_remote_cnxid == NULL || path_x->p_local_cnxid == NULL) {
+        return 0;
+    }
+    return 1;
+}
+
+int slipstream_prepare_path_id(picoquic_cnx_t *cnx, int requested_path_id) {
+    if (slipstream_is_path_id_usable(cnx, requested_path_id)) {
+        return requested_path_id;
+    }
+    if (slipstream_is_path_id_usable(cnx, 0)) {
+        return 0;
+    }
+    return -1;
+}
+
+int slipstream_promote_path_to_default(picoquic_cnx_t *cnx, uint64_t unique_path_id, uint64_t current_time) {
+    if (cnx == NULL || unique_path_id == 0) {
+        return -1;
+    }
+    int path_id = picoquic_get_path_id_from_unique(cnx, unique_path_id);
+    if (path_id == 0) {
+        return 0;
+    }
+    if (path_id < 0 || path_id >= cnx->nb_paths) {
+        return -1;
+    }
+    picoquic_path_t* path_x = cnx->path[path_id];
+    if (path_x == NULL) {
+        return -1;
+    }
+    if (path_x->path_is_demoted || path_x->path_abandon_received || path_x->path_abandon_sent) {
+        return -1;
+    }
+    picoquic_promote_path_to_default(cnx, path_id, current_time);
+    return 0;
+}
+
 uint64_t slipstream_get_max_streams_bidir_remote(picoquic_cnx_t *cnx) {
     if (cnx == NULL || cnx->remote_parameters_received == 0) {
         return 0;

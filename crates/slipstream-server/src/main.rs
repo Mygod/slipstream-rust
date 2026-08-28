@@ -43,6 +43,12 @@ struct Args {
     max_connections: u32,
     #[arg(long = "idle-timeout-seconds", default_value_t = 60)]
     idle_timeout_seconds: u64,
+    #[arg(
+        long = "keep-alive-interval",
+        default_value_t = 400,
+        help = "Send keep alive pings at this interval in milliseconds (disabled: 0)"
+    )]
+    keep_alive_interval: u64,
     #[arg(long = "debug-streams")]
     debug_streams: bool,
     #[arg(long = "debug-commands")]
@@ -146,6 +152,15 @@ fn main() {
     } else {
         args.max_connections
     };
+    let keep_alive_interval = if cli_provided(&matches, "keep_alive_interval") {
+        args.keep_alive_interval
+    } else if let Some(value) =
+        sip003::last_option_value(&sip003_env.plugin_options, "keep-alive-interval")
+    {
+        unwrap_or_exit(parse_keep_alive_interval(&value), "SIP003 env error", 2)
+    } else {
+        args.keep_alive_interval
+    };
 
     let config = ServerConfig {
         dns_listen_host,
@@ -158,6 +173,7 @@ fn main() {
         domains,
         max_connections,
         idle_timeout_seconds: args.idle_timeout_seconds,
+        keep_alive_interval_ms: keep_alive_interval,
         debug_streams: args.debug_streams,
         debug_commands: args.debug_commands,
     };
@@ -198,6 +214,13 @@ fn parse_max_connections(input: &str) -> Result<u32, String> {
         return Err("max-connections must be at least 1".to_string());
     }
     Ok(value)
+}
+
+fn parse_keep_alive_interval(input: &str) -> Result<u64, String> {
+    let trimmed = input.trim();
+    trimmed
+        .parse::<u64>()
+        .map_err(|_| format!("Invalid keep-alive-interval value: {}", trimmed))
 }
 
 fn cli_provided(matches: &clap::ArgMatches, id: &str) -> bool {

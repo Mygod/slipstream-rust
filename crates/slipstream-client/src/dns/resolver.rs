@@ -41,11 +41,19 @@ pub(crate) struct ResolverState {
     pub(crate) unique_path_id: Option<u64>,
     pub(crate) probe_attempts: u32,
     pub(crate) next_probe_at: u64,
+    pub(crate) disabled_until: u64,
+    pub(crate) last_health_check_at: u64,
+    pub(crate) last_health_send_packets: u64,
+    pub(crate) last_health_dns_responses: u64,
+    pub(crate) last_active_poll_kick_at: u64,
     pub(crate) pending_polls: usize,
     pub(crate) inflight_poll_ids: HashMap<u16, u64>,
     pub(crate) pacing_budget: Option<PacingPollBudget>,
     pub(crate) last_pacing_snapshot: Option<PacingBudgetSnapshot>,
     pub(crate) debug: DebugMetrics,
+    pub(crate) is_primary: bool,
+    pub(crate) path_loss_count: u32,
+    pub(crate) last_path_loss_at: u64,
 }
 
 impl ResolverState {
@@ -87,6 +95,11 @@ pub(crate) fn resolve_resolvers(
             unique_path_id: if is_primary { Some(0) } else { None },
             probe_attempts: 0,
             next_probe_at: 0,
+            disabled_until: 0,
+            last_health_check_at: 0,
+            last_health_send_packets: 0,
+            last_health_dns_responses: 0,
+            last_active_poll_kick_at: 0,
             pending_polls: 0,
             inflight_poll_ids: HashMap::new(),
             pacing_budget: match resolver.mode {
@@ -95,16 +108,43 @@ pub(crate) fn resolve_resolvers(
             },
             last_pacing_snapshot: None,
             debug: DebugMetrics::new(debug_poll),
+            is_primary,
+            path_loss_count: 0,
+            last_path_loss_at: 0,
         });
     }
     Ok(resolved)
 }
+
+const PATH_LOSS_WINDOW_US: u64 = 10_000_000;
+const PATH_LOSS_DISABLE_AFTER: u32 = 3;
+const PATH_LOSS_DISABLE_US: u64 = 300_000_000;
 
 pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
     warn!(
         "Path for resolver {} became unavailable; resetting state",
         resolver.addr
     );
+    let now = unsafe { slipstream_ffi::picoquic::picoquic_current_time() };
+    if !resolver.is_primary {
+        if resolver.last_path_loss_at == 0
+            || now.saturating_sub(resolver.last_path_loss_at) > PATH_LOSS_WINDOW_US
+        {
+            resolver.path_loss_count = 1;
+        } else {
+            resolver.path_loss_count = resolver.path_loss_count.saturating_add(1);
+        }
+        resolver.last_path_loss_at = now;
+        if resolver.path_loss_count >= PATH_LOSS_DISABLE_AFTER {
+            resolver.disabled_until = now.saturating_add(PATH_LOSS_DISABLE_US);
+            resolver.path_loss_count = 0;
+            warn!(
+                "Path for resolver {} is flapping; cooling down for {}ms",
+                resolver.addr,
+                PATH_LOSS_DISABLE_US / 1000
+            );
+        }
+    }
     resolver.added = false;
     resolver.path_id = -1;
     resolver.unique_path_id = None;
@@ -114,6 +154,10 @@ pub(crate) fn reset_resolver_path(resolver: &mut ResolverState) {
     resolver.last_pacing_snapshot = None;
     resolver.probe_attempts = 0;
     resolver.next_probe_at = 0;
+    resolver.last_health_check_at = 0;
+    resolver.last_health_send_packets = 0;
+    resolver.last_health_dns_responses = 0;
+    resolver.last_active_poll_kick_at = 0;
 }
 
 pub(crate) fn sockaddr_storage_to_socket_addr(

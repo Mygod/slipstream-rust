@@ -97,6 +97,7 @@ fn target_read_error_triggers_client_reset() {
             reset_seed_path: None,
             fallback_addr: None,
             idle_timeout_seconds: None,
+            keep_alive_interval_ms: None,
             envs: &[],
             rust_log: "info",
             capture_logs: true,

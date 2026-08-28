@@ -1,6 +1,6 @@
 use slipstream_dns::{
-    build_qname, decode_query_with_domains, encode_query, DecodeQueryError, QueryParams, Rcode,
-    CLASS_IN, RR_TXT,
+    build_qname, build_qname_with_nonce, decode_query_with_domains, encode_query, DecodeQueryError,
+    QueryParams, Rcode, CLASS_IN, RR_TXT,
 };
 
 #[test]
@@ -42,6 +42,27 @@ fn decode_query_with_domains_prefers_longest_suffix() {
 
     let decoded = decode_query_with_domains(&query, &["example.com", "tunnel.example.com"])
         .expect("decode query");
+    assert_eq!(decoded.payload, payload);
+}
+
+#[test]
+fn decode_query_with_domains_strips_cache_buster_label() {
+    let payload = vec![5u8, 4, 3, 2, 1];
+    let qname = build_qname_with_nonce(&payload, "example.com", 0x7abc).expect("build qname");
+    let query = encode_query(&QueryParams {
+        id: 8,
+        qname: &qname,
+        qtype: RR_TXT,
+        qclass: CLASS_IN,
+        rd: true,
+        cd: false,
+        qdcount: 1,
+        is_query: true,
+    })
+    .expect("encode query");
+
+    let decoded =
+        decode_query_with_domains(&query, &["example.com"]).expect("decode query with nonce");
     assert_eq!(decoded.payload, payload);
 }
 

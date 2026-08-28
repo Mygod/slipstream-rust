@@ -30,6 +30,15 @@ pub fn build_qname(payload: &[u8], domain: &str) -> Result<String, DnsError> {
     Ok(format!("{}.{}.", dotted, domain))
 }
 
+pub fn build_qname_with_nonce(
+    payload: &[u8],
+    domain: &str,
+    nonce: u16,
+) -> Result<String, DnsError> {
+    let domain = domain.trim_end_matches('.');
+    build_qname(payload, &format!("0{nonce:04x}.{domain}"))
+}
+
 pub fn max_payload_len_for_domain(domain: &str) -> Result<usize, DnsError> {
     let domain = domain.trim_end_matches('.');
     if domain.is_empty() {
@@ -57,6 +66,11 @@ pub fn max_payload_len_for_domain(domain: &str) -> Result<usize, DnsError> {
         max_payload -= 1;
     }
     Ok(max_payload)
+}
+
+pub fn max_payload_len_for_domain_with_nonce(domain: &str) -> Result<usize, DnsError> {
+    let domain = domain.trim_end_matches('.');
+    max_payload_len_for_domain(&format!("00000.{domain}"))
 }
 
 fn base32_len(payload_len: usize) -> usize {

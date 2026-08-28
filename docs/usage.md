@@ -20,6 +20,7 @@ Common flags:
 - --authoritative <IP:PORT> (repeatable; mark a resolver path as authoritative and use pacing-based polling)
 - --gso (currently not implemented in the Rust loop; prints a warning)
 - --keep-alive-interval <MILLISECONDS> (default: 400)
+- --quic-idle-timeout-seconds <SECONDS> (default: 120; set to 0 for no QUIC transport idle timeout)
 
 Example:
 
@@ -46,6 +47,7 @@ Notes:
 - When --congestion-control is omitted, authoritative paths default to bbr and recursive paths default to dcubic.
 - Authoritative polling derives its QPS budget from picoquic’s pacing rate (scaled by the DNS payload size and RTT proxy) and falls back to cwnd if pacing is unavailable; `--debug-poll` logs the pacing rate, target QPS, and inflight polls.
 - When QUIC has ready stream data queued, authoritative polling yields to data-bearing queries unless flow control blocks progress.
+- Keep-alive packets and the QUIC idle timeout are separate controls: `--keep-alive-interval` schedules PINGs, while `--quic-idle-timeout-seconds` controls picoquic's transport idle timer.
 - Expect higher CPU usage and detectability risk; misusing it can overload resolvers/servers.
 
 ## slipstream-server
@@ -65,9 +67,12 @@ Common flags:
 - --target-address <HOST:PORT> (default: 127.0.0.1:5201)
 - --max-connections <COUNT> (default: 256; caps concurrent QUIC connections)
 - --fallback <HOST:PORT> (optional; forward non-DNS packets to this UDP endpoint)
-- --idle-timeout-seconds <SECONDS> (default: 60; set to 0 to disable)
+- --idle-timeout-seconds <SECONDS> (default: 60; set to 0 to disable transport idle timeout and idle GC)
+- --keep-alive-interval <MILLISECONDS> (default: 400; set to 0 to disable server-initiated PINGs)
 - --reset-seed <PATH> (optional; 32 hex chars / 16 bytes; auto-created if missing)
 - When binding the default `--dns-listen-host ::`, slipstream falls back to `0.0.0.0` if IPv6 is unavailable on the host.
+- The server uses `--idle-timeout-seconds` for both picoquic's QUIC transport idle timeout and the application-level idle connection GC sweeper.
+- The server sends QUIC keep-alive PINGs using `--keep-alive-interval`; keep this lower than the negotiated idle timeout on lossy DNS paths.
 - When binding to `::`, slipstream still attempts to enable dual-stack (IPV6_V6ONLY=0); if your OS disallows it, IPv4 DNS clients require sysctl changes or binding to an IPv4 address.
 - With --fallback enabled, peers that have recently sent DNS stay DNS-only; while active they switch to fallback only after 16 consecutive non-DNS packets to avoid diverting DNS on stray traffic. DNS-only classification expires after an idle timeout without DNS traffic.
 - Fallback sessions are created per source address without a hard cap; untrusted or spoofed UDP traffic can consume file descriptors/CPU. Use network filtering or rate limiting when exposing fallback to the public Internet, or disable --fallback if this is a concern.

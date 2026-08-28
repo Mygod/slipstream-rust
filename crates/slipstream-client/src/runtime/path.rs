@@ -6,11 +6,13 @@ use crate::error::ClientError;
 use crate::streams::{ClientState, PathEvent};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_get_default_path_quality, picoquic_get_path_addr,
-    picoquic_get_path_quality, slipstream_get_path_id_from_unique, slipstream_set_path_ack_delay,
-    slipstream_set_path_mode, PICOQUIC_PACKET_LOOP_SEND_MAX,
+    picoquic_get_path_quality, slipstream_get_path_id_from_unique,
+    slipstream_promote_path_to_default, slipstream_set_path_ack_delay, slipstream_set_path_mode,
+    PICOQUIC_PACKET_LOOP_SEND_MAX,
 };
 use slipstream_ffi::ResolverMode;
 use std::net::SocketAddr;
+use tracing::warn;
 
 const AUTHORITATIVE_LOOP_MULTIPLIER: usize = 4;
 
@@ -85,6 +87,56 @@ pub(crate) fn drain_path_events(
             }
         }
     }
+}
+
+pub(crate) fn ensure_default_path_available(
+    cnx: *mut picoquic_cnx_t,
+    resolvers: &mut [ResolverState],
+    current_time: u64,
+) -> Result<(), ClientError> {
+    let Some((primary, alternates)) = resolvers.split_first_mut() else {
+        return Ok(());
+    };
+    if refresh_resolver_path(cnx, primary) {
+        return Ok(());
+    }
+    let mut candidate = None;
+    for resolver in alternates.iter_mut() {
+        if resolver.added
+            && resolver
+                .unique_path_id
+                .is_some_and(|unique_path_id| unique_path_id != 0)
+            && refresh_resolver_path(cnx, resolver)
+        {
+            candidate = Some(resolver);
+            break;
+        }
+    }
+    let Some(candidate) = candidate else {
+        return Ok(());
+    };
+    let Some(unique_path_id) = candidate.unique_path_id else {
+        return Ok(());
+    };
+    if candidate.path_id == 0 {
+        return Ok(());
+    }
+    let ret = unsafe { slipstream_promote_path_to_default(cnx, unique_path_id, current_time) };
+    if ret != 0 {
+        warn!(
+            "Primary resolver path became unavailable; failed promoting {} to default path",
+            candidate.addr
+        );
+        return Ok(());
+    }
+    warn!(
+        "Primary resolver path became unavailable; promoted {} to default path",
+        candidate.addr
+    );
+    for resolver in resolvers.iter_mut() {
+        refresh_resolver_path(cnx, resolver);
+    }
+    Ok(())
 }
 
 fn path_peer_addr(cnx: *mut picoquic_cnx_t, unique_path_id: u64) -> Option<SocketAddr> {

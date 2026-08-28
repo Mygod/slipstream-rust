@@ -105,6 +105,7 @@ pub struct ServerArgs<'a> {
     pub reset_seed_path: Option<&'a Path>,
     pub fallback_addr: Option<SocketAddr>,
     pub idle_timeout_seconds: Option<u64>,
+    pub keep_alive_interval_ms: Option<u64>,
     pub envs: &'a [(&'a str, &'a str)],
     pub rust_log: &'a str,
     pub capture_logs: bool,
@@ -197,6 +198,9 @@ pub fn spawn_server(args: ServerArgs<'_>) -> (ChildGuard, Option<LogCapture>) {
     if let Some(idle_timeout) = args.idle_timeout_seconds {
         cmd.arg("--idle-timeout-seconds")
             .arg(idle_timeout.to_string());
+    }
+    if let Some(interval) = args.keep_alive_interval_ms {
+        cmd.arg("--keep-alive-interval").arg(interval.to_string());
     }
     for (key, value) in args.envs {
         cmd.env(key, value);

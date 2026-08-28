@@ -52,8 +52,15 @@ struct Args {
     domain: Option<String>,
     #[arg(long = "cert", value_name = "PATH")]
     cert: Option<String>,
-    #[arg(long = "keep-alive-interval", short = 't', default_value_t = 400)]
+    #[arg(
+        long = "keep-alive-interval",
+        short = 't',
+        default_value_t = 400,
+        help = "Send keep alive pings at this interval in milliseconds (disabled: 0)"
+    )]
     keep_alive_interval: u16,
+    #[arg(long = "quic-idle-timeout-seconds", default_value_t = 120)]
+    quic_idle_timeout_seconds: u64,
     #[arg(long = "debug-poll")]
     debug_poll: bool,
     #[arg(long = "debug-streams")]
@@ -170,6 +177,19 @@ fn main() {
         );
         keep_alive_override.unwrap_or(args.keep_alive_interval)
     };
+    let quic_idle_timeout_seconds = if cli_provided(&matches, "quic_idle_timeout_seconds") {
+        args.quic_idle_timeout_seconds
+    } else {
+        sip003::last_option_value(&sip003_env.plugin_options, "quic-idle-timeout-seconds")
+            .map(|value| {
+                unwrap_or_exit(
+                    parse_quic_idle_timeout_seconds(&value),
+                    "SIP003 env error",
+                    2,
+                )
+            })
+            .unwrap_or(args.quic_idle_timeout_seconds)
+    };
 
     let config = ClientConfig {
         tcp_listen_host: &tcp_listen_host,
@@ -180,6 +200,7 @@ fn main() {
         domain: &domain,
         cert: cert.as_deref(),
         keep_alive_interval: keep_alive_interval as usize,
+        quic_idle_timeout_seconds,
         debug_poll: args.debug_poll,
         debug_streams: args.debug_streams,
     };
@@ -342,6 +363,13 @@ fn parse_keep_alive_interval(options: &[sip003::Sip003Option]) -> Result<Option<
         }
     }
     Ok(last)
+}
+
+fn parse_quic_idle_timeout_seconds(value: &str) -> Result<u64, String> {
+    let trimmed = value.trim();
+    trimmed
+        .parse::<u64>()
+        .map_err(|_| format!("Invalid quic-idle-timeout-seconds value: {}", trimmed))
 }
 
 #[cfg(test)]

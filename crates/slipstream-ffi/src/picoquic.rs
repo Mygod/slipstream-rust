@@ -208,6 +208,7 @@ extern "C" {
 
     pub fn picoquic_set_cookie_mode(quic: *mut picoquic_quic_t, cookie_mode: c_int);
     pub fn picoquic_set_default_priority(quic: *mut picoquic_quic_t, default_stream_priority: u8);
+    pub fn picoquic_set_default_idle_timeout(quic: *mut picoquic_quic_t, idle_timeout_ms: u64);
     pub fn picoquic_set_default_direct_receive_callback(
         quic: *mut picoquic_quic_t,
         direct_receive_fn: picoquic_stream_direct_receive_fn,
@@ -324,6 +325,12 @@ extern "C" {
     pub fn slipstream_get_path_id_from_unique(
         cnx: *mut picoquic_cnx_t,
         unique_path_id: u64,
+    ) -> c_int;
+    pub fn slipstream_prepare_path_id(cnx: *mut picoquic_cnx_t, requested_path_id: c_int) -> c_int;
+    pub fn slipstream_promote_path_to_default(
+        cnx: *mut picoquic_cnx_t,
+        unique_path_id: u64,
+        current_time: u64,
     ) -> c_int;
     pub fn slipstream_get_max_streams_bidir_remote(cnx: *mut picoquic_cnx_t) -> u64;
     pub fn slipstream_set_cc_override(alg_name: *const c_char);
