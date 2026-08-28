@@ -30,7 +30,7 @@ jobs:
       target: ${{ steps.validate.outputs.target }}
     steps:
       - name: Check out release target
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.target }}
           submodules: recursive
@@ -121,7 +121,7 @@ jobs:
             vcpkg_triplet: arm64-windows-static-md
     steps:
       - name: Check out release target
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.target }}
           submodules: recursive
