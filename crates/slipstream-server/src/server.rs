@@ -8,8 +8,8 @@ use slipstream_dns::{encode_response, Question, Rcode, ResponseParams};
 use slipstream_ffi::picoquic::{
     picoquic_cnx_t, picoquic_create, picoquic_current_time, picoquic_delete_cnx,
     picoquic_get_first_cnx, picoquic_get_next_cnx, picoquic_prepare_packet_ex, picoquic_quic_t,
-    slipstream_has_ready_stream, slipstream_is_flow_blocked, slipstream_server_cc_algorithm,
-    PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
+    picoquic_set_default_idle_timeout, slipstream_has_ready_stream, slipstream_is_flow_blocked,
+    slipstream_server_cc_algorithm, PICOQUIC_MAX_PACKET_SIZE, PICOQUIC_PACKET_LOOP_RECV_MAX,
 };
 use slipstream_ffi::{
     configure_quic_with_custom, socket_addr_to_storage, take_crypto_errors, QuicGuard,
@@ -244,6 +244,22 @@ pub async fn run_server(config: &ServerConfig) -> Result<i32, ServerError> {
             ));
         }
         configure_quic_with_custom(quic, slipstream_server_cc_algorithm, QUIC_MTU);
+        // Honour --idle-timeout-seconds at the QUIC transport layer, not just the
+        // application-level GC. picoquic's built-in transport idle timeout (~30s) is
+        // otherwise shorter than a higher configured value, so a connection idle for
+        // more than ~30s is torn down by the transport before the configured timeout,
+        // and the next client packet then hits an unknown connection ID and gets a
+        // stateless reset. Only *raise* the transport timeout above the default, never
+        // below it: the goal is to extend connection lifetime, and a sub-default
+        // transport timeout would also pre-empt the app-level GC. 0 disables it.
+        //
+        // The effective timeout is min(client, server) per RFC 9000, so a client
+        // advertising a compatible value is also required for the full window.
+        let idle_timeout_ms = match config.idle_timeout_seconds {
+            0 => 0,
+            secs => secs.saturating_mul(1000).max(30_000),
+        };
+        picoquic_set_default_idle_timeout(quic, idle_timeout_ms);
     }
 
     let udp = Arc::new(bind_udp_socket(&config.dns_listen_host, config.dns_listen_port).await?);

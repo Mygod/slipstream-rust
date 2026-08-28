@@ -229,6 +229,11 @@ extern "C" {
         quic: *mut picoquic_quic_t,
         multipath_option: c_int,
     );
+    /// Set the default transport `max_idle_timeout` (milliseconds) for new
+    /// connections. `0` disables the idle timeout. picoquic's built-in default is
+    /// 30s; without calling this the value never reflects the operator's
+    /// `--idle-timeout-seconds`.
+    pub fn picoquic_set_default_idle_timeout(quic: *mut picoquic_quic_t, idle_timeout_ms: u64);
     pub fn picoquic_set_preemptive_repeat_policy(quic: *mut picoquic_quic_t, do_repeat: c_int);
     pub fn picoquic_disable_port_blocking(
         quic: *mut picoquic_quic_t,
