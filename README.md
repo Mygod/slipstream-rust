@@ -1,5 +1,7 @@
 # Slipstream (Rust)
 
+# [Deprecation notice](https://github.com/Mygod/slipstream-rust/discussions/111)
+
 Slipstream is a high-performance DNS tunnel that carries QUIC packets over DNS queries and responses.
 This repository hosts the Rust rewrite of the [original C implementation](https://github.com/EndPositive/slipstream).
 
